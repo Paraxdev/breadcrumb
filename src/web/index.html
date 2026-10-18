@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>breadcrumb</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --panel2: #eef0f4; --text: #1d2330; --muted: #667085;
+  --border: #d9dde5; --accent: #3a63d8; --accent-text: #ffffff; --danger: #c43d3d; --warn: #b7791f;
+  --ok: #2f855a; --shadow: 0 1px 2px rgba(16,24,40,.08); --p0: #c43d3d; --p1: #d97706; --p2: #3a63d8; --p3: #667085;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151b; --panel: #1a1e26; --panel2: #232833; --text: #e6e9ef; --muted: #98a2b3;
+    --border: #2e3440; --accent: #7aa2ff; --accent-text: #0d1117; --danger: #f87171; --warn: #fbbf24;
+    --ok: #4ade80; --shadow: none; --p0: #f87171; --p1: #fbbf24; --p2: #7aa2ff; --p3: #98a2b3;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151b; --panel: #1a1e26; --panel2: #232833; --text: #e6e9ef; --muted: #98a2b3;
+  --border: #2e3440; --accent: #7aa2ff; --accent-text: #0d1117; --danger: #f87171; --warn: #fbbf24;
+  --ok: #4ade80; --shadow: none; --p0: #f87171; --p1: #fbbf24; --p2: #7aa2ff; --p3: #98a2b3;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; }
+button, input, select, textarea { font: inherit; color: inherit; }
+input, select, textarea { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; min-width: 0; }
+textarea { width: 100%; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+button { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.ghost { background: transparent; border-color: transparent; }
+header { display: flex; gap: 10px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+header h1 { font-size: 17px; margin: 0 8px 0 0; letter-spacing: .3px; }
+.tabs { display: flex; gap: 4px; }
+.tabs button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.spacer { flex: 1; }
+#idea-form { display: flex; gap: 6px; }
+#idea-form input { width: 260px; }
+main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.toolbar { display: flex; gap: 8px; align-items: center; padding: 10px 16px; flex-wrap: wrap; }
+.toolbar label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+#board { flex: 1; display: flex; gap: 12px; padding: 0 16px 16px; overflow-x: auto; align-items: flex-start; }
+.col { background: var(--panel2); border-radius: 8px; width: 270px; flex: 0 0 270px; display: flex; flex-direction: column; max-height: 100%; border: 1px solid transparent; }
+.col.over { border-color: var(--accent); }
+.col h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0; padding: 10px 12px 6px; display: flex; justify-content: space-between; }
+.col .items { padding: 4px 8px 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; min-height: 60px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; cursor: grab; box-shadow: var(--shadow); }
+.card:hover { border-color: var(--accent); }
+.card.dragging { opacity: .5; }
+.card .meta { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); margin-bottom: 3px; flex-wrap: wrap; }
+.card .title { font-weight: 550; word-break: break-word; }
+.card .foot { display: flex; gap: 8px; font-size: 12px; color: var(--muted); margin-top: 5px; flex-wrap: wrap; }
+.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.pill { border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; font-size: 11px; white-space: nowrap; }
+.prio-p0 { color: var(--p0); border-color: var(--p0); } .prio-p1 { color: var(--p1); border-color: var(--p1); }
+.prio-p2 { color: var(--p2); border-color: var(--p2); } .prio-p3 { color: var(--p3); }
+.blocked { color: var(--danger); font-weight: 600; }
+#notes-view { flex: 1; display: none; flex-direction: column; overflow: hidden; }
+#notes-list { flex: 1; overflow-y: auto; padding: 0 16px 16px; }
+.row { background: var(--panel); border: 1px solid var(--border); border-radius: 7px; padding: 8px 12px; margin-bottom: 6px; cursor: pointer; }
+.row:hover { border-color: var(--accent); }
+.row .line1 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.row .snip { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.muted { color: var(--muted); }
+#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 100%); background: var(--panel); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0,0,0,.18); display: none; flex-direction: column; z-index: 10; }
+#drawer.open { display: flex; }
+#drawer .head { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+#drawer .head h3 { margin: 0; font-size: 16px; flex: 1; word-break: break-word; }
+#drawer .content { padding: 14px 16px; overflow-y: auto; flex: 1; }
+pre.md { white-space: pre-wrap; word-break: break-word; background: var(--panel2); padding: 12px; border-radius: 7px; font-size: 13px; margin: 0; }
+.form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.form .full { grid-column: 1 / -1; }
+.form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.form label.check { flex-direction: row; align-items: center; gap: 8px; }
+.form input, .form select { width: 100%; }
+.form .actions { display: flex; gap: 8px; justify-content: flex-end; }
+.section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 16px 0 6px; }
+#toasts { position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; display: flex; flex-direction: column; gap: 6px; z-index: 20; }
+.toast { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.2); max-width: 560px; white-space: pre-wrap; }
+.toast.err { border-left-color: var(--danger); } .toast.warn { border-left-color: var(--warn); }
+.empty { color: var(--muted); padding: 24px; text-align: center; }
+@media (max-width: 700px) { #idea-form input { width: 150px; } .form { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>breadcrumb</h1>
+  <select id="project" title="Project"></select>
+  <div class="tabs">
+    <button id="tab-board" class="active">Board</button>
+    <button id="tab-notes">Notes</button>
+  </div>
+  <div class="spacer"></div>
+  <form id="idea-form">
+    <input id="idea-title" placeholder="Quick idea..." autocomplete="off">
+    <button class="primary" type="submit">Capture</button>
+  </form>
+  <button id="new-btn">New</button>
+  <button id="theme-btn" class="ghost" title="Toggle theme">&#9680;</button>
+</header>
+<main>
+  <div id="board-view" style="display:flex;flex-direction:column;flex:1;overflow:hidden">
+    <div class="toolbar">
+      <label>Kind <select id="board-kind"><option value="">all</option></select></label>
+      <label>Assignee <input id="board-assignee" placeholder="any" size="10"></label>
+      <label><input type="checkbox" id="board-closed" checked> closed columns</label>
+      <span id="board-scope" class="muted"></span>
+    </div>
+    <div id="board"></div>
+  </div>
+  <div id="notes-view">
+    <div class="toolbar">
+      <input id="q" placeholder="Search notes (use &quot;quoted phrases&quot;)" style="flex:1;min-width:200px">
+      <label>Kind <select id="notes-kind"><option value="">all</option></select></label>
+      <label>Status <select id="notes-status"><option>active</option><option>archived</option><option>all</option></select></label>
+    </div>
+    <div id="notes-list"></div>
+  </div>
+</main>
+<aside id="drawer">
+  <div class="head"><h3 id="drawer-title"></h3><span id="drawer-actions"></span><button class="ghost" id="drawer-close" title="Close">&#10005;</button></div>
+  <div class="content" id="drawer-content"></div>
+</aside>
+<div id="toasts"></div>
+<script>
+"use strict";
+const S = { projects: [], kinds: [], states: [], priorities: [], backlogKinds: [], project: "all", view: "board" };
+const $ = (id) => document.getElementById(id);
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "text") el.textContent = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) {
+    if (k === null || k === undefined || k === false) continue;
+    el.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  }
+  return el;
+}
+
+function toast(msg, kind) {
+  const t = h("div", { class: "toast " + (kind || ""), text: msg });
+  $("toasts").append(t);
+  setTimeout(() => t.remove(), kind === "err" ? 7000 : 4000);
+}
+
+async function api(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const r = await fetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+function applyTheme(t) { if (t) document.documentElement.setAttribute("data-theme", t); else document.documentElement.removeAttribute("data-theme"); }
+applyTheme(store("breadcrumb-theme"));
+$("theme-btn").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  applyTheme(next); store("breadcrumb-theme", next);
+};
+
+function kindDef(name) { return S.kinds.find((k) => k.name === name); }
+function isBacklogKind(name) { return S.backlogKinds.includes(name); }
+function projectParam() { return "project=" + encodeURIComponent(S.project); }
+
+async function init() {
+  try {
+    const [p, k] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/kinds")]);
+    S.projects = p.projects; S.kinds = k.kinds; S.states = k.states; S.priorities = k.priorities; S.backlogKinds = k.backlog_kinds;
+  } catch (e) { toast(e.message, "err"); return; }
+  const sel = $("project");
+  sel.append(h("option", { value: "all", text: "All projects" }), h("option", { value: "global", text: "Global" }));
+  for (const p of S.projects) sel.append(h("option", { value: p.slug, text: p.name && p.name !== p.slug ? p.name + " (" + p.slug + ")" : p.slug }));
+  const saved = store("breadcrumb-project");
+  if (saved && [...sel.options].some((o) => o.value === saved)) sel.value = saved;
+  S.project = sel.value;
+  for (const k of S.backlogKinds) $("board-kind").append(h("option", { value: k, text: k }));
+  for (const k of S.kinds) $("notes-kind").append(h("option", { value: k.name, text: k.name }));
+  const savedView = store("breadcrumb-view");
+  show(savedView === "notes" ? "notes" : "board");
+}
+
+$("project").onchange = (e) => { S.project = e.target.value; store("breadcrumb-project", S.project); refresh(); };
+$("tab-board").onclick = () => show("board");
+$("tab-notes").onclick = () => show("notes");
+function show(v) {
+  S.view = v; store("breadcrumb-view", v);
+  $("tab-board").classList.toggle("active", v === "board");
+  $("tab-notes").classList.toggle("active", v === "notes");
+  $("board-view").style.display = v === "board" ? "flex" : "none";
+  $("notes-view").style.display = v === "notes" ? "flex" : "none";
+  refresh();
+}
+function refresh() { if (S.view === "board") loadBoard(); else loadNotes(); }
+
+let assigneeTimer;
+$("board-kind").onchange = loadBoard;
+$("board-closed").onchange = loadBoard;
+$("board-assignee").oninput = () => { clearTimeout(assigneeTimer); assigneeTimer = setTimeout(loadBoard, 250); };
+
+async function loadBoard() {
+  const qs = [projectParam(), "include_closed=" + ($("board-closed").checked ? "1" : "0")];
+  if ($("board-kind").value) qs.push("kind=" + encodeURIComponent($("board-kind").value));
+  if ($("board-assignee").value.trim()) qs.push("assignee=" + encodeURIComponent($("board-assignee").value.trim()));
+  let data;
+  try { data = await api("GET", "/api/board?" + qs.join("&")); } catch (e) { toast(e.message, "err"); return; }
+  $("board-scope").textContent = data.scope;
+  const board = $("board");
+  board.replaceChildren();
+  for (const col of data.columns) {
+    const items = h("div", { class: "items" });
+    const colEl = h("section", { class: "col", "data-state": col.state },
+      h("h2", {}, h("span", { text: col.state }), h("span", { text: String(col.items.length) })), items);
+    colEl.addEventListener("dragover", (e) => { e.preventDefault(); colEl.classList.add("over"); });
+    colEl.addEventListener("dragleave", (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove("over"); });
+    colEl.addEventListener("drop", (e) => {
+      e.preventDefault(); colEl.classList.remove("over");
+      const id = e.dataTransfer.getData("text/plain");
+      if (id && !(S.drag && S.drag.id === id && S.drag.state === col.state)) moveTo(id, col.state);
+    });
+    for (const it of col.items) items.append(card(it));
+    board.append(colEl);
+  }
+}
+
+function card(it) {
+  const foot = [];
+  if (it.assignee) foot.push(h("span", { text: "@" + it.assignee }));
+  if (it.blocked) foot.push(h("span", { class: "blocked", text: "blocked", title: "blocked by " + it.blocked_by.join(", ") }));
+  if (it.progress) foot.push(h("span", { text: it.progress[0] + "/" + it.progress[1] + " done" }));
+  const el = h("div", { class: "card", draggable: "true" },
+    h("div", { class: "meta" },
+      h("span", { class: "mono", text: it.key }),
+      h("span", { class: "pill", text: it.kind }),
+      h("span", { class: "pill prio-" + it.priority, text: it.priority })),
+    h("div", { class: "title", text: it.title }),
+    foot.length ? h("div", { class: "foot" }, foot) : null);
+  el.addEventListener("dragstart", (e) => { S.drag = { id: it.id, state: it.state }; e.dataTransfer.setData("text/plain", it.id); e.dataTransfer.effectAllowed = "move"; el.classList.add("dragging"); });
+  el.addEventListener("dragend", () => { el.classList.remove("dragging"); S.drag = null; });
+  el.addEventListener("click", () => openNote(it.id));
+  return el;
+}
+
+async function moveTo(id, state, extra) {
+  const body = Object.assign({ state }, extra || {});
+  if (state === "rejected" && !body.resolution) {
+    const r = prompt("Why is this rejected? (resolution)");
+    if (!r) {
+      if ($("drawer").classList.contains("open") && S.openId === id) openNote(id);
+      return;
+    }
+    body.resolution = r;
+  }
+  try {
+    const res = await api("POST", "/api/note/" + encodeURIComponent(id) + "/move", body);
+    if (res.from !== res.to) toast(res.key + ": " + res.from + " -> " + res.to);
+    if (res.unmet_acceptance && res.unmet_acceptance.length && (state === "done" || state === "shipped"))
+      toast("Unmet acceptance criteria:\n- " + res.unmet_acceptance.join("\n- "), "warn");
+  } catch (e) { toast(e.message, "err"); }
+  refresh();
+  if ($("drawer").classList.contains("open") && S.openId === id) openNote(id);
+}
+
+let qTimer;
+$("q").oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(loadNotes, 200); };
+$("notes-kind").onchange = loadNotes;
+$("notes-status").onchange = loadNotes;
+
+async function loadNotes() {
+  const qs = [projectParam(), "status=" + $("notes-status").value];
+  const q = $("q").value.trim();
+  if (q) qs.push("q=" + encodeURIComponent(q));
+  if ($("notes-kind").value) qs.push("kind=" + encodeURIComponent($("notes-kind").value));
+  let data;
+  try { data = await api("GET", "/api/notes?" + qs.join("&")); } catch (e) { toast(e.message, "err"); return; }
+  const list = $("notes-list");
+  list.replaceChildren();
+  if (data.fell_back_to_or) list.append(h("div", { class: "muted", style: "margin:4px 0 8px", text: "No note matched every term, showing notes that match any term." }));
+  if (!data.notes.length) { list.append(h("div", { class: "empty", text: q ? "No matches." : "No notes in this scope yet." })); return; }
+  for (const n of data.notes) {
+    list.append(h("div", { class: "row", onclick: () => openNote(n.id) },
+      h("div", { class: "line1" },
+        h("span", { class: "mono muted", text: n.id }),
+        h("span", { class: "pill", text: n.kind }),
+        n.state ? h("span", { class: "pill", text: n.state }) : null,
+        h("strong", { text: n.title }),
+        n.pinned ? h("span", { class: "pill", text: "pinned" }) : null,
+        h("span", { class: "muted", text: (n.project || "global") + " · " + n.updated.slice(0, 10) })),
+      n.snippet ? h("div", { class: "snip", text: n.snippet }) : null,
+      n.tags.length ? h("div", { class: "snip", text: "#" + n.tags.join(" #") }) : null));
+  }
+}
+
+function openDrawer(title, actions, content) {
+  $("drawer-title").textContent = title;
+  $("drawer-actions").replaceChildren(...actions);
+  $("drawer-content").replaceChildren(...content);
+  $("drawer").classList.add("open");
+}
+function closeDrawer() { $("drawer").classList.remove("open"); S.openId = null; }
+$("drawer-close").onclick = closeDrawer;
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+
+async function openNote(id) {
+  let d;
+  try { d = await api("GET", "/api/note/" + encodeURIComponent(id)); } catch (e) { toast(e.message, "err"); return; }
+  S.openId = d.note.id;
+  const actions = [h("button", { onclick: () => editForm(d), text: "Edit" })];
+  const content = [];
+  if (d.item) {
+    const stateSel = h("select", { onchange: (e) => moveTo(d.note.id, e.target.value) }, S.states.map((s) => h("option", { value: s, text: s, selected: s === d.state })));
+    content.push(h("div", { class: "toolbar", style: "padding:0 0 10px" },
+      h("span", { class: "mono", text: d.key }), h("label", {}, "State", stateSel),
+      d.blocked_by.length ? h("span", { class: "blocked", text: "blocked by " + d.blocked_by.join(", ") }) : null));
+  }
+  if (d.children.length) {
+    content.push(h("div", { class: "section-title", text: "Children" }));
+    for (const c of d.children) content.push(h("div", { class: "row", onclick: () => openNote(c.id) },
+      h("div", { class: "line1" }, h("span", { class: "mono muted", text: c.id }), h("span", { class: "pill", text: c.kind }), h("span", { class: "pill", text: c.state }), h("span", { text: c.title }))));
+  }
+  if (d.note.links && d.note.links.length) {
+    content.push(h("div", { class: "section-title", text: "Links" }));
+    for (const l of d.note.links) content.push(h("div", { class: "row", onclick: () => openNote(l.to) }, h("span", { class: "muted", text: l.rel + " " }), h("span", { class: "mono", text: l.to })));
+  }
+  content.push(h("div", { class: "section-title", text: "Note" }), h("pre", { class: "md", text: d.markdown }));
+  openDrawer(d.note.title, actions, content);
+}
+
+function fieldInput(f, value) {
+  const name = "f:" + f.name;
+  if (f.type === "enum") {
+    return h("select", { name }, h("option", { value: "", text: "" }), f.values.map((v) => h("option", { value: v, text: v, selected: v === value })));
+  }
+  if (f.type === "bool") return h("input", { type: "checkbox", name, checked: value === true });
+  if (f.type === "list") return h("textarea", { name, rows: 3, placeholder: "one per line" }, Array.isArray(value) ? value.join("\n") : (value || ""));
+  const type = f.type === "int" || f.type === "float" ? "number" : f.type === "date" ? "text" : "text";
+  return h("input", { name, type, step: f.type === "float" ? "any" : null, value: value === undefined || value === null ? "" : String(value), placeholder: f.type === "ref" ? "note id" : f.type === "date" ? "YYYY-MM-DD" : "" });
+}
+
+function newForm(kind) { editForm(null, kind); }
+$("new-btn").onclick = () => newForm(S.view === "board" ? "feature" : "note");
+
+function editForm(d, presetKind) {
+  const note = d ? d.note : { kind: presetKind || "note", tags: [], links: [], body: "", project: S.project === "all" || S.project === "global" ? null : S.project };
+  const form = h("form", { class: "form" });
+  const kindSel = h("select", { name: "kind" }, S.kinds.map((k) => h("option", { value: k.name, text: k.name, selected: k.name === note.kind })));
+  const fieldsBox = h("div", { class: "form full", style: "grid-column:1/-1" });
+  function renderFields() {
+    fieldsBox.replaceChildren();
+    const k = kindDef(kindSel.value);
+    if (!k) return;
+    for (const f of k.fields) {
+      const input = fieldInput(f, note[f.name]);
+      const wide = f.type === "list";
+      fieldsBox.append(f.type === "bool"
+        ? h("label", { class: "check" }, input, f.name)
+        : h("label", { class: wide ? "full" : "", title: f.description || "" }, f.name + (f.required ? " *" : ""), input));
+    }
+  }
+  kindSel.onchange = renderFields;
+  const projSel = h("select", { name: "project", disabled: !!d },
+    h("option", { value: "global", text: "Global" }),
+    S.projects.map((p) => h("option", { value: p.slug, text: p.slug, selected: p.slug === note.project })));
+  const linksText = (note.links || []).map((l) => l.rel + " " + l.to).join("\n");
+  form.append(
+    h("label", { class: "full" }, "Title", h("input", { name: "title", value: note.title || "", required: true })),
+    h("label", {}, "Kind", kindSel),
+    h("label", {}, "Project", projSel),
+    fieldsBox,
+    h("label", {}, "Tags", h("input", { name: "tags", value: (note.tags || []).join(", "), placeholder: "comma separated" })),
+    h("label", { class: "check" }, h("input", { type: "checkbox", name: "pinned", checked: !!note.pinned }), "pinned"),
+    h("label", { class: "full" }, "Links (one per line: rel id, rel is relates, blocks, depends-on, implements, duplicates...)", h("textarea", { name: "links", rows: 3 }, linksText)),
+    h("label", { class: "full" }, "Body (markdown)", h("textarea", { name: "body", rows: 14 }, note.body || "")),
+    h("div", { class: "actions full" },
+      h("button", { type: "button", onclick: () => (d ? openNote(d.note.id) : closeDrawer()), text: "Cancel" }),
+      h("button", { type: "submit", class: "primary", text: d ? "Save" : "Create" })));
+  renderFields();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const k = kindDef(kindSel.value);
+    const fields = {};
+    for (const f of (k ? k.fields : [])) {
+      const el = form.elements["f:" + f.name];
+      if (!el) continue;
+      if (f.type === "bool") fields[f.name] = el.checked;
+      else if (f.type === "list") fields[f.name] = el.value.split("\n").map((s) => s.trim()).filter(Boolean);
+      else if ((f.type === "int" || f.type === "float") && el.value.trim() !== "") fields[f.name] = Number(el.value);
+      else fields[f.name] = el.value.trim();
+    }
+    if (!d) for (const key of Object.keys(fields)) if (fields[key] === "") delete fields[key];
+    const linksRaw = String(fd.get("links") || "");
+    // The id is the last word, everything before it is the rel, which may contain spaces.
+    const links = linksRaw.split("\n").map((s) => s.trim()).filter(Boolean).map((line) => {
+      const parts = line.split(/\s+/);
+      const to = parts.pop();
+      return parts.length ? { rel: parts.join(" "), to } : { rel: "relates", to };
+    });
+    const body = {
+      title: fd.get("title"), kind: kindSel.value, tags: String(fd.get("tags") || "").split(",").map((s) => s.trim()).filter(Boolean),
+      pinned: form.elements["pinned"].checked, body: fd.get("body"), fields,
+    };
+    if (!d || linksRaw.trim() !== linksText.trim()) body.links = links;
+    if (d) body.expected_version = d.version;
+    try {
+      let res;
+      if (d) res = await api("PATCH", "/api/note/" + encodeURIComponent(d.note.id), body);
+      else { body.project = projSel.value; res = await api("POST", "/api/note", body); }
+      toast((d ? "Saved " : "Created ") + res.key);
+      refresh();
+      openNote(res.note.id);
+    } catch (err) { toast(err.message, "err"); }
+  };
+  openDrawer(d ? "Edit " + d.key : "New note", [], [form]);
+}
+
+$("idea-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const title = $("idea-title").value.trim();
+  if (!title) return;
+  const project = S.project === "all" ? "global" : S.project;
+  try {
+    const res = await api("POST", "/api/note", { title, kind: "idea", project, fields: { state: "idea" } });
+    $("idea-title").value = "";
+    toast("Captured " + res.key);
+    refresh();
+  } catch (err) { toast(err.message, "err"); }
+};
+
+init();
+</script>
+</body>
+</html>
