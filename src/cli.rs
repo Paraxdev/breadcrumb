@@ -254,6 +254,49 @@ pub enum Cmd {
         #[arg(long)]
         open: bool,
     },
+    /// Entry points that Claude Code hooks call (reads the hook JSON on stdin, never fails)
+    #[command(subcommand)]
+    Hook(HookCmd),
+    /// Register breadcrumb hooks in Claude Code settings
+    #[command(subcommand)]
+    Hooks(HooksCmd),
+    /// Rebuild and reinstall breadcrumb with cargo, safe while other breadcrumb processes run
+    Upgrade {
+        /// breadcrumb source directory (default: the one this binary was built from)
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HookCmd {
+    /// Print the vault digest for the session's project as SessionStart additionalContext
+    SessionStart,
+    /// Start a background sync when the vault has unsynced changes
+    SessionEnd,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HooksCmd {
+    /// Add SessionStart (context) and SessionEnd (sync) hooks
+    Install {
+        /// Settings file (default: ~/.claude/settings.json)
+        #[arg(long, value_name = "PATH")]
+        settings: Option<PathBuf>,
+        /// Skip the SessionEnd background sync hook
+        #[arg(long)]
+        no_sync: bool,
+    },
+    /// Remove breadcrumb hooks, leaving every other setting alone
+    Uninstall {
+        #[arg(long, value_name = "PATH")]
+        settings: Option<PathBuf>,
+    },
+    /// Show which breadcrumb hooks are registered
+    Status {
+        #[arg(long, value_name = "PATH")]
+        settings: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -471,7 +514,12 @@ impl Out {
 }
 
 pub fn main_entry() -> i32 {
+    crate::upgrade::cleanup_old_exes();
     let cli = Cli::parse();
+    if let Cmd::Hook(h) = &cli.cmd {
+        run_hook(cli.vault.as_deref(), h);
+        return 0;
+    }
     let json = cli.json;
     match run(cli) {
         Ok(code) => code,
@@ -484,6 +532,42 @@ pub fn main_entry() -> i32 {
             1
         }
     }
+}
+
+/// Hooks run inside every Claude Code session, so failures stay silent and the exit code is always 0.
+fn run_hook(vault: Option<&Path>, h: &HookCmd) {
+    let Ok(root) = resolve_vault_path(vault) else { return };
+    match h {
+        HookCmd::SessionStart => {
+            let mut stdin = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin);
+            let input = crate::hooks::parse_input(&stdin);
+            if let Ok(out) = crate::hooks::session_start(&root, &input, &cwd()) {
+                println!("{out}");
+            }
+        }
+        HookCmd::SessionEnd => {
+            if let Ok(v) = Vault::open(&root)
+                && crate::hooks::needs_sync(&v)
+            {
+                let _ = crate::hooks::spawn_background_sync(&v.root);
+            }
+        }
+    }
+}
+
+fn settings_path(p: Option<PathBuf>) -> Result<PathBuf> {
+    match p {
+        Some(p) => Ok(crate::util::absolutize(&p)),
+        None => crate::hooks::default_settings_path(),
+    }
+}
+
+fn hooks_text(r: &crate::hooks::HookChange) -> String {
+    let line = |name: &str, c: &Option<String>| format!("  {name:<13} {}", c.as_deref().unwrap_or("(not installed)"));
+    format!("{}
+{}
+{}", r.settings, line("SessionStart", &r.session_start), line("SessionEnd", &r.session_end))
 }
 
 fn cwd() -> PathBuf {
@@ -776,6 +860,29 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Serve { port, open: open_browser } => {
             open()?;
             crate::serve::run(&root, port, open_browser)?;
+        }
+        Cmd::Hook(_) => {}
+        Cmd::Hooks(hc) => {
+            let explicit_vault = cli.vault.as_deref().map(crate::util::absolutize);
+            let (r, verb) = match hc {
+                HooksCmd::Install { settings, no_sync } => (crate::hooks::install(&settings_path(settings)?, explicit_vault.as_deref(), !no_sync)?, "installed"),
+                HooksCmd::Uninstall { settings } => (crate::hooks::uninstall(&settings_path(settings)?)?, "removed"),
+                HooksCmd::Status { settings } => (crate::hooks::status(&settings_path(settings)?)?, ""),
+            };
+            let head = match (verb, r.changed) {
+                ("", _) => String::new(),
+                (v, true) => format!("{v} breadcrumb hooks in "),
+                (_, false) => "no change needed in ".into(),
+            };
+            out.emit(format!("{head}{}", hooks_text(&r)), serde_json::to_value(&r)?);
+        }
+        Cmd::Upgrade { from } => {
+            let r = crate::upgrade::upgrade(from.as_deref())?;
+            out.emit(
+                format!("installed breadcrumb from {} to {}
+running MCP and serve processes keep the old version until their client restarts them", r.source, r.exe),
+                serde_json::to_value(&r)?,
+            );
         }
     }
     Ok(0)

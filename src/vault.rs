@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 pub const CONFIG_FILE: &str = "breadcrumb.toml";
 pub const LOCK_FILE: &str = ".breadcrumb.lock";
+pub const STALE_GIT_LOCK: Duration = Duration::from_secs(60);
 
 fn default_true() -> bool {
     true
@@ -148,8 +149,20 @@ impl Vault {
     /// Takes the write lock and checks that git can commit, so a failing commit never follows a written file.
     pub fn lock(&self) -> Result<LockGuard> {
         let g = self.acquire_lock()?;
+        self.clear_stale_index_lock();
         self.check_git_ready()?;
         Ok(g)
+    }
+
+    /// Only breadcrumb writes to the vault repo under this lock, so an old index.lock is left by a killed process.
+    fn clear_stale_index_lock(&self) {
+        let p = self.root.join(".git").join("index.lock");
+        let Ok(age) = fs::metadata(&p).and_then(|m| m.modified()).map(|t| t.elapsed().unwrap_or_default()) else {
+            return;
+        };
+        if age >= STALE_GIT_LOCK && fs::remove_file(&p).is_ok() {
+            eprintln!("breadcrumb: removed stale {} ({}s old, left by an interrupted git process)", path_str(&p), age.as_secs());
+        }
     }
 
     fn check_git_ready(&self) -> Result<()> {
@@ -343,6 +356,15 @@ impl Vault {
         }
         let remotes = if git::toplevel(cwd).is_some() { git::remote_urls(cwd) } else { vec![] };
         project::detect(&projects, &remotes, cwd)
+    }
+
+    /// Like detect_project but reads remotes from the git config file instead of running git.
+    pub fn detect_project_fast(&self, cwd: &Path) -> Option<String> {
+        let projects = self.load_projects();
+        if projects.is_empty() {
+            return None;
+        }
+        project::detect(&projects, &git::config_remote_urls(cwd), cwd)
     }
 
     pub fn notes_dir(&self, project: Option<&str>) -> PathBuf {

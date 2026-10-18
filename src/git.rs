@@ -123,3 +123,50 @@ pub fn current_branch(dir: &Path) -> Option<String> {
 pub fn commit_count(dir: &Path) -> usize {
     ok(dir, &["rev-list", "--count", "HEAD"]).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
+
+/// Remote URLs read straight from the repo config file around `dir`, without spawning git.
+pub fn config_remote_urls(dir: &Path) -> Vec<String> {
+    let Some(git_dir) = dir.ancestors().map(|d| d.join(".git")).find(|g| g.exists()) else {
+        return vec![];
+    };
+    let mut git_dir = git_dir;
+    if git_dir.is_file() {
+        let Ok(text) = std::fs::read_to_string(&git_dir) else { return vec![] };
+        let Some(target) = text.lines().find_map(|l| l.strip_prefix("gitdir:")) else { return vec![] };
+        let base = git_dir.parent().map(Path::to_path_buf).unwrap_or_default();
+        git_dir = base.join(target.trim());
+    }
+    if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
+        git_dir = git_dir.join(common.trim());
+    }
+    let Ok(cfg) = std::fs::read_to_string(git_dir.join("config")) else { return vec![] };
+    let mut in_remote = false;
+    let mut out = vec![];
+    for line in cfg.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            in_remote = l.starts_with("[remote ");
+        } else if in_remote
+            && let Some((k, v)) = l.split_once('=')
+            && k.trim().eq_ignore_ascii_case("url")
+        {
+            let v = v.trim().trim_matches('"');
+            if !v.is_empty() {
+                out.push(v.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Commits on HEAD that the remote tracking branch of origin does not have yet.
+pub fn ahead_of_origin(dir: &Path) -> usize {
+    let Some(branch) = current_branch(dir) else { return 0 };
+    let range = format!("origin/{branch}..HEAD");
+    match ok(dir, &["rev-list", "--count", &range]) {
+        Ok(s) => s.trim().parse().unwrap_or(0),
+        Err(_) => {
+            if origin_url(dir).is_some() { commit_count(dir) } else { 0 }
+        }
+    }
+}

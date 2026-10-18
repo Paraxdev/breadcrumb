@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const INDEX_HTML: &str = include_str!("web/index.html");
@@ -66,6 +67,7 @@ fn reason(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
+        503 => "Service Unavailable",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
         415 => "Unsupported Media Type",
@@ -474,8 +476,12 @@ fn handle_conn(app: &App, stream: TcpStream) -> Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut w = stream;
+    let mut busy = None;
     let resp = match read_request(&mut reader) {
-        Ok(Some(req)) => app.handle(&req),
+        Ok(Some(req)) => {
+            busy = Some(InFlight::enter());
+            if STOPPING.load(Ordering::SeqCst) { Response::error(503, "server is shutting down") } else { app.handle(&req) }
+        }
         Ok(None) => return Ok(()),
         Err(e) => {
             let status = if e.to_string().contains("too large") { 413 } else { 400 };
@@ -483,6 +489,7 @@ fn handle_conn(app: &App, stream: TcpStream) -> Result<()> {
         }
     };
     write_response(&mut w, &resp)?;
+    drop(busy);
     // Note: on Windows, git children spawned by concurrent requests can inherit this socket handle, so dropping
     // ours does not reliably end the connection. Shut down explicitly and drain so the peer gets a clean FIN.
     let _ = w.shutdown(std::net::Shutdown::Write);
@@ -491,6 +498,51 @@ fn handle_conn(app: &App, stream: TcpStream) -> Result<()> {
     while matches!(std::io::Read::read(&mut w, &mut sink), Ok(n) if n > 0) {}
     Ok(())
 }
+
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+struct InFlight;
+
+impl InFlight {
+    fn enter() -> InFlight {
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        InFlight
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Lets requests that are already running finish, bounded so a stuck client cannot hold the exit.
+fn drain_and_exit() -> ! {
+    STOPPING.store(true, Ordering::SeqCst);
+    let start = std::time::Instant::now();
+    while IN_FLIGHT.load(Ordering::SeqCst) > 0 && start.elapsed() < Duration::from_secs(4) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::process::exit(0)
+}
+
+#[cfg(windows)]
+fn install_ctrl_handler() {
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> i32>, add: i32) -> i32;
+    }
+    // Windows runs this on its own thread and kills the process when it returns (or after ~5 s on console close).
+    unsafe extern "system" fn on_ctrl(_event: u32) -> i32 {
+        drain_and_exit()
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(on_ctrl), 1);
+    }
+}
+
+#[cfg(not(windows))]
+fn install_ctrl_handler() {}
 
 /// Accepts connections forever, one thread per connection. Writes serialize on the vault lock.
 pub fn serve_listener(listener: TcpListener, app: Arc<App>) {
@@ -526,6 +578,7 @@ pub fn run(vault_root: &Path, port: u16, open: bool) -> Result<()> {
     if open {
         open_browser(&url);
     }
+    install_ctrl_handler();
     serve_listener(listener, Arc::new(App::new(vault_root, port)));
     Ok(())
 }

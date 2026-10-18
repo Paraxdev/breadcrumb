@@ -608,6 +608,11 @@ fn is_open_todo(n: &Note) -> bool {
 
 /// Markdown digest agents read at session start.
 pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String> {
+    context_with(v, project, limit, true)
+}
+
+/// `full` adds the kinds and usage sections.
+pub fn context_with(v: &Vault, project: Option<&str>, limit: usize, full: bool) -> Result<String> {
     use std::fmt::Write;
     let mut out = String::new();
     let proj = match project {
@@ -647,7 +652,8 @@ pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String>
         Some(slug) => Scope::Project { slug: slug.to_string(), with_global: true },
         None => Scope::Global,
     };
-    let mut notes = filter_notes(v.load_notes(), &scope, &Filter::default())?;
+    let all = v.load_notes();
+    let mut notes = filter_notes(all.clone(), &scope, &Filter::default())?;
     sort_notes(&mut notes, SortKey::Updated);
 
     let pinned: Vec<&Note> = notes.iter().filter(|n| n.pinned).collect();
@@ -680,8 +686,10 @@ pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String>
     if notes.is_empty() {
         writeln!(out, "\nNo notes yet in this scope.")?;
     }
-    let all = v.load_notes();
     out.push_str(&crate::backlog::context_section(&notes, &all));
+    if !full {
+        return Ok(out);
+    }
     writeln!(out, "\n## Kinds")?;
     for k in v.load_kinds() {
         let fields = if k.fields.is_empty() {
