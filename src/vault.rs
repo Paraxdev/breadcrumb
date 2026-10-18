@@ -295,7 +295,7 @@ impl Vault {
                     bail!("unknown kind '{name}', did you mean '{suggested}'? Kind names are lowercase");
                 }
                 bail!(
-                    "unknown kind '{name}'. Define it first with the define_kind tool or `breadcrumb kind define --name {suggested} --description ... --field name:type`, or use an existing kind: {}",
+                    "unknown kind '{name}'. Define it first with the kinds tool (define) or `breadcrumb kind define --name {suggested} --description ... --field name:type`, or use an existing kind: {}",
                     names.join(", ")
                 )
             }

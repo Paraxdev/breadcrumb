@@ -38,17 +38,13 @@ fn session_start_prints_capped_project_digest() {
 
     let input = json!({"cwd": proj.join("src"), "source": "startup", "session_id": "abc"}).to_string();
     let text = context_of(&breadcrumb(&v.root, &["hook", "session-start"], &input, d.path()));
-    assert!(text.starts_with("breadcrumb vault context for project demo-app"), "{text}");
+    assert!(text.starts_with("breadcrumb context: demo-app\n"), "{text}");
     assert!(text.chars().count() <= breadcrumb::hooks::CONTEXT_CAP);
-    assert!(text.contains("truncated"));
-    assert!(!text.contains("## Kinds"));
-
-    let input = json!({"cwd": proj, "source": "compact"}).to_string();
-    let text = context_of(&breadcrumb(&v.root, &["hook", "session-start"], &input, d.path()));
-    assert!(text.contains("compaction"));
+    assert!(text.contains("truncated") && text.contains("for more)"), "{text}");
+    assert!(!text.contains("Kinds:") && !text.contains("\n\n"));
 
     let text = context_of(&breadcrumb(&v.root, &["hook", "session-start"], "not json", &proj));
-    assert!(text.contains("project demo-app"));
+    assert!(text.starts_with("breadcrumb context: demo-app"));
 }
 
 #[test]
@@ -56,7 +52,7 @@ fn session_start_small_vault_is_not_truncated() {
     let (d, v) = common::vault();
     common::add(&v, "Prefers short replies", "feedback", None, &[]);
     let text = context_of(&breadcrumb(&v.root, &["hook", "session-start"], "", d.path()));
-    assert!(text.contains("project global"));
+    assert!(text.starts_with("breadcrumb context: global"));
     assert!(text.contains("Prefers short replies"));
     assert!(!text.contains("truncated"));
 }

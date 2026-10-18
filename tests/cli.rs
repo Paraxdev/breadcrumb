@@ -53,7 +53,7 @@ fn cli_end_to_end() {
     assert_eq!(list.as_array().unwrap().len(), 1);
     let hits = json(&v, &["search", "--all", "stdin"]);
     assert_eq!(hits["hits"][0]["id"], id.as_str());
-    assert!(ok(&v, &["context", "--global"]).contains("## Pinned"));
+    assert!(ok(&v, &["context", "--global"]).contains(&format!("Pinned:\n[{id} ")));
 
     let o = breadcrumb(&v, &["delete", &id], None);
     assert!(!o.status.success());
@@ -71,7 +71,12 @@ fn cli_end_to_end() {
     assert!(ok(&v, &["board", "--global"]).contains("in-progress (1)"));
     assert!(ok(&v, &["move", &iid, "rejected", "--resolution", "nah"]).contains("-> rejected"));
     assert!(ok(&v, &["delete", &id, "--yes"]).contains("deleted"));
-    assert!(ok(&v, &["guide"]).contains("context"));
+    let guide = ok(&v, &["guide"]);
+    assert!(guide.contains("context") && guide.chars().count() < 900);
+    let st = json(&v, &["stats"]);
+    for k in ["tools/list", "instructions", "hook", "context"] {
+        assert!(st[k]["chars"].as_u64().unwrap() > 0 && st[k]["tokens"].as_u64().unwrap() > 0, "{st}");
+    }
     assert!(ok(&v, &["mcp-config"]).starts_with("claude mcp add --scope user breadcrumb -- "));
     let w = json(&v, &["where"]);
     assert_eq!(w["exists"], true);

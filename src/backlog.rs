@@ -302,6 +302,21 @@ impl BoardItem {
         }
     }
 
+    /// `id kind priority title` plus assignee, blockers and progress, single spaced.
+    pub fn short(&self) -> String {
+        let mut s = format!("{} {} {} {}", self.id, self.kind, self.priority, crate::format::short_title(&self.title));
+        if let Some(a) = &self.assignee {
+            let _ = write!(s, " @{a}");
+        }
+        if self.blocked {
+            let _ = write!(s, " [blocked by {}]", self.blocked_by.join(", "));
+        }
+        if let Some((d, t)) = self.progress {
+            let _ = write!(s, " ({d}/{t} done)");
+        }
+        s
+    }
+
     pub fn line(&self) -> String {
         let mut s = format!("{}  {:<7} {}  {}", self.key, self.kind, self.priority, self.title);
         if let Some(a) = &self.assignee {
@@ -370,6 +385,20 @@ pub fn board_text(cols: &[Column], scope_label: &str) -> String {
         for it in &c.items {
             let _ = writeln!(s, "- {}", it.line());
         }
+    }
+    s
+}
+
+pub fn board_compact(cols: &[Column]) -> String {
+    let mut s = String::new();
+    for c in cols.iter().filter(|c| !c.items.is_empty()) {
+        let _ = writeln!(s, "{} ({}):", c.state, c.items.len());
+        for it in &c.items {
+            let _ = writeln!(s, "{}", it.short());
+        }
+    }
+    if s.is_empty() {
+        s.push_str("no backlog items, add one with kind idea, epic, feature, task or bug\n");
     }
     s
 }
@@ -697,35 +726,39 @@ pub fn deps_text(d: &Deps, title: &str) -> String {
     s
 }
 
-/// Short Backlog section for the context digest, empty when the scope has no items.
+/// Items the context digest lists in its backlog section.
+pub fn in_digest(n: &Note) -> bool {
+    is_item(n) && matches!(state(n).as_str(), "in-progress" | "queued")
+}
+
+/// Compact backlog lines for the context digest, empty when the scope has no items.
 pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
     let items: Vec<&Note> = scope_notes.iter().filter(|n| is_item(n)).collect();
     if items.is_empty() {
         return String::new();
     }
     let idx = Index::new(all);
-    let mut s = String::from("\n## Backlog\n\n");
     let counts: Vec<String> = STATES
         .iter()
         .map(|st| (st, items.iter().filter(|n| state(n) == *st).count()))
         .filter(|(_, c)| *c > 0)
         .map(|(st, c)| format!("{st} {c}"))
         .collect();
-    let _ = writeln!(s, "Counts: {}", counts.join(", "));
+    let mut s = format!("Backlog: {}\n", counts.join(", "));
     let mut wip: Vec<&Note> = items.iter().copied().filter(|n| state(n) == "in-progress").collect();
     sort_items(&mut wip);
     if !wip.is_empty() {
-        let _ = writeln!(s, "\nIn progress:");
+        s.push_str("In progress:\n");
         for n in wip {
-            let _ = writeln!(s, "- {}", BoardItem::from_note(n, &idx).line());
+            let _ = writeln!(s, "{}", BoardItem::from_note(n, &idx).short());
         }
     }
     let mut queued: Vec<&Note> = items.iter().copied().filter(|n| state(n) == "queued").collect();
     sort_items(&mut queued);
     if !queued.is_empty() {
-        let _ = writeln!(s, "\nTop queued (`next` picks the first unblocked one):");
+        s.push_str("Queued (next takes the first unblocked):\n");
         for n in queued.iter().take(5) {
-            let _ = writeln!(s, "- {}", BoardItem::from_note(n, &idx).line());
+            let _ = writeln!(s, "{}", BoardItem::from_note(n, &idx).short());
         }
     }
     s

@@ -164,8 +164,9 @@ fn tree_progress_promote_and_context() {
     backlog::queue(&v, &t1.id, QueuePos::End, None).unwrap();
     mv(&v, &f1.id, "in-progress", None);
     let ctx = ops::context(&v, Some("app"), 10).unwrap();
-    let b = &ctx[ctx.find("## Backlog").expect("backlog section")..];
-    assert!(b.contains("Counts:") && b.contains("in-progress 1") && b.contains("queued 1"));
-    assert!(b.contains("In progress:") && b.contains("F1"));
-    assert!(b.contains("Top queued") && b.contains("T1"));
+    let b = &ctx[ctx.find("Backlog: ").expect("backlog section")..];
+    assert!(b.contains("in-progress 1") && b.contains("queued 1"));
+    assert!(b.contains("In progress:\n") && b.contains(&format!("{} feature p2 F1", f1.id)));
+    assert!(b.contains("Queued (next") && b.contains("T1"));
+    assert!(!ctx.contains('#') && !ctx.contains("\n\n"), "{ctx}");
 }

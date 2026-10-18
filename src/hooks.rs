@@ -10,8 +10,8 @@ use std::process::{Command, Stdio};
 pub const START_SUFFIX: &str = "hook session-start";
 pub const END_SUFFIX: &str = "hook session-end";
 pub const START_MATCHER: &str = "startup|resume|clear|compact";
-pub const CONTEXT_CAP: usize = 6000;
-const RECENT: usize = 15;
+pub const CONTEXT_CAP: usize = 3000;
+const RECENT: usize = 10;
 
 #[derive(Debug, Default)]
 pub struct HookInput {
@@ -30,13 +30,8 @@ pub fn session_start(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Res
     let v = Vault::open(root)?;
     let cwd = input.cwd.as_deref().unwrap_or(fallback_cwd);
     let project = v.detect_project_fast(cwd);
-    let body = crate::ops::context_with(&v, project.as_deref(), RECENT, false)?;
-    let label = project.as_deref().unwrap_or("global");
-    let mut head = format!("breadcrumb vault context for project {label} (call search/get for details, save durable facts with add):\n");
-    if input.source.as_deref() == Some("compact") {
-        head.push_str("(re-injected after context compaction)\n");
-    }
-    let text = cap(&format!("{head}\n{}", body.trim()), CONTEXT_CAP);
+    let body = crate::ops::context_with(&v, project.as_deref(), crate::ops::ContextOpts { recent: RECENT, kinds: false })?;
+    let text = cap(body.trim_end(), CONTEXT_CAP);
     Ok(serde_json::to_string(&json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))?)
 }
 
@@ -45,7 +40,7 @@ pub fn cap(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    const HINT: &str = "\n\n[truncated, call the context tool for the full digest or search for specific notes]";
+    const HINT: &str = "\n[truncated, use search or get for more]";
     let budget = max.saturating_sub(HINT.chars().count());
     let mut out = String::new();
     for line in text.lines() {

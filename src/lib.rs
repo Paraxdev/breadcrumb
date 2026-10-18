@@ -17,6 +17,7 @@ pub mod ops;
 pub mod project;
 pub mod search;
 pub mod serve;
+pub mod stats;
 pub mod upgrade;
 pub mod util;
 pub mod vault;

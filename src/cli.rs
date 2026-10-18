@@ -136,7 +136,7 @@ pub enum Cmd {
         #[command(flatten)]
         filter: FilterArgs,
     },
-    /// Markdown digest for agents to read at session start
+    /// Compact digest for agents to read at session start
     Context {
         #[arg(long, short = 'p')]
         project: Option<String>,
@@ -176,6 +176,8 @@ pub enum Cmd {
     Doctor,
     /// Print the agent guide (AGENTS.md)
     Guide,
+    /// Size in chars and approximate tokens of what breadcrumb injects into an agent's context
+    Stats,
     /// Capture an idea quickly
     Idea {
         title: String,
@@ -796,6 +798,10 @@ pub fn run(cli: Cli) -> Result<i32> {
             let errors = problems.iter().filter(|p| p.severity == "error").count();
             out.emit(crate::doctor::text(&problems, n), json!({"notes": n, "errors": errors, "problems": problems}));
             return Ok(if errors > 0 { 1 } else { 0 });
+        }
+        Cmd::Stats => {
+            let st = crate::stats::collect(&open()?.root, &cwd)?;
+            out.emit(crate::stats::text(&st), crate::stats::json(&st));
         }
         Cmd::Guide => out.emit(crate::guide::AGENTS_MD, json!({"guide": crate::guide::AGENTS_MD})),
         Cmd::Idea { title, body, project, global, tags } => {

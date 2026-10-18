@@ -47,7 +47,7 @@ fn defaults_types_and_undeclared_fields() {
 fn unknown_kind_tells_agent_how_to_define_it() {
     let (_d, v) = common::vault();
     let err = try_add(&v, "meeting", &[]).unwrap_err().to_string();
-    assert!(err.contains("define_kind") && err.contains("breadcrumb kind define"), "{err}");
+    assert!(err.contains("kinds tool") && err.contains("breadcrumb kind define"), "{err}");
 }
 
 #[test]

@@ -92,7 +92,7 @@ pub fn target_project(v: &Vault, project: Option<&str>, global: bool, cwd: &Path
 fn unknown_project_error(v: &Vault, slug: &str) -> anyhow::Error {
     let known: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
     anyhow::anyhow!(
-        "unknown project '{slug}', known projects: {}. Create it first with project_link (or `breadcrumb project link {slug}` in its directory), or use an existing slug",
+        "unknown project '{slug}', known projects: {}. Create it first with the project tool, action link (or `breadcrumb project link {slug}` in its directory), or use an existing slug",
         if known.is_empty() { "(none)".into() } else { known.join(", ") }
     )
 }
@@ -606,13 +606,37 @@ fn is_open_todo(n: &Note) -> bool {
     n.kind == "todo" && !matches!(n.field("done"), Some(Value::Bool(true)))
 }
 
-/// Markdown digest agents read at session start.
-pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String> {
-    context_with(v, project, limit, true)
+#[derive(Clone, Copy, Debug)]
+pub struct ContextOpts {
+    pub recent: usize,
+    pub kinds: bool,
 }
 
-/// `full` adds the kinds and usage sections.
-pub fn context_with(v: &Vault, project: Option<&str>, limit: usize, full: bool) -> Result<String> {
+impl Default for ContextOpts {
+    fn default() -> Self {
+        ContextOpts { recent: 15, kinds: false }
+    }
+}
+
+pub const PINNED_BODY_MAX: usize = 600;
+
+/// Compact digest agents read at session start.
+pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String> {
+    context_with(v, project, ContextOpts { recent: limit, kinds: false })
+}
+
+fn pinned_body(n: &Note) -> String {
+    let body: Vec<&str> = n.body.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let body = body.join("\n");
+    if body.chars().count() <= PINNED_BODY_MAX {
+        return body;
+    }
+    let cut: String = body.chars().take(PINNED_BODY_MAX).collect();
+    format!("{}... (get {} for more)", cut.trim_end(), n.id)
+}
+
+pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Result<String> {
+    use crate::format::{row, short_title};
     use std::fmt::Write;
     let mut out = String::new();
     let proj = match project {
@@ -621,23 +645,18 @@ pub fn context_with(v: &Vault, project: Option<&str>, limit: usize, full: bool) 
     };
     match (&proj, project) {
         (Some(p), _) => {
-            writeln!(out, "# breadcrumb context: {} ({})", p.name, p.slug)?;
+            write!(out, "breadcrumb context: {}", p.slug)?;
             if !p.description.trim().is_empty() {
-                writeln!(out, "\n{}", p.description.trim())?;
+                write!(out, ", {}", crate::util::one_line(&p.description))?;
             }
-            if !p.paths.is_empty() {
-                writeln!(out, "\nPaths: {}", p.paths.join(", "))?;
-            }
-            if !p.remotes.is_empty() {
-                writeln!(out, "Remotes: {}", p.remotes.join(", "))?;
-            }
+            out.push('\n');
         }
-        (None, Some(slug)) => writeln!(out, "# breadcrumb context: {slug} (project not registered yet, notes added here will create it)")?,
+        (None, Some(slug)) => writeln!(out, "breadcrumb context: {slug} (not registered yet)")?,
         (None, None) => {
-            writeln!(out, "# breadcrumb context: global (no project detected for this directory)")?;
+            writeln!(out, "breadcrumb context: global (no project for this directory)")?;
             let slugs: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
             if !slugs.is_empty() {
-                writeln!(out, "\nKnown projects: {}. Run `breadcrumb project link <slug>` (or the project_link tool) to bind this directory to one.", slugs.join(", "))?;
+                writeln!(out, "Known projects: {}, bind this directory with the project tool", slugs.join(", "))?;
             }
         }
     }
@@ -645,7 +664,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, limit: usize, full: bool) 
         let wfs = crate::workflow::list(v, &Scope::Project { slug: slug.to_string(), with_global: false });
         if !wfs.is_empty() {
             let names: Vec<String> = wfs.iter().map(|w| w.summary()).collect();
-            writeln!(out, "\nWorkflows: {} (restore into .claude/workflows with `breadcrumb workflow install`)", names.join(", "))?;
+            writeln!(out, "Workflows: {}", names.join(", "))?;
         }
     }
     let scope = match project {
@@ -655,54 +674,47 @@ pub fn context_with(v: &Vault, project: Option<&str>, limit: usize, full: bool) 
     let all = v.load_notes();
     let mut notes = filter_notes(all.clone(), &scope, &Filter::default())?;
     sort_notes(&mut notes, SortKey::Updated);
-
+    if notes.is_empty() {
+        writeln!(out, "No notes yet.")?;
+    }
     let pinned: Vec<&Note> = notes.iter().filter(|n| n.pinned).collect();
     if !pinned.is_empty() {
-        writeln!(out, "\n## Pinned")?;
+        writeln!(out, "Pinned:")?;
         for n in &pinned {
-            writeln!(out, "\n### {} (`{}`, {}, {})", n.title, n.id, n.kind, n.scope_label())?;
-            if !n.body.trim().is_empty() {
-                writeln!(out, "\n{}", n.body.trim())?;
+            let scope = if n.project.as_deref() != project { format!(" ({})", n.scope_label()) } else { String::new() };
+            writeln!(out, "[{} {}] {}{scope}", n.id, n.kind, short_title(&n.title))?;
+            let body = pinned_body(n);
+            if !body.is_empty() {
+                writeln!(out, "{body}")?;
             }
         }
     }
     let todos: Vec<&Note> = notes.iter().filter(|n| !n.pinned && is_open_todo(n)).collect();
     if !todos.is_empty() {
-        writeln!(out, "\n## Open todos")?;
+        writeln!(out, "Todos:")?;
         for n in &todos {
-            let prio = n.field("priority").map(yaml_display).map(|p| format!(" [{p}]")).unwrap_or_default();
-            writeln!(out, "- `{}` {}{} ({})", n.id, n.title, prio, n.scope_label())?;
+            let prio = n.field("priority").map(yaml_display).map(|p| format!(" {p}")).unwrap_or_default();
+            let scope = if n.project.as_deref() != project { format!(" ({})", n.scope_label()) } else { String::new() };
+            writeln!(out, "{} {}{prio}{scope}", n.id, short_title(&n.title))?;
         }
-    }
-    let recent: Vec<&Note> = notes.iter().filter(|n| !n.pinned && !is_open_todo(n)).take(limit).collect();
-    if !recent.is_empty() {
-        let total = notes.iter().filter(|n| !n.pinned && !is_open_todo(n)).count();
-        writeln!(out, "\n## Recent notes ({} of {})", recent.len(), total)?;
-        for n in &recent {
-            let scope = if n.project.is_none() && project.is_some() { " (global)" } else { "" };
-            writeln!(out, "- `{}` {}: {}{} ({})", n.id, n.kind, n.title, scope, crate::util::fmt_date(&n.updated))?;
-        }
-    }
-    if notes.is_empty() {
-        writeln!(out, "\nNo notes yet in this scope.")?;
     }
     out.push_str(&crate::backlog::context_section(&notes, &all));
-    if !full {
-        return Ok(out);
-    }
-    writeln!(out, "\n## Kinds")?;
-    for k in v.load_kinds() {
-        let fields = if k.fields.is_empty() {
-            String::new()
+    let rest: Vec<&Note> = notes.iter().filter(|n| !n.pinned && !is_open_todo(n) && !crate::backlog::in_digest(n)).collect();
+    let recent: Vec<&&Note> = rest.iter().take(opts.recent).collect();
+    if !recent.is_empty() {
+        if rest.len() > recent.len() {
+            writeln!(out, "Recent ({} of {}):", recent.len(), rest.len())?;
         } else {
-            format!(" (fields: {})", k.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "))
-        };
-        writeln!(out, "- {}: {}{}", k.name, k.description, fields)?;
+            writeln!(out, "Recent:")?;
+        }
+        for n in recent {
+            writeln!(out, "{}", row(n, project, false))?;
+        }
     }
-    writeln!(out, "\n## Usage")?;
-    writeln!(out, "- `get <id>` for full notes, `search <query>` before adding to avoid duplicates.")?;
-    writeln!(out, "- Prefer `update`/`append` over near-duplicate notes, one fact per note, never store secrets.")?;
-    writeln!(out, "- New kinds or fields: `define_kind`. End of session: add a `handoff` note.")?;
+    if opts.kinds {
+        writeln!(out, "Kinds:")?;
+        out.push_str(&crate::format::kinds_compact(&v.load_kinds()));
+    }
     Ok(out)
 }
 

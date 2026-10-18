@@ -327,8 +327,10 @@ fn mcp_duplicate_hint_needs_every_title_term_and_lists_exact_titles_first() {
     assert!(!text(&out[1]).contains("possibly related"), "{}", text(&out[1]));
     let first_dup = text(&out[2]).split_whitespace().nth(1).unwrap().to_string();
     let last = text(&out[8]);
-    let first_hint = last.lines().nth(2).unwrap_or_default();
-    assert!(first_hint.contains(&first_dup) && first_hint.contains("conc 1 1"), "{last}");
+    let hint = last.lines().nth(1).unwrap_or_default();
+    let first_hint = hint.split_once(": ").map(|x| x.1).unwrap_or_default();
+    assert!(first_hint.starts_with(&format!("{first_dup} \"conc 1 1\"")), "{last}");
+    assert!(hint.matches('"').count() <= 6, "at most 3 related notes: {last}");
 }
 
 #[test]
@@ -341,10 +343,10 @@ fn mcp_list_and_search_say_when_results_are_cut() {
     let mut input = call(1, "list", json!({"limit": 2}));
     input.extend(call(2, "search", json!({"query": "concurrency", "limit": 2})));
     let out = mcp_run(&srv, input);
-    assert!(text(&out[0]).contains("showing 2 of 3"), "{}", text(&out[0]));
-    assert!(text(&out[1]).contains("showing 2 of 3"), "{}", text(&out[1]));
+    assert!(text(&out[0]).ends_with("\n1 more, narrow with filters\n"), "{}", text(&out[0]));
+    assert!(text(&out[1]).ends_with("\n1 more, refine the query or narrow with filters\n"), "{}", text(&out[1]));
     let ctx = breadcrumb::mcp::tool_defs().into_iter().find(|t| t["name"] == "context").unwrap();
-    assert!(ctx["inputSchema"]["properties"].get("global").is_some());
+    assert!(ctx["inputSchema"]["properties"].get("project").is_some());
 }
 
 #[test]
