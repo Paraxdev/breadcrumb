@@ -90,7 +90,7 @@ pub fn normalize_path(p: &str) -> String {
     if cfg!(windows) { s.to_lowercase() } else { s }
 }
 
-fn path_has_prefix(path: &str, prefix: &str) -> bool {
+pub fn path_has_prefix(path: &str, prefix: &str) -> bool {
     if prefix.is_empty() {
         return false;
     }

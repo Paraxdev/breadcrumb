@@ -6,6 +6,7 @@ use crate::kind::{self, KindDef};
 use crate::ops::{self, AddReq, Filter, Scope, ScopeSel, SortKey, StatusFilter, UpdateReq};
 use crate::util::{path_str, read_body_arg};
 use crate::vault::{Vault, resolve_vault_path};
+use crate::workflow;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value as Json, json};
@@ -243,6 +244,9 @@ pub enum Cmd {
         #[arg(long)]
         by: Option<String>,
     },
+    /// Back up and restore Claude Code workflow scripts (.claude/workflows)
+    #[command(subcommand)]
+    Workflow(WorkflowCmd),
     /// Local web UI on 127.0.0.1
     Serve {
         #[arg(long, default_value_t = 7878)]
@@ -275,6 +279,45 @@ pub enum ProjectCmd {
         /// Directory to bind (default: current directory)
         #[arg(long)]
         path: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkflowCmd {
+    /// Copy scripts into the vault and record a workflow note for each
+    Save {
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+    },
+    /// Copy the project's stored workflows into <DIR>/.claude/workflows
+    Install {
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Project directory (default: the project containing the cwd, else its first recorded path)
+        #[arg(long, value_name = "DIR")]
+        to: Option<PathBuf>,
+        /// Overwrite local copies that differ from the vault
+        #[arg(long)]
+        force: bool,
+    },
+    /// Compare stored workflows with the local .claude/workflows
+    Status {
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        to: Option<PathBuf>,
+    },
+    /// Stored workflows of the current project and global
+    List {
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Every project
+        #[arg(long, conflicts_with = "project")]
+        all: bool,
     },
 }
 
@@ -729,6 +772,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let n = backlog::promote(&open()?, &id, &to, by.as_deref())?;
             out.emit(format!("promoted {}", backlog::item_summary(&n)), n.to_json());
         }
+        Cmd::Workflow(wc) => return workflow_cmd(&out, &open()?, wc, &cwd),
         Cmd::Serve { port, open: open_browser } => {
             open()?;
             crate::serve::run(&root, port, open_browser)?;
@@ -781,6 +825,36 @@ fn project_cmd(out: &Out, v: &Vault, pc: ProjectCmd, cwd: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn workflow_cmd(out: &Out, v: &Vault, wc: WorkflowCmd, cwd: &Path) -> Result<i32> {
+    match wc {
+        WorkflowCmd::Save { files, project, global } => {
+            let saved = workflow::save(v, &files, project.as_deref(), global, cwd)?;
+            out.emit(workflow::save_text(&saved), json!(saved));
+        }
+        WorkflowCmd::Install { project, to, force } => {
+            let slug = workflow::resolve_project(v, project.as_deref(), cwd)?;
+            let dir = workflow::target_dir(v, &slug, to.as_deref(), cwd)?;
+            let r = workflow::install(v, &slug, &dir, force)?;
+            out.emit(workflow::install_text(&r), json!({"project": slug, "report": r}));
+            if !r.differ.is_empty() {
+                return Ok(1);
+            }
+        }
+        WorkflowCmd::Status { project, to } => {
+            let slug = workflow::resolve_project(v, project.as_deref(), cwd)?;
+            let dir = workflow::target_dir(v, &slug, to.as_deref(), cwd)?;
+            let st = workflow::status(v, &slug, &dir)?;
+            out.emit(workflow::status_text(&dir, &st), json!({"project": slug, "dir": path_str(&dir), "workflows": st}));
+        }
+        WorkflowCmd::List { project, all } => {
+            let sc = ops::resolve_scope(v, &ScopeSel { project, global: false, all }, cwd)?;
+            let ws = workflow::list(v, &sc);
+            out.emit(workflow::list_text(&ws, &sc.label()), json!({"scope": sc.label(), "workflows": ws}));
+        }
+    }
+    Ok(0)
 }
 
 fn kind_cmd(out: &Out, v: &Vault, kc: KindCmd) -> Result<()> {

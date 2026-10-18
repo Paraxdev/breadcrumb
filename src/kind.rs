@@ -482,7 +482,21 @@ pub fn seed_kinds() -> Vec<KindDef> {
     let chat = KindDef::new("chat-summary", "Summary of a chat or session worth keeping");
     let feedback = KindDef::new("feedback", "User preferences and corrections about how agents should work");
     let user = KindDef::new("user", "Facts about the user: role, environment, preferences");
-    let mut all = vec![note, decision, gotcha, todo, handoff, reference, plan, chat, feedback, user];
+    let str_field = |name: &str, desc: &str| FieldDef {
+        name: name.into(),
+        ty: FieldType::String,
+        required: false,
+        description: Some(desc.into()),
+        default: None,
+        values: vec![],
+    };
+    let mut workflow = KindDef::new("workflow", "A Claude Code workflow script stored in the vault, restore it with `breadcrumb workflow install`");
+    workflow.fields = vec![
+        str_field("script", "vault relative path of the .js script"),
+        str_field("workflow_name", "file name without .js under .claude/workflows"),
+        str_field("when_to_use", "when an agent should run it"),
+    ];
+    let mut all = vec![note, decision, gotcha, todo, handoff, reference, plan, chat, feedback, user, workflow];
     all.extend(crate::backlog::seed_kinds());
     all
 }

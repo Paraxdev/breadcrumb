@@ -58,7 +58,7 @@ fn handshake_list_add_search() {
 
     let tools = out[1]["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for n in ["context", "search", "list", "get", "add", "update", "append", "link", "archive", "delete", "projects", "project_link", "kinds", "define_kind", "sync", "doctor", "board", "next", "move", "queue", "capture_idea", "tree", "deps"] {
+    for n in ["context", "search", "list", "get", "add", "update", "append", "link", "archive", "delete", "projects", "project_link", "kinds", "define_kind", "sync", "doctor", "board", "next", "move", "queue", "capture_idea", "tree", "deps", "workflow_list", "workflow_save", "workflow_install", "workflow_status"] {
         assert!(names.contains(&n), "missing tool {n}");
     }
     for t in tools {

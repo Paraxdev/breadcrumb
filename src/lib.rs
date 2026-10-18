@@ -18,3 +18,4 @@ pub mod search;
 pub mod serve;
 pub mod util;
 pub mod vault;
+pub mod workflow;

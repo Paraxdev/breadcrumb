@@ -636,6 +636,13 @@ pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String>
             }
         }
     }
+    if let Some(slug) = project {
+        let wfs = crate::workflow::list(v, &Scope::Project { slug: slug.to_string(), with_global: false });
+        if !wfs.is_empty() {
+            let names: Vec<String> = wfs.iter().map(|w| w.summary()).collect();
+            writeln!(out, "\nWorkflows: {} (restore into .claude/workflows with `breadcrumb workflow install`)", names.join(", "))?;
+        }
+    }
     let scope = match project {
         Some(slug) => Scope::Project { slug: slug.to_string(), with_global: true },
         None => Scope::Global,

@@ -36,6 +36,7 @@ Use the `breadcrumb` CLI or the breadcrumb MCP tools, do not hand-edit files unl
 - Notes belong to the project detected from the working directory (git remote or path),
   or to `global` when none matches. Bind a directory with `breadcrumb project link <slug>`.
 - Use `--global` for knowledge that applies everywhere (user preferences, tools).
+- Store workflow scripts with `workflow save` so they are backed up, `workflow install` restores them.
 
 ## Rules
 

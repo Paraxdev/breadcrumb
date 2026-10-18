@@ -334,6 +334,29 @@ impl Server {
                 let title = v.get(&d.id)?.title;
                 Ok(backlog::deps_text(&d, &title))
             }
+            "workflow_list" => {
+                let sc = self.scope(&v, a)?;
+                Ok(crate::workflow::list_text(&crate::workflow::list(&v, &sc), &sc.label()))
+            }
+            "workflow_save" => {
+                let paths: Vec<PathBuf> = strs(a, "paths").into_iter().map(PathBuf::from).collect();
+                let p = s(a, "project");
+                let global = b(a, "global") || p.as_deref() == Some("global");
+                let saved = crate::workflow::save(&v, &paths, p.as_deref().filter(|p| *p != "global"), global, &self.cwd_of(a))?;
+                Ok(crate::workflow::save_text(&saved))
+            }
+            "workflow_install" => {
+                let cwd = self.cwd_of(a);
+                let slug = crate::workflow::resolve_project(&v, s(a, "project").as_deref(), &cwd)?;
+                let dir = crate::workflow::target_dir(&v, &slug, s(a, "to").map(PathBuf::from).as_deref(), &cwd)?;
+                Ok(crate::workflow::install_text(&crate::workflow::install(&v, &slug, &dir, b(a, "force"))?))
+            }
+            "workflow_status" => {
+                let cwd = self.cwd_of(a);
+                let slug = crate::workflow::resolve_project(&v, s(a, "project").as_deref(), &cwd)?;
+                let dir = crate::workflow::target_dir(&v, &slug, s(a, "to").map(PathBuf::from).as_deref(), &cwd)?;
+                Ok(crate::workflow::status_text(&dir, &crate::workflow::status(&v, &slug, &dir)?))
+            }
             other => bail!("unknown tool '{other}'"),
         }
     }
@@ -635,5 +658,28 @@ pub fn tool_defs() -> Vec<Value> {
         }), &["title"])),
         tool("tree", "Item tree", "Epic, feature and task hierarchy under an item, with states.", obj(id.clone(), &["id"])),
         tool("deps", "Item dependencies", "What an item blocks and what blocks it, transitively.", obj(id, &["id"])),
+        tool("workflow_list", "List workflows", "Claude Code workflow scripts stored in the vault, for the current project plus global by default.", obj(json!({
+            "project": {"type": "string", "description": "project slug or 'global', default detected from cwd"},
+            "global": {"type": "boolean", "description": "only global workflows"},
+            "all": {"type": "boolean", "description": "every project"},
+            "cwd": {"type": "string"},
+        }), &[])),
+        tool("workflow_save", "Save workflows", "Back up .claude/workflows/<name>.js scripts into the vault and record a workflow note for each. Unchanged scripts are not committed again.", obj(json!({
+            "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "workflow .js files, relative paths resolve against cwd"},
+            "project": {"type": "string", "description": "existing project slug or 'global', default detected from the file location or cwd"},
+            "global": {"type": "boolean"},
+            "cwd": {"type": "string"},
+        }), &["paths"])),
+        tool("workflow_install", "Install workflows", "Copy the project's stored workflows into <to>/.claude/workflows. Local copies that differ are kept unless force is true.", obj(json!({
+            "project": {"type": "string", "description": "project slug, default detected from cwd"},
+            "to": {"type": "string", "description": "project directory, default the project containing cwd, else its first recorded path"},
+            "force": {"type": "boolean", "description": "overwrite local copies that differ"},
+            "cwd": {"type": "string"},
+        }), &[])),
+        tool("workflow_status", "Workflow status", "Per workflow: same, local newer, vault newer, missing locally or only local.", obj(json!({
+            "project": {"type": "string", "description": "project slug, default detected from cwd"},
+            "to": {"type": "string", "description": "project directory, default as for workflow_install"},
+            "cwd": {"type": "string"},
+        }), &[])),
     ]
 }
