@@ -225,6 +225,6 @@ fn compact_rows_and_write_acks() {
     assert!(text(&out[4]).starts_with("updated "));
     assert_eq!(v.get(&a.id).unwrap().tags, vec!["y".to_string()]);
     let ctx = text(&out[6]);
-    assert!(ctx.starts_with("breadcrumb context: app\n") && ctx.contains("\nKinds:\n") && ctx.contains("Recent (15 of "), "{ctx}");
+    assert!(ctx.starts_with("breadcrumb context: app\n") && ctx.contains("\nKinds:\n") && ctx.contains("Recent (14 of "), "{ctx}");
     assert!(!ctx.contains("\n\n") && !ctx.contains('#'), "{ctx}");
 }

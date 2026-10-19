@@ -181,7 +181,14 @@ pub enum Cmd {
     /// Print the command that registers the MCP server with Claude Code
     McpConfig,
     /// Validate every note and report problems
-    Doctor,
+    Doctor {
+        /// Propose fixes for stale file paths: rewrite moved ones, drop or mark the rest (dry run without --yes)
+        #[arg(long)]
+        fix: bool,
+        /// Apply the --fix changes in one commit
+        #[arg(long, requires = "fix")]
+        yes: bool,
+    },
     /// Print the agent guide (AGENTS.md)
     Guide,
     /// Size in chars and approximate tokens of what breadcrumb injects into an agent's context
@@ -884,7 +891,13 @@ pub fn run(cli: Cli) -> Result<i32> {
             let cmd = format!("claude mcp add --scope user breadcrumb -- {quoted} mcp");
             out.emit(&cmd, json!({"command": cmd, "exe": exe}));
         }
-        Cmd::Doctor => {
+        Cmd::Doctor { fix: true, yes } => {
+            let v = open()?;
+            let changes = crate::fix::plan(&v);
+            let applied = if yes { Some(crate::fix::apply(&v, &changes)?) } else { None };
+            out.emit(crate::fix::text(&changes, applied), json!({"applied": applied, "changes": changes}));
+        }
+        Cmd::Doctor { .. } => {
             let v = open()?;
             let problems = crate::doctor::check(&v);
             let n = v.note_files().len();

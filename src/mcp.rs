@@ -375,6 +375,11 @@ impl Server {
                 let r = crate::export::sync(&v, s(a, "message").as_deref())?;
                 Ok(format!("{}{}", if r.committed { "committed pending changes\n" } else { "" }, r.message))
             }
+            "doctor" if b(a, "fix") => {
+                let changes = crate::fix::plan(&v);
+                let applied = if b(a, "apply") { Some(crate::fix::apply(&v, &changes)?) } else { None };
+                Ok(crate::fix::text(&changes, applied).replace("--yes", "apply: true"))
+            }
             "doctor" => {
                 let problems = crate::doctor::check(&v);
                 Ok(crate::doctor::text(&problems, v.note_files().len()))
@@ -566,13 +571,13 @@ pub fn tool_defs() -> Vec<Value> {
     let paths = || json!({"type": "array", "items": {"type": "string"}, "description": "file globs, src/db/**"});
     vec![
         tool("context", "Reload the session start digest.", obj(with(target(), json!({"kinds": bl()})), &[])),
-        tool("search", "Ranked full-text search, project plus global.", obj(with(with(scope(), filters()), json!({"query": st()})), &["query"])),
+        tool("search", "Full-text search, project plus global.", obj(with(with(scope(), filters()), json!({"query": st()})), &["query"])),
         tool("list", "List notes, newest first.", obj(with(with(scope(), filters()), json!({
             "status": {"type": "string", "enum": ["active", "archived", "all"]},
             "where": {"type": ["object", "array"], "description": "{field: value} or k=v, ref=commit:sha"},
             "sort": {"type": "string", "enum": ["updated", "created", "title"]},
         })), &[])),
-        tool("get", "Read a note, full includes default keys.", obj(with(id(), json!({"full": bl()})), &["id"])),
+        tool("get", "Read a note, full adds default keys.", obj(with(id(), json!({"full": bl()})), &["id"])),
         tool("add", "Save one durable fact, decision, gotcha, preference, handoff or idea.", obj(with(target(), json!({
             "title": st(),
             "kind": {"type": "string", "description": "default note"},
@@ -604,7 +609,7 @@ pub fn tool_defs() -> Vec<Value> {
             "rel": {"type": "string", "description": "relates (default), blocks, depends-on, supersedes"},
             "remove": bl(),
         }), &["from", "to"])),
-        tool("delete", "Delete a note, prefer archiving with update.", obj(with(id(), json!({"confirm": bl()})), &["id", "confirm"])),
+        tool("delete", "Delete a note, prefer archiving.", obj(with(id(), json!({"confirm": bl()})), &["id", "confirm"])),
         tool("move", "Change a backlog item's state.", obj(with(id(), json!({
             "state": {"type": "string", "enum": backlog::STATES},
             "position": {"type": "string", "description": "queued: top or id to follow"},
@@ -615,7 +620,7 @@ pub fn tool_defs() -> Vec<Value> {
             "by": st(),
         })), &["id", "state"])),
         tool("next", "Top unblocked queued item, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": st()})), &[])),
-        tool("backlog", "Backlog board, or the tree or deps of one item.", obj(with(json!({"project": st()}), json!({
+        tool("backlog", "Board, or tree or deps of one item.", obj(with(json!({"project": st()}), json!({
             "view": {"type": "string", "enum": ["board", "tree", "deps"]},
             "id": st(),
             "include_closed": bl(),
@@ -634,13 +639,13 @@ pub fn tool_defs() -> Vec<Value> {
             "replace": bl(),
             "remove_fields": arr(),
         }), &["name"])}), &[])),
-        tool("workflow", "Workflow scripts kept in the vault.", obj(with(json!({"project": st()}), json!({
+        tool("workflow", "Workflow scripts in the vault.", obj(with(json!({"project": st()}), json!({
             "action": {"type": "string", "enum": ["list", "save", "install", "status"]},
             "paths": {"type": "array", "items": {"type": "string"}, "description": "for save"},
             "to": st(),
             "force": bl(),
         })), &[])),
         tool("sync", "Commit, pull and push the vault.", obj(json!({"message": st()}), &[])),
-        tool("doctor", "Validate every note.", obj(json!({}), &[])),
+        tool("doctor", "Validate notes, fix: repair stale paths.", obj(json!({"fix": bl(), "apply": bl()}), &[])),
     ]
 }

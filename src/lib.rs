@@ -4,6 +4,7 @@ pub mod backlog;
 pub mod cli;
 pub mod doctor;
 pub mod export;
+pub mod fix;
 pub mod format;
 pub mod git;
 pub mod guide;

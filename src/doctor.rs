@@ -14,11 +14,29 @@ pub struct Problem {
 
 /// Backticked tokens that look like repo relative file paths: a slash and a file extension.
 pub fn file_refs(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for (_, _, t) in ref_spans(text) {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Marks a backticked path that is known to be gone, so doctor stops reporting it.
+pub const GONE: &str = "(gone)";
+
+/// Byte span of each backticked path mention, with the path normalized like `file_refs` reports it.
+pub fn ref_spans(text: &str) -> Vec<(usize, usize, String)> {
     let re = regex::Regex::new(r"`([^`\s]+)`").expect("valid regex");
     let ext = regex::Regex::new(r"^[^/]*\.[A-Za-z0-9]{1,8}$").expect("valid regex");
     let line_no = regex::Regex::new(r"(:\d+)+$").expect("valid regex");
-    let mut out: Vec<String> = vec![];
+    let mut out = vec![];
     for c in re.captures_iter(text) {
+        let whole = c.get(0).expect("match");
+        if text[whole.end()..].starts_with(&format!(" {GONE}")) {
+            continue;
+        }
         let t = line_no.replace(&c[1], "").to_string();
         let t = t.strip_prefix("./").unwrap_or(&t).to_string();
         let b = t.as_bytes();
@@ -29,8 +47,8 @@ pub fn file_refs(text: &str) -> Vec<String> {
             || t.contains(['*', '?', '{', '}', '[', ']', '<', '>', '$', '=', '%', '\\'])
             || (b.len() >= 2 && b[1] == b':')
             || !t.rsplit('/').next().is_some_and(|last| ext.is_match(last));
-        if !skip && !out.contains(&t) {
-            out.push(t);
+        if !skip {
+            out.push((whole.start(), whole.end(), t));
         }
     }
     out
