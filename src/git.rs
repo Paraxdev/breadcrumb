@@ -4,7 +4,7 @@ use std::process::{Command, Output, Stdio};
 
 /// Runs git with stdin closed and output captured, so it can never read or corrupt the MCP stdio stream.
 pub fn run(dir: &Path, args: &[&str]) -> Result<Output> {
-    Command::new("git")
+    crate::util::hidden(&mut Command::new("git"))
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -34,7 +34,7 @@ pub fn ok(dir: &Path, args: &[&str]) -> Result<String> {
 /// Cached per process, every mutating operation checks it.
 pub fn available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| Command::new("git").arg("--version").stdin(Stdio::null()).output().map(|o| o.status.success()).unwrap_or(false))
+    *OK.get_or_init(|| crate::util::hidden(&mut Command::new("git")).arg("--version").stdin(Stdio::null()).output().map(|o| o.status.success()).unwrap_or(false))
 }
 
 /// A rebase, merge, cherry-pick or revert that git left unfinished in the repo at `dir`.

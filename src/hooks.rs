@@ -206,13 +206,8 @@ pub fn spawn_background(root: &Path, import: bool) -> Result<()> {
         c.arg("--no-import");
     }
     c.stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        c.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
-    }
+    // Not DETACHED_PROCESS: a console-less child makes each git it runs pop up its own console window, a hidden console is inherited instead.
+    crate::util::hidden(&mut c);
     c.spawn().context("starting background import and sync")?;
     Ok(())
 }

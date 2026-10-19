@@ -50,7 +50,7 @@ pub fn upgrade(from: Option<&Path>) -> Result<UpgradeReport> {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let old = exe.with_file_name(format!("{OLD_PREFIX}{secs}{}", std::env::consts::EXE_SUFFIX));
     std::fs::rename(&exe, &old).with_context(|| format!("renaming {} aside", path_str(&exe)))?;
-    let status = Command::new("cargo")
+    let status = crate::util::hidden(&mut Command::new("cargo"))
         .args(["install", "--path"])
         .arg(&src)
         .arg("--force")

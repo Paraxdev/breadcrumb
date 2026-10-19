@@ -147,7 +147,7 @@ pub fn remote_github(v: &mut Vault, name: &str, public: bool) -> Result<String> 
     let _g = v.lock()?;
     commit_pending(v, "breadcrumb: commit pending changes before publishing")?;
     let vis = if public { "--public" } else { "--private" };
-    let out = Command::new("gh")
+    let out = crate::util::hidden(&mut Command::new("gh"))
         .args(["repo", "create", name, vis, "--source"])
         .arg(&v.root)
         .args(["--remote", "origin", "--push"])

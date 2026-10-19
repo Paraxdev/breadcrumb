@@ -560,7 +560,7 @@ pub fn serve_listener(listener: TcpListener, app: Arc<App>) {
 
 fn open_browser(url: &str) {
     let r = if cfg!(windows) {
-        std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn()
+        crate::util::hidden(&mut std::process::Command::new("cmd")).args(["/C", "start", "", url]).spawn()
     } else if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(url).spawn()
     } else {

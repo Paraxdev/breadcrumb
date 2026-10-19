@@ -179,3 +179,14 @@ pub fn read_body_arg(body: Option<String>, body_file: Option<PathBuf>) -> Result
         other => Ok(other.map(|s| normalize_newlines(&s))),
     }
 }
+
+/// Windows gives every console child of a windowless process (MCP server, background sync) its own visible console, so all spawns go through here.
+pub fn hidden(c: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
