@@ -65,7 +65,8 @@ pub fn missing_refs(n: &crate::note::Note, roots: &[std::path::PathBuf]) -> Vec<
     let mut out: Vec<String> = file_refs(&n.body).into_iter().filter(|t| !exists(t)).collect();
     for g in n.path_globs() {
         let lit: Vec<&str> = g.split('/').take_while(|seg| !seg.contains(['*', '?'])).collect();
-        if !g.contains('/') && g.contains(['*', '?']) {
+        // A glob without a slash matches the file name at any depth, so it has no fixed location to go missing.
+        if !g.contains('/') {
             continue;
         }
         let lit = lit.join("/");
