@@ -496,3 +496,10 @@ fn file_touch_is_fast_on_500_notes() {
     println!("file-touch on 500 notes: cold {cold:?}, warm median {median:?}, no match {miss:?} (debug build, includes process start)");
     assert!(median.as_millis() < 1500, "warm file-touch took {median:?}");
 }
+
+#[test]
+fn placeholder_paths_are_not_file_refs() {
+    let refs = breadcrumb::doctor::ref_spans("see `.github/release-notes/vX.Y.Z.md` and `logs/YYYY-run.txt` but `src/real.rs`");
+    let names: Vec<&str> = refs.iter().map(|(_, _, r)| r.as_str()).collect();
+    assert_eq!(names, vec!["src/real.rs"]);
+}

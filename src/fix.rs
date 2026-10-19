@@ -32,6 +32,11 @@ impl Change {
 
 const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", "dist", "build", ".venv"];
 const MAX_FILES: usize = 200_000;
+/// A file with one of these names elsewhere in the checkout is rarely the moved original, so only git renames may rewrite them.
+const GENERIC_NAMES: [&str; 24] = [
+    "readme", "summary", "index", "handoff", "start_here", "changelog", "todo", "notes", "mod", "lib", "main", "__init__", "init",
+    "build", "cargo", "package", "config", "settings", "level", "docs", "src", "test", "tests", "utils",
+];
 
 /// What one checkout knows about moved files: git renames (old -> new, newest first) and files by name.
 struct Checkout {
@@ -99,6 +104,10 @@ impl Checkout {
 
     fn unique_named(&self, old: &str, dir: bool) -> Option<String> {
         let name = old.rsplit('/').next()?.to_lowercase();
+        let stem = name.split('.').next().unwrap_or(&name);
+        if GENERIC_NAMES.contains(&stem) {
+            return None;
+        }
         let map = if dir { &self.dirs_by_name } else { &self.by_name };
         match map.get(&name).map(Vec::as_slice) {
             Some([one]) => Some(one.clone()),

@@ -31,6 +31,7 @@ pub fn ref_spans(text: &str) -> Vec<(usize, usize, String)> {
     let re = regex::Regex::new(r"`([^`\s]+)`").expect("valid regex");
     let ext = regex::Regex::new(r"^[^/]*\.[A-Za-z0-9]{1,8}$").expect("valid regex");
     let line_no = regex::Regex::new(r"(:\d+)+$").expect("valid regex");
+    let placeholder = regex::Regex::new(r"(^|[/._-])(v?X\.Y(\.Z)?|YYYY|NNN+)([/._-]|$)").expect("valid regex");
     let mut out = vec![];
     for c in re.captures_iter(text) {
         let whole = c.get(0).expect("match");
@@ -46,6 +47,7 @@ pub fn ref_spans(text: &str) -> Vec<(usize, usize, String)> {
             || t.starts_with(['/', '~', '$', '-', '@'])
             || t.contains(['*', '?', '{', '}', '[', ']', '<', '>', '$', '=', '%', '\\'])
             || (b.len() >= 2 && b[1] == b':')
+            || placeholder.is_match(&t)
             || !t.rsplit('/').next().is_some_and(|last| ext.is_match(last));
         if !skip {
             out.push((whole.start(), whole.end(), t));
