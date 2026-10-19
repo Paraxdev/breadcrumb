@@ -11,6 +11,8 @@ pub struct Hit {
     pub note: Note,
     pub score: f64,
     pub snippet: String,
+    /// How many query terms the note matched.
+    pub matched: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -170,10 +172,10 @@ pub fn search(notes: Vec<Note>, q: &str) -> SearchResult {
         }
         if matched == query.terms.len() {
             let snip = snippet(&n, &query);
-            and_hits.push(Hit { note: n, score, snippet: snip });
+            and_hits.push(Hit { note: n, score, snippet: snip, matched });
         } else if matched > 0 {
             let snip = snippet(&n, &query);
-            or_hits.push(Hit { note: n, score, snippet: snip });
+            or_hits.push(Hit { note: n, score, snippet: snip, matched });
         }
     }
     let fell_back = and_hits.is_empty() && !or_hits.is_empty();

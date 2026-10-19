@@ -206,6 +206,7 @@ impl Server {
                         body: s(a, "body").map(|x| crate::util::normalize_newlines(&x)),
                         source: s(a, "source"),
                         links: links(a)?,
+                        paths: strs(a, "paths"),
                         require_existing_project: true,
                     },
                 )?;
@@ -216,6 +217,10 @@ impl Server {
                     out.push_str(&format!("\npossibly related, update or link instead if duplicate: {}", xs.join(", ")));
                 }
                 Ok(out)
+            }
+            "update" if b(a, "verify") && a.keys().all(|k| k == "id" || k == "verify") => {
+                let ns = ops::verify(&v, &[req_s(a, "id")?])?;
+                Ok(format::ack("verified", &ns[0]))
             }
             "update" => {
                 let mut tags: Vec<String> = strs(a, "tags").into_iter().map(|t| if t.starts_with('-') { t } else { format!("+{t}") }).collect();
@@ -235,6 +240,7 @@ impl Server {
                         status: s(a, "status"),
                         links: if a.contains_key("links") { Some(links(a)?) } else { None },
                         by: s(a, "by"),
+                        set_paths: if a.contains_key("paths") { Some(strs(a, "paths")) } else { None },
                         ..Default::default()
                     },
                 )?;
@@ -550,6 +556,7 @@ pub fn tool_defs() -> Vec<Value> {
     let fields = || json!({"type": "object", "description": "kind fields by name"});
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
+    let paths = || json!({"type": "array", "items": {"type": "string"}, "description": "file globs, src/db/**"});
     vec![
         tool("context", "Reload the project digest that is injected at session start.", obj(with(target(), json!({"kinds": bl()})), &[])),
         tool("search", "Ranked full-text search, current project plus global by default.", obj(with(with(scope(), filters()), json!({"query": st()})), &["query"])),
@@ -567,6 +574,7 @@ pub fn tool_defs() -> Vec<Value> {
             "fields": fields(),
             "links": links(),
             "pinned": bl(),
+            "paths": paths(),
         })), &["title"])),
         tool("update", "Change a note, status archived archives it.", obj(with(id(), json!({
             "title": st(),
@@ -578,6 +586,8 @@ pub fn tool_defs() -> Vec<Value> {
             "links": {"type": "array", "items": {"type": ["string", "object"]}, "description": "replaces all links"},
             "pinned": bl(),
             "status": {"type": "string", "enum": ["active", "archived"]},
+            "paths": paths(),
+            "verify": {"type": "boolean", "description": "alone: mark accurate"},
         })), &["id"])),
         tool("append", "Append a paragraph to a note.", obj(with(id(), json!({"text": st()})), &["id", "text"])),
         tool("link", "Add or remove a typed link between notes.", obj(json!({

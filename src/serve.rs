@@ -355,6 +355,7 @@ impl App {
                 body: str_of(&b, "body").map(|s| crate::util::normalize_newlines(&s)),
                 source: None,
                 links: links_of(&b)?.unwrap_or_default(),
+                paths: vec![],
                 require_existing_project: false,
             },
         )?;

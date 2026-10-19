@@ -14,6 +14,10 @@ pub const JSON_KEYS: [&str; 3] = ["body", "path", "record"];
 
 pub const DEFAULT_REL: &str = "relates";
 
+/// Optional fields breadcrumb itself maintains: file globs a note applies to, and the date it was last confirmed.
+pub const PATHS_KEY: &str = "paths";
+pub const VERIFIED_KEY: &str = "verified";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub to: String,
@@ -368,6 +372,28 @@ impl Note {
 
     pub fn unset_field(&mut self, key: &str) -> bool {
         self.extra.shift_remove(key).is_some()
+    }
+
+    pub fn path_globs(&self) -> Vec<String> {
+        let items: Vec<String> = match self.field(PATHS_KEY) {
+            Some(Value::Sequence(s)) => s.iter().filter_map(yaml_scalar_string).collect(),
+            Some(Value::String(s)) => s.split(',').map(str::to_string).collect(),
+            _ => vec![],
+        };
+        items.into_iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+    }
+
+    pub fn verified(&self) -> Option<DateTime<Utc>> {
+        self.field(VERIFIED_KEY).and_then(yaml_scalar_string).and_then(|s| parse_time(&s))
+    }
+
+    /// Last time the note was known to be accurate: verified or updated, whichever is later.
+    pub fn fresh_at(&self) -> DateTime<Utc> {
+        self.verified().map_or(self.updated, |v| v.max(self.updated))
+    }
+
+    pub fn mark_verified(&mut self) {
+        self.set_field(VERIFIED_KEY, Value::String(crate::util::fmt_date(&now())));
     }
 
     pub fn file_name(&self) -> String {

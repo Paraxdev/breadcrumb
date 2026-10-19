@@ -26,6 +26,9 @@ fn default_version() -> u32 {
 fn default_lock_timeout() -> u64 {
     10
 }
+fn default_stale_days() -> u64 {
+    60
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -39,11 +42,14 @@ pub struct Config {
     pub lock_timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
+    /// Notes not verified or updated for this many days are flagged as possibly stale.
+    #[serde(default = "default_stale_days")]
+    pub stale_days: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days() }
     }
 }
 

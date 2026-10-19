@@ -1,6 +1,6 @@
 //! Imports Claude Code auto-memory, plans and arbitrary markdown or text files, idempotently.
 
-use crate::note::{Link, Note, yaml_scalar_string};
+use crate::note::{DEFAULT_REL, Link, Note, yaml_scalar_string};
 use crate::project::{self, Project};
 use crate::util::{now, path_str, read_text, sha256_hex, slugify};
 use crate::vault::Vault;
@@ -8,6 +8,16 @@ use anyhow::{Result, bail};
 use serde_yaml::{Mapping, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+pub const MEMORY_NAME: &str = "memory_name";
+
+/// BREADCRUMB_CLAUDE_DIR, else ~/.claude.
+pub fn default_claude_dir() -> Option<PathBuf> {
+    match std::env::var("BREADCRUMB_CLAUDE_DIR") {
+        Ok(d) if !d.trim().is_empty() => Some(crate::util::absolutize(Path::new(d.trim()))),
+        _ => dirs::home_dir().map(|h| h.join(".claude")),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decoded {
@@ -152,6 +162,13 @@ impl ImportReport {
             }
         }
         m
+    }
+
+    /// `N created, M updated`, or None when the import changed nothing.
+    pub fn quiet_line(&self) -> Option<String> {
+        let created = self.items.iter().filter(|i| i.action == Action::Created).count();
+        let updated = self.items.iter().filter(|i| i.action == Action::Updated).count();
+        (created + updated > 0).then(|| format!("{created} created, {updated} updated"))
     }
 
     pub fn table(&self) -> String {
@@ -357,7 +374,7 @@ impl<'a> Importer<'a> {
                 // kind declares (set by a user or agent after import) stay.
                 let mut extra = c.extra.clone();
                 for (k, val) in &existing.extra {
-                    let declared = k.as_str().is_some_and(|k| kind.field(k).is_some());
+                    let declared = k.as_str().is_some_and(|k| kind.field(k).is_some() || k == crate::note::PATHS_KEY);
                     if declared && !extra.contains_key(k) {
                         extra.insert(k.clone(), val.clone());
                     }
@@ -384,6 +401,7 @@ impl<'a> Importer<'a> {
                 n
             }
         };
+        note.mark_verified();
         if let Err(e) = kind.validate(&mut note.extra) {
             item.warning = Some(format!("{e:#}"));
         }
@@ -417,6 +435,57 @@ impl<'a> Importer<'a> {
                 None
             }
         }
+    }
+
+    /// Records each memory's original name and turns `[[name]]` references to other imported memories into
+    /// links, leaving the text alone. Runs over skipped notes too, so a re-import backfills older imports.
+    fn link_memories(&mut self, mems: &[(String, String)]) -> Result<()> {
+        let mut by_name: HashMap<String, Vec<(Option<String>, String)>> = HashMap::new();
+        for (source, name) in mems {
+            let Some(n) = self.by_source.get(source) else { continue };
+            let stem = source.rsplit('/').next().unwrap_or("").trim_end_matches(".md").to_lowercase();
+            for key in [name.trim().to_lowercase(), stem] {
+                let e = by_name.entry(key).or_default();
+                if !e.iter().any(|(_, id)| *id == n.id) {
+                    e.push((n.project.clone(), n.id.clone()));
+                }
+            }
+        }
+        let re = regex::Regex::new(r"\[\[([^\[\]\n|]+)(?:\|[^\]\n]*)?\]\]").expect("valid regex");
+        for (source, name) in mems {
+            let Some(mut n) = self.by_source.get(source).cloned() else { continue };
+            let mut changed = false;
+            if n.field(MEMORY_NAME).and_then(yaml_scalar_string).as_deref() != Some(name.as_str()) {
+                n.set_field(MEMORY_NAME, Value::String(name.clone()));
+                changed = true;
+            }
+            let targets: Vec<String> = re
+                .captures_iter(&n.body)
+                .filter_map(|c| {
+                    let key = c[1].trim().trim_end_matches(".md").to_lowercase();
+                    let cands = by_name.get(&key)?;
+                    cands.iter().find(|(p, _)| *p == n.project).or_else(|| cands.first()).map(|(_, id)| id.clone())
+                })
+                .collect();
+            for id in targets {
+                if id != n.id && !n.links.iter().any(|l| l.to == id) {
+                    n.links.push(Link { to: id, rel: DEFAULT_REL.to_string() });
+                    changed = true;
+                }
+            }
+            if !changed {
+                continue;
+            }
+            if !self.dry_run {
+                let p = self.v.write_note(&mut n)?;
+                self.touched.push(p);
+            }
+            if let Some(it) = self.report.items.iter_mut().find(|i| i.source == *source && i.action == Action::Skipped) {
+                it.action = Action::Updated;
+            }
+            self.by_source.insert(source.clone(), n);
+        }
+        Ok(())
     }
 
     fn finish(mut self, what: &str) -> Result<ImportReport> {
@@ -467,6 +536,7 @@ pub fn import_claude(v: &Vault, opts: &ClaudeOpts) -> Result<ImportReport> {
     let home = dirs::home_dir();
     let _g = v.lock()?;
     let mut imp = Importer::new(v, opts.dry_run);
+    let mut mems: Vec<(String, String)> = vec![];
 
     let mut proj_dirs: Vec<PathBuf> = std::fs::read_dir(cdir.join("projects"))
         .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.join("memory").is_dir()).collect())
@@ -528,6 +598,10 @@ pub fn import_claude(v: &Vault, opts: &ClaudeOpts) -> Result<ImportReport> {
             if let Some(d) = &description {
                 extra.insert("summary".into(), Value::String(d.clone()));
             }
+            let mem_name = name.clone().unwrap_or_else(|| fname.trim_end_matches(".md").to_string());
+            extra.insert(MEMORY_NAME.into(), Value::String(mem_name.clone()));
+            let source = format!("claude:projects/{dname}/memory/{fname}");
+            mems.push((source.clone(), mem_name));
             let mut tags = n.tags.clone();
             for t in ["imported", "claude-memory"] {
                 if !tags.iter().any(|x| x == t) {
@@ -541,12 +615,14 @@ pub fn import_claude(v: &Vault, opts: &ClaudeOpts) -> Result<ImportReport> {
                 body: n.body,
                 tags,
                 extra,
-                source: format!("claude:projects/{dname}/memory/{fname}"),
+                source,
                 hash: sha256_hex(&raw),
                 ..Default::default()
             })?;
         }
     }
+
+    imp.link_memories(&mems)?;
 
     let mut plans: Vec<PathBuf> = std::fs::read_dir(cdir.join("plans"))
         .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md")).collect())

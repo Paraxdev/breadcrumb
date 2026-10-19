@@ -127,6 +127,18 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
             .filter(|s| !s.is_empty());
             continue;
         }
+        if key == crate::note::PATHS_KEY {
+            let raw: Vec<String> = match input {
+                FieldInput::Raw(s) => s.split(',').map(str::to_string).collect(),
+                FieldInput::Value(Value::Sequence(xs)) => xs.iter().filter_map(yaml_scalar_string).collect(),
+                FieldInput::Value(x) => yaml_scalar_string(&x).into_iter().collect(),
+            };
+            set_paths(note, crate::recall::normalize_globs(&raw)?);
+            continue;
+        }
+        if key == crate::note::VERIFIED_KEY {
+            bail!("'verified' is set by breadcrumb, use verify to mark a note as still accurate");
+        }
         if RESERVED_KEYS.contains(&key.as_str()) {
             bail!("'{key}' is note metadata, not a field, use the dedicated option (title, kind, tags, links, status, pin)");
         }
@@ -164,6 +176,14 @@ pub fn parse_field_args(args: &[String]) -> Result<Vec<(String, FieldInput)>> {
         .collect()
 }
 
+fn set_paths(note: &mut Note, globs: Vec<String>) {
+    if globs.is_empty() {
+        note.unset_field(crate::note::PATHS_KEY);
+    } else {
+        note.set_field(crate::note::PATHS_KEY, Value::Sequence(globs.into_iter().map(Value::String).collect()));
+    }
+}
+
 fn push_tag(tags: &mut Vec<String>, t: &str) {
     let t = t.trim();
     if !t.is_empty() && !tags.iter().any(|x| x.eq_ignore_ascii_case(t)) {
@@ -186,6 +206,8 @@ pub struct AddReq {
     pub body: Option<String>,
     pub source: Option<String>,
     pub links: Vec<Link>,
+    /// File globs relative to the project root.
+    pub paths: Vec<String>,
     /// Refuse a project that does not exist yet instead of creating it, so a typo cannot start an orphan project.
     pub require_existing_project: bool,
 }
@@ -220,6 +242,10 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
         note.body = k.template.clone().unwrap_or_default().trim_end().to_string();
     }
     apply_fields(v, &mut note, &k, req.fields)?;
+    if !req.paths.is_empty() {
+        set_paths(&mut note, crate::recall::normalize_globs(&req.paths)?);
+    }
+    note.mark_verified();
     k.validate(&mut note.extra)?;
     for l in req.links {
         let to = v.resolve_id(&l.to)?;
@@ -252,6 +278,10 @@ pub struct UpdateReq {
     pub status: Option<String>,
     /// Replaces all links when set.
     pub links: Option<Vec<Link>>,
+    /// `glob` or `+glob` adds, `-glob` removes.
+    pub paths: Vec<String>,
+    /// Replaces all path globs when set, before `paths`.
+    pub set_paths: Option<Vec<String>>,
     /// Actor recorded in the backlog history when the state changes.
     pub by: Option<String>,
     /// `version` of the note the caller edited. A mismatch means someone else changed it meanwhile.
@@ -316,6 +346,25 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         }
     }
     apply_fields(v, &mut note, &k, req.fields)?;
+    if req.set_paths.is_some() || !req.paths.is_empty() {
+        let mut globs = match &req.set_paths {
+            Some(xs) => crate::recall::normalize_globs(xs)?,
+            None => note.path_globs(),
+        };
+        for p in &req.paths {
+            if let Some(rm) = p.strip_prefix('-') {
+                let rm = crate::recall::normalize_globs(&[rm.to_string()])?;
+                globs.retain(|g| !rm.contains(g));
+            } else {
+                for g in crate::recall::normalize_globs(&[p.strip_prefix('+').unwrap_or(p).to_string()])? {
+                    if !globs.contains(&g) {
+                        globs.push(g);
+                    }
+                }
+            }
+        }
+        set_paths(&mut note, globs);
+    }
     if let Some(b) = req.body {
         note.body = b.trim_end().to_string();
     }
@@ -352,6 +401,7 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         }
         crate::backlog::record_state_change(&mut note, &from, &new_state, req.by.as_deref());
     }
+    note.mark_verified();
     note.updated = now();
     let p = v.write_note(&mut note)?;
     v.commit(&[p], &commit_msg("update", &note))?;
@@ -373,10 +423,34 @@ pub fn append(v: &Vault, id: &str, text: &str) -> Result<Note> {
     } else {
         format!("{}\n\n{text}", note.body.trim_end())
     };
+    note.mark_verified();
     note.updated = now();
     let p = v.write_note(&mut note)?;
     v.commit(&[p], &commit_msg("append", &note))?;
     Ok(note)
+}
+
+/// Marks notes as still accurate without touching their content or `updated`.
+pub fn verify(v: &Vault, ids: &[String]) -> Result<Vec<Note>> {
+    if ids.is_empty() {
+        bail!("no note ids given");
+    }
+    let _g = v.lock()?;
+    let mut notes = vec![];
+    for id in ids {
+        notes.push(v.get(id)?);
+    }
+    let mut touched = vec![];
+    for n in &mut notes {
+        n.mark_verified();
+        touched.push(v.write_note(n)?);
+    }
+    let msg = match notes.as_slice() {
+        [n] => commit_msg("verify", n),
+        ns => format!("breadcrumb: verify {} notes", ns.len()),
+    };
+    v.commit(&touched, &msg)?;
+    Ok(notes)
 }
 
 pub fn link(v: &Vault, from: &str, to: &str, rel: Option<&str>, remove: bool) -> Result<Note> {
@@ -682,7 +756,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         writeln!(out, "Pinned:")?;
         for n in &pinned {
             let scope = if n.project.as_deref() != project { format!(" ({})", n.scope_label()) } else { String::new() };
-            writeln!(out, "[{} {}] {}{scope}", n.id, n.kind, short_title(&n.title))?;
+            writeln!(out, "[{} {}] {}{scope}{}", n.id, n.kind, short_title(&n.title), crate::recall::stale_mark(n, v.config.stale_days))?;
             let body = pinned_body(n);
             if !body.is_empty() {
                 writeln!(out, "{body}")?;
@@ -708,7 +782,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
             writeln!(out, "Recent:")?;
         }
         for n in recent {
-            writeln!(out, "{}", row(n, project, false))?;
+            writeln!(out, "{}{}", row(n, project, false), crate::recall::stale_mark(n, v.config.stale_days))?;
         }
     }
     if opts.kinds {
@@ -785,7 +859,7 @@ pub fn define_kind(v: &Vault, def: KindDef, replace: bool, remove_fields: &[Stri
         bail!("invalid kind name '{}', use lowercase letters, digits, '-' or '_'", def.name);
     }
     for f in &def.fields {
-        if RESERVED_KEYS.contains(&f.name.as_str()) {
+        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY].contains(&f.name.as_str()) {
             bail!("field name '{}' is reserved for note metadata", f.name);
         }
         if f.ty == kind::FieldType::Enum && f.values.is_empty() {

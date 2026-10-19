@@ -12,6 +12,50 @@ pub struct Problem {
     pub message: String,
 }
 
+/// Backticked tokens that look like repo relative file paths: a slash and a file extension.
+pub fn file_refs(text: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"`([^`\s]+)`").expect("valid regex");
+    let ext = regex::Regex::new(r"^[^/]*\.[A-Za-z0-9]{1,8}$").expect("valid regex");
+    let line_no = regex::Regex::new(r"(:\d+)+$").expect("valid regex");
+    let mut out: Vec<String> = vec![];
+    for c in re.captures_iter(text) {
+        let t = line_no.replace(&c[1], "").to_string();
+        let t = t.strip_prefix("./").unwrap_or(&t).to_string();
+        let b = t.as_bytes();
+        let skip = !t.contains('/')
+            || t.contains("://")
+            || t.contains("..")
+            || t.starts_with(['/', '~', '$', '-', '@'])
+            || t.contains(['*', '?', '{', '}', '[', ']', '<', '>', '$', '=', '%', '\\'])
+            || (b.len() >= 2 && b[1] == b':')
+            || !t.rsplit('/').next().is_some_and(|last| ext.is_match(last));
+        if !skip && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Paths a note mentions that exist in none of its project's checkouts on this machine.
+pub fn missing_refs(n: &crate::note::Note, roots: &[std::path::PathBuf]) -> Vec<String> {
+    if roots.is_empty() {
+        return vec![];
+    }
+    let exists = |rel: &str| roots.iter().any(|r| r.join(rel).exists());
+    let mut out: Vec<String> = file_refs(&n.body).into_iter().filter(|t| !exists(t)).collect();
+    for g in n.path_globs() {
+        let lit: Vec<&str> = g.split('/').take_while(|seg| !seg.contains(['*', '?'])).collect();
+        if !g.contains('/') && g.contains(['*', '?']) {
+            continue;
+        }
+        let lit = lit.join("/");
+        if !lit.is_empty() && !exists(&lit) && !out.contains(&lit) {
+            out.push(lit);
+        }
+    }
+    out
+}
+
 pub fn check(v: &Vault) -> Vec<Problem> {
     let mut out = vec![];
     let mut err = |path: String, id: Option<String>, severity: &'static str, message: String| {
@@ -26,6 +70,11 @@ pub fn check(v: &Vault) -> Vec<Problem> {
         err(v.rel(&p), None, "error", format!("invalid project file: {e}"));
     }
     let slugs: HashSet<String> = projects.iter().map(|p| p.slug.clone()).collect();
+    let roots: HashMap<String, Vec<std::path::PathBuf>> = projects
+        .iter()
+        .map(|p| (p.slug.clone(), p.paths.iter().map(std::path::PathBuf::from).filter(|d| d.is_dir()).collect()))
+        .collect();
+    let days = v.config.stale_days;
     let kinds: HashMap<String, crate::kind::KindDef> = kinds.into_iter().map(|k| (k.name.clone(), k)).collect();
     let (notes, note_errors) = v.load_notes_report();
     for (p, e) in note_errors {
@@ -68,6 +117,17 @@ pub fn check(v: &Vault) -> Vec<Problem> {
         for l in &n.links {
             if !ids.contains_key(&l.to) {
                 err(path.clone(), id.clone(), "error", format!("broken link to '{}' (rel {})", l.to, l.rel));
+            }
+        }
+        if crate::recall::is_stale(n, days) {
+            let age = (crate::util::now() - n.fresh_at()).num_days();
+            err(path.clone(), id.clone(), "warning", format!("not verified for {age} days, check it and run `breadcrumb verify {}`", n.id));
+        }
+        if !n.is_archived()
+            && let Some(rs) = n.project.as_ref().and_then(|p| roots.get(p))
+        {
+            for m in missing_refs(n, rs) {
+                err(path.clone(), id.clone(), "warning", format!("mentions `{m}`, which does not exist in the project checkout"));
             }
         }
         match kinds.get(&n.kind) {

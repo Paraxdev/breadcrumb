@@ -133,6 +133,8 @@ pub fn note_compact(n: &Note, full: bool) -> String {
     drop(&mut m, "status", &|v: &Y| v.as_str() == Some("active"));
     drop(&mut m, "pinned", &|v: &Y| v.as_bool() == Some(false));
     drop(&mut m, "created", &|_: &Y| true);
+    let updated = fmt_date(&n.updated);
+    drop(&mut m, crate::note::VERIFIED_KEY, &|v: &Y| v.as_str() == Some(updated.as_str()));
     let yaml = serde_yaml::to_string(&Y::Mapping(m)).unwrap_or_default();
     let body = n.body.trim_end();
     if body.is_empty() { format!("---\n{yaml}---\n") } else { format!("---\n{yaml}---\n{body}\n") }

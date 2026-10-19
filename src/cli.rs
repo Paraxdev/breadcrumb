@@ -101,6 +101,11 @@ pub enum Cmd {
     Update(UpdateArgs),
     /// Append a paragraph to a note body ("-" reads stdin)
     Append { id: String, text: String },
+    /// Mark notes as still accurate, without changing them otherwise
+    Verify {
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+    },
     /// Link two notes
     Link {
         from: String,
@@ -177,7 +182,14 @@ pub enum Cmd {
     /// Print the agent guide (AGENTS.md)
     Guide,
     /// Size in chars and approximate tokens of what breadcrumb injects into an agent's context
-    Stats,
+    Stats {
+        /// Sample first prompt, to measure the prompt recall hook
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Sample file, to measure the file notes hook
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
     /// Capture an idea quickly
     Idea {
         title: String,
@@ -274,8 +286,21 @@ pub enum Cmd {
 pub enum HookCmd {
     /// Print the vault digest for the session's project as SessionStart additionalContext
     SessionStart,
-    /// Start a background sync when the vault has unsynced changes
-    SessionEnd,
+    /// Start a background Claude memory import and sync when there is something to do
+    SessionEnd {
+        #[arg(long)]
+        no_import: bool,
+    },
+    /// UserPromptSubmit: notes relevant to the first prompt of a session
+    Prompt,
+    /// PreToolUse on file tools: notes whose path globs match the file
+    FileTouch,
+    /// The detached work SessionEnd starts
+    #[command(hide = true)]
+    Background {
+        #[arg(long)]
+        no_import: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -288,6 +313,15 @@ pub enum HooksCmd {
         /// Skip the SessionEnd background sync hook
         #[arg(long)]
         no_sync: bool,
+        /// Do not import Claude Code auto-memory at session end
+        #[arg(long)]
+        no_import: bool,
+        /// Skip the UserPromptSubmit first prompt recall hook
+        #[arg(long)]
+        no_recall: bool,
+        /// Skip the PreToolUse hook that shows notes scoped to the touched file
+        #[arg(long)]
+        no_file_notes: bool,
     },
     /// Remove breadcrumb hooks, leaving every other setting alone
     Uninstall {
@@ -404,6 +438,9 @@ pub enum ImportCmd {
         /// dirname=slug, repeatable ("global" as slug maps to global)
         #[arg(long = "project-map")]
         project_map: Vec<String>,
+        /// Print nothing when nothing changed, one line otherwise
+        #[arg(long)]
+        quiet: bool,
     },
     /// Markdown or text files from a file or directory
     Files {
@@ -464,6 +501,9 @@ pub struct AddArgs {
     pub body_file: Option<PathBuf>,
     #[arg(long)]
     pub source: Option<String>,
+    /// File glob relative to the project root the note applies to, like src/engine/** (repeatable)
+    #[arg(long = "path-glob", value_name = "GLOB")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -494,6 +534,9 @@ pub struct UpdateArgs {
     /// Actor recorded in backlog history
     #[arg(long)]
     pub by: Option<String>,
+    /// +glob or glob adds a file glob, -glob removes it (repeatable)
+    #[arg(long = "path-glob", value_name = "GLOB", allow_hyphen_values = true)]
+    pub paths: Vec<String>,
 }
 
 struct Out {
@@ -539,20 +582,30 @@ pub fn main_entry() -> i32 {
 /// Hooks run inside every Claude Code session, so failures stay silent and the exit code is always 0.
 fn run_hook(vault: Option<&Path>, h: &HookCmd) {
     let Ok(root) = resolve_vault_path(vault) else { return };
+    let input = || {
+        let mut stdin = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin);
+        crate::hooks::parse_input(&stdin)
+    };
+    let print = |r: Result<Option<String>>| {
+        if let Ok(Some(out)) = r {
+            println!("{out}");
+        }
+    };
     match h {
-        HookCmd::SessionStart => {
-            let mut stdin = String::new();
-            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin);
-            let input = crate::hooks::parse_input(&stdin);
-            if let Ok(out) = crate::hooks::session_start(&root, &input, &cwd()) {
-                println!("{out}");
+        HookCmd::SessionStart => print(crate::hooks::session_start(&root, &input(), &cwd()).map(Some)),
+        HookCmd::Prompt => print(crate::hooks::prompt(&root, &input(), &cwd())),
+        HookCmd::FileTouch => print(crate::hooks::file_touch(&root, &input(), &cwd())),
+        HookCmd::SessionEnd { no_import } => {
+            if let Ok(v) = Vault::open(&root)
+                && (crate::hooks::needs_sync(&v) || (!no_import && crate::hooks::needs_import(&v.root)))
+            {
+                let _ = crate::hooks::spawn_background(&v.root, !no_import);
             }
         }
-        HookCmd::SessionEnd => {
-            if let Ok(v) = Vault::open(&root)
-                && crate::hooks::needs_sync(&v)
-            {
-                let _ = crate::hooks::spawn_background_sync(&v.root);
+        HookCmd::Background { no_import } => {
+            if let Err(e) = crate::hooks::background(&root, !no_import) {
+                eprintln!("background: {e:#}");
             }
         }
     }
@@ -566,10 +619,15 @@ fn settings_path(p: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn hooks_text(r: &crate::hooks::HookChange) -> String {
-    let line = |name: &str, c: &Option<String>| format!("  {name:<13} {}", c.as_deref().unwrap_or("(not installed)"));
-    format!("{}
-{}
-{}", r.settings, line("SessionStart", &r.session_start), line("SessionEnd", &r.session_end))
+    let line = |name: &str, c: &Option<String>| format!("  {name:<16} {}", c.as_deref().unwrap_or("(not installed)"));
+    [
+        r.settings.clone(),
+        line("SessionStart", &r.session_start),
+        line("SessionEnd", &r.session_end),
+        line(crate::hooks::PROMPT_EVENT, &r.prompt),
+        line(crate::hooks::FILE_EVENT, &r.file_touch),
+    ]
+    .join("\n")
 }
 
 fn cwd() -> PathBuf {
@@ -637,6 +695,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     body: read_body_arg(a.body, a.body_file)?,
                     source: a.source,
                     links: vec![],
+                    paths: a.paths,
                     require_existing_project: false,
                 },
             )?;
@@ -664,6 +723,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     status: u.status,
                     links: None,
                     by: u.by,
+                    paths: u.paths,
                     ..Default::default()
                 },
             )?;
@@ -673,6 +733,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text = read_body_arg(Some(text), None)?.unwrap_or_default();
             let n = ops::append(&open()?, &id, &text)?;
             out.emit(format!("appended to {}  {}", n.id, n.title), n.to_json());
+        }
+        Cmd::Verify { ids } => {
+            let ns = ops::verify(&open()?, &ids)?;
+            let text: Vec<String> = ns.iter().map(|n| format::ack("verified", n)).collect();
+            out.emit(text.join("\n"), Json::Array(ns.iter().map(|n| n.to_json()).collect()));
         }
         Cmd::Link { from, to, rel, remove } => {
             let n = ops::link(&open()?, &from, &to, rel.as_deref(), remove)?;
@@ -723,17 +788,23 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Kind(kc) => kind_cmd(&out, &open()?, kc)?,
         Cmd::Import(ic) => {
             let v = open()?;
+            let mut quiet = false;
             let rep = match ic {
-                ImportCmd::Claude { claude_dir, dry_run, project_map } => {
+                ImportCmd::Claude { claude_dir, dry_run, project_map, quiet: q } => {
+                    quiet = q;
                     let claude_dir = match claude_dir {
                         Some(d) => crate::util::absolutize(&d),
-                        None => dirs::home_dir().context("cannot determine home directory, pass --claude-dir")?.join(".claude"),
+                        None => importer::default_claude_dir().context("cannot determine home directory, pass --claude-dir")?,
                     };
                     importer::import_claude(&v, &importer::ClaudeOpts { claude_dir, dry_run, project_map: importer::parse_project_map(&project_map)? })?
                 }
                 ImportCmd::Files { path, project, kind, tags, dry_run } => importer::import_files(&v, &importer::FilesOpts { path, project, kind, tags, dry_run })?,
             };
-            out.emit(rep.table(), rep.to_json());
+            match (quiet, rep.quiet_line()) {
+                (true, None) => {}
+                (true, Some(line)) => out.emit(line, rep.to_json()),
+                (false, _) => out.emit(rep.table(), rep.to_json()),
+            }
         }
         Cmd::Export(ec) => {
             let v = open()?;
@@ -799,8 +870,8 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(crate::doctor::text(&problems, n), json!({"notes": n, "errors": errors, "problems": problems}));
             return Ok(if errors > 0 { 1 } else { 0 });
         }
-        Cmd::Stats => {
-            let st = crate::stats::collect(&open()?.root, &cwd)?;
+        Cmd::Stats { prompt, file } => {
+            let st = crate::stats::collect(&open()?.root, &cwd, prompt.as_deref(), file.as_deref())?;
             out.emit(crate::stats::text(&st), crate::stats::json(&st));
         }
         Cmd::Guide => out.emit(crate::guide::AGENTS_MD, json!({"guide": crate::guide::AGENTS_MD})),
@@ -871,7 +942,10 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Hooks(hc) => {
             let explicit_vault = cli.vault.as_deref().map(crate::util::absolutize);
             let (r, verb) = match hc {
-                HooksCmd::Install { settings, no_sync } => (crate::hooks::install(&settings_path(settings)?, explicit_vault.as_deref(), !no_sync)?, "installed"),
+                HooksCmd::Install { settings, no_sync, no_import, no_recall, no_file_notes } => {
+                    let o = crate::hooks::InstallOpts { sync: !no_sync, import: !no_import, recall: !no_recall, file_notes: !no_file_notes };
+                    (crate::hooks::install(&settings_path(settings)?, explicit_vault.as_deref(), o)?, "installed")
+                }
                 HooksCmd::Uninstall { settings } => (crate::hooks::uninstall(&settings_path(settings)?)?, "removed"),
                 HooksCmd::Status { settings } => (crate::hooks::status(&settings_path(settings)?)?, ""),
             };

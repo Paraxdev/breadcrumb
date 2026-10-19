@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 fn breadcrumb(vault: &Path, args: &[&str], stdin: &str, cwd: &Path) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_breadcrumb"));
     c.arg("--vault").arg(vault).args(args).current_dir(cwd).env_remove("BREADCRUMB_HOME");
+    c.env("BREADCRUMB_CLAUDE_DIR", vault.with_extension("no-claude"));
     c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = c.spawn().unwrap();
     child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
