@@ -742,6 +742,28 @@ impl Default for ContextOpts {
 }
 
 pub const PINNED_BODY_MAX: usize = 600;
+pub const PREFS_LINE_MAX: usize = 400;
+pub const PIN_HINT: &str = "pin it if every session needs the body, unpinned preferences show as a title only";
+const PREF_TITLE_MAX: usize = 60;
+
+/// Feedback and user notes hold preferences, they only reach a new session with their body when pinned.
+pub fn is_pref(n: &Note) -> bool {
+    n.kind == "feedback" || n.kind == "user"
+}
+
+fn prefs_line(prefs: &[&Note]) -> String {
+    let mut s = "Prefs (unpinned):".to_string();
+    for (i, n) in prefs.iter().enumerate() {
+        let item = format!(" {} {};", n.id, crate::util::truncate_chars(&crate::util::one_line(&n.title), PREF_TITLE_MAX));
+        let more = prefs.len() - i;
+        if s.chars().count() + item.chars().count() > PREFS_LINE_MAX - 12 && more > 1 {
+            s.push_str(&format!(" +{more} more"));
+            return s;
+        }
+        s.push_str(&item);
+    }
+    s.trim_end_matches(';').to_string()
+}
 
 /// Compact digest agents read at session start.
 pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String> {
@@ -812,6 +834,10 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
             }
         }
     }
+    let prefs: Vec<&Note> = notes.iter().filter(|n| !n.pinned && is_pref(n)).collect();
+    if !prefs.is_empty() {
+        writeln!(out, "{}", prefs_line(&prefs))?;
+    }
     let todos: Vec<&Note> = notes.iter().filter(|n| !n.pinned && is_open_todo(n)).collect();
     if !todos.is_empty() {
         writeln!(out, "Todos:")?;
@@ -822,8 +848,9 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         }
     }
     out.push_str(&crate::backlog::context_section(&notes, &all));
-    let rest: Vec<&Note> = notes.iter().filter(|n| !n.pinned && !is_open_todo(n) && !crate::backlog::in_digest(n)).collect();
-    let recent: Vec<&&Note> = rest.iter().take(opts.recent).collect();
+    let rest: Vec<&Note> = notes.iter().filter(|n| !n.pinned && !is_pref(n) && !is_open_todo(n) && !crate::backlog::in_digest(n)).collect();
+    // Prefs used to sit in Recent, so they still count against it and the digest does not grow.
+    let recent: Vec<&&Note> = rest.iter().take(opts.recent.saturating_sub(prefs.len().min(opts.recent / 2))).collect();
     if !recent.is_empty() {
         if rest.len() > recent.len() {
             writeln!(out, "Recent ({} of {}):", recent.len(), rest.len())?;

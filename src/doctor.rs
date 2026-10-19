@@ -56,6 +56,10 @@ pub fn missing_refs(n: &crate::note::Note, roots: &[std::path::PathBuf]) -> Vec<
     out
 }
 
+fn ops_pref_unpinned(n: &crate::note::Note) -> bool {
+    crate::ops::is_pref(n) && !n.pinned && !n.is_archived()
+}
+
 pub fn check(v: &Vault) -> Vec<Problem> {
     let mut out = vec![];
     let mut err = |path: String, id: Option<String>, severity: &'static str, message: String| {
@@ -130,6 +134,9 @@ pub fn check(v: &Vault) -> Vec<Problem> {
                 err(path.clone(), id.clone(), "warning", format!("mentions `{m}`, which does not exist in the project checkout"));
             }
         }
+        if ops_pref_unpinned(n) {
+            err(path.clone(), id.clone(), "info", format!("unpinned {}, a new session sees only its title, `breadcrumb update {} --pin` if every session needs it", n.kind, n.id));
+        }
         match kinds.get(&n.kind) {
             None => err(path.clone(), id.clone(), "error", format!("unknown kind '{}', define it with `breadcrumb kind define`", n.kind)),
             Some(k) => {
@@ -154,8 +161,12 @@ pub fn text(problems: &[Problem], note_count: usize) -> String {
     for p in problems {
         let _ = writeln!(s, "{}: {}: {}", p.severity, p.path, p.message);
     }
-    let errors = problems.iter().filter(|p| p.severity == "error").count();
-    let warnings = problems.len() - errors;
-    let _ = writeln!(s, "checked {note_count} notes: {errors} errors, {warnings} warnings");
+    let count = |sev: &str| problems.iter().filter(|p| p.severity == sev).count();
+    let _ = write!(s, "checked {note_count} notes: {} errors, {} warnings", count("error"), count("warning"));
+    let info = count("info");
+    if info > 0 {
+        let _ = write!(s, ", {info} info");
+    }
+    s.push('\n');
     s
 }

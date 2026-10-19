@@ -17,7 +17,7 @@ pub const LATEST_VERSION: &str = "2025-06-18";
 pub const INSTRUCTIONS: &str = "breadcrumb is your persistent memory and backlog across sessions. \
 The project context is injected at session start, call context only if it is missing or you switch project. \
 Search before add, prefer update or append over near duplicates, one fact per note, never store secrets. \
-Save decisions, gotchas, user preferences and handoffs. Track work with move and next.";
+Save decisions, gotchas, user preferences and handoffs, pin preferences every session needs. Track work with move and next.";
 
 const LIST_LIMIT: usize = 20;
 
@@ -211,6 +211,9 @@ impl Server {
                     },
                 )?;
                 let mut out = format::ack("saved", &n);
+                if ops::is_pref(&n) && !n.pinned {
+                    out.push_str(&format!("\n{}", ops::PIN_HINT));
+                }
                 let similar = similar_notes(&v, &n);
                 if !similar.is_empty() {
                     let xs: Vec<String> = similar.iter().map(|x| format!("{} \"{}\"", x.id, crate::util::truncate_chars(&crate::util::one_line(&x.title), 50))).collect();

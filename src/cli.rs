@@ -717,7 +717,10 @@ pub fn run(cli: Cli) -> Result<i32> {
                     require_existing_project: false,
                 },
             )?;
-            let created = if new_project { format!("\n(created new project {})", n.scope_label()) } else { String::new() };
+            let mut created = if new_project { format!("\n(created new project {})", n.scope_label()) } else { String::new() };
+            if ops::is_pref(&n) && !n.pinned {
+                created.push_str(&format!("\n{}, `breadcrumb update {} --pin`", ops::PIN_HINT, n.id));
+            }
             out.emit(format!("added {}  {}  {}  {}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
         }
         Cmd::Get { id } => {

@@ -439,3 +439,42 @@ fn verbatim_unc_paths_normalize_to_the_form_the_shell_reports() {
     assert_eq!(breadcrumb::util::path_str(Path::new(r"\\?\D:\dev\x")), "D:/dev/x");
     assert_eq!(breadcrumb::project::normalize_path(r"\\?\UNC\Host\Share\P"), breadcrumb::project::normalize_path("//Host/Share/P"));
 }
+
+#[test]
+fn unpinned_prefs_get_one_line_and_doctor_info() {
+    let (_d, v) = common::vault();
+    let old = common::add(&v, "Prefers tabs over spaces", "feedback", None, &[]);
+    let new = common::add(&v, "Works on a laptop with a small screen", "user", None, &[]);
+    let pinned = common::add(&v, "Never force push", "feedback", None, &[]);
+    breadcrumb::ops::update(&v, &pinned.id, breadcrumb::ops::UpdateReq { pinned: Some(true), body: Some("Ask first.".into()), ..Default::default() }).unwrap();
+    common::add(&v, "Plain fact", "note", None, &[]);
+    let ctx = breadcrumb::ops::context(&v, None, 15).unwrap();
+    let line = ctx.lines().find(|l| l.starts_with("Prefs")).unwrap_or_else(|| panic!("{ctx}"));
+    assert!(line.find(&new.id).unwrap() < line.find(&old.id).unwrap(), "most recent first: {line}");
+    assert!(!line.contains(&pinned.id) && ctx.contains("Ask first."));
+    assert_eq!(ctx.matches(&old.id).count(), 1, "not repeated under Recent: {ctx}");
+
+    for i in 0..30 {
+        common::add(&v, &format!("Preference number {i} with a reasonably long title"), "feedback", None, &[]);
+    }
+    let ctx = breadcrumb::ops::context(&v, None, 15).unwrap();
+    let line = ctx.lines().find(|l| l.starts_with("Prefs")).unwrap();
+    assert!(line.chars().count() <= breadcrumb::ops::PREFS_LINE_MAX && line.ends_with("more"), "{line}");
+
+    let probs = breadcrumb::doctor::check(&v);
+    let info: Vec<_> = probs.iter().filter(|p| p.severity == "info").collect();
+    assert_eq!(info.len(), 32);
+    assert!(info.iter().all(|p| p.message.contains("--pin")));
+    assert!(!probs.iter().any(|p| p.severity == "warning" && p.id.as_deref() == Some(old.id.as_str())));
+    assert!(breadcrumb::doctor::text(&probs, 35).contains("32 info"));
+
+    let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: v.root.clone() };
+    let mut a = serde_json::Map::new();
+    a.insert("title".into(), "Likes short commit subjects".into());
+    a.insert("kind".into(), "feedback".into());
+    a.insert("project".into(), "global".into());
+    assert!(srv.call_tool("add", &a).unwrap().contains("pin it if every session needs the body"));
+    a.insert("title".into(), "Some plain note".into());
+    a.insert("kind".into(), "note".into());
+    assert!(!srv.call_tool("add", &a).unwrap().contains("pin it"));
+}
