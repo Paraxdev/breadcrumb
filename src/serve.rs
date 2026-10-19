@@ -399,6 +399,7 @@ impl App {
                 resolution: str_of(&b, "resolution"),
                 shipped_in: str_of(&b, "shipped_in"),
                 by: str_of(&b, "by"),
+                ..Default::default()
             },
         )?;
         let mut payload = self.note_payload(&v, &r.note);

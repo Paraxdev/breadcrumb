@@ -170,3 +170,35 @@ fn tree_progress_promote_and_context() {
     assert!(b.contains("Queued (next") && b.contains("T1"));
     assert!(!ctx.contains('#') && !ctx.contains("\n\n"), "{ctx}");
 }
+
+#[test]
+fn noop_move_says_already_and_check_ticks_criteria() {
+    let (_d, v) = common::vault();
+    let f = common::add(&v, "Widget", "feature", None, &[("acceptance", "[renders, '[ ] saves', '[x] loads']")]);
+    mv(&v, &f.id, "review", None);
+    let before = fresh(&v, &f.id);
+    let head = common::git(&v.root, &["rev-parse", "HEAD"]);
+    let r = mv(&v, &f.id, "review", Some("agent"));
+    assert!(!r.changed);
+    assert!(backlog::move_text(&r).contains("already in review"), "{}", backlog::move_text(&r));
+    assert_eq!(fresh(&v, &f.id).updated, before.updated);
+    assert_eq!(common::git(&v.root, &["rev-parse", "HEAD"]), head, "no-op move does not commit");
+
+    let r = mv(&v, &f.id, "done", None);
+    let text = backlog::move_text(&r);
+    assert!(text.contains(&format!("breadcrumb check {}", f.id)) && text.contains("  2. [ ] saves"), "{text}");
+
+    let (n, changed) = backlog::check(&v, &f.id, &backlog::Check::parse("2").unwrap()).unwrap();
+    assert_eq!(changed, 1);
+    assert_eq!(backlog::unmet_acceptance(&n), vec!["renders"]);
+    assert!(backlog::check(&v, &f.id, &backlog::Check::parse("4").unwrap()).is_err());
+    let head = common::git(&v.root, &["rev-parse", "HEAD"]);
+    assert_eq!(backlog::check(&v, &f.id, &backlog::Check::parse("2,3").unwrap()).unwrap().1, 0);
+    assert_eq!(common::git(&v.root, &["rev-parse", "HEAD"]), head);
+
+    let r = backlog::move_item(&v, &f.id, MoveReq { state: "done".into(), check: Some(backlog::Check::All), ..Default::default() }).unwrap();
+    assert!(r.changed && r.unmet.is_empty());
+    let acc = fresh(&v, &f.id).field("acceptance").cloned().unwrap();
+    assert_eq!(acc, serde_yaml::from_str::<Value>("['[x] renders', '[x] saves', '[x] loads']").unwrap());
+    assert!(backlog::Check::parse("0").is_err() && backlog::Check::parse("a").is_err());
+}

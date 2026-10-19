@@ -245,6 +245,15 @@ pub enum Cmd {
         shipped_in: Option<String>,
         #[arg(long)]
         by: Option<String>,
+        /// Also mark acceptance criteria met: all, or positions like 2,3
+        #[arg(long, value_name = "WHICH")]
+        check: Option<String>,
+    },
+    /// Mark acceptance criteria of an item met ([x])
+    Check {
+        id: String,
+        /// all (default), or 1 based positions like 2,3
+        which: Option<String>,
     },
     /// Epic, feature and task hierarchy
     Tree { id: String },
@@ -915,9 +924,14 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => out.emit(format!("no unblocked queued items in {}", sc.label()), Json::Null),
             }
         }
-        Cmd::Move { id, state, resolution, shipped_in, by } => {
-            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by })?;
-            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "unmet_acceptance": r.unmet, "note": r.note.to_json()}));
+        Cmd::Move { id, state, resolution, shipped_in, by, check } => {
+            let check = check.as_deref().map(backlog::Check::parse).transpose()?;
+            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check })?;
+            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "note": r.note.to_json()}));
+        }
+        Cmd::Check { id, which } => {
+            let (n, changed) = backlog::check(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?)?;
+            out.emit(backlog::check_text(&n, changed), json!({"ticked": changed, "unmet_acceptance": backlog::unmet_acceptance(&n), "note": n.to_json()}));
         }
         Cmd::Tree { id } => {
             let text = backlog::tree(&open()?, &id)?;

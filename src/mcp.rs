@@ -275,10 +275,12 @@ impl Server {
                     let n = backlog::queue(&v, &id, pos, s(a, "by").as_deref())?;
                     return Ok(format::ack("queued", &n));
                 }
-                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by") })?;
-                let mut out = format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to);
+                let check = s(a, "check").map(|c| backlog::Check::parse(&c)).transpose()?;
+                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check })?;
+                let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.id, r.to) };
                 if !r.unmet.is_empty() {
-                    out.push_str(&format!("\nwarning, acceptance criteria not marked [x]: {}", r.unmet.join("; ")));
+                    let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
+                    out.push_str(&format!("\nwarning, acceptance criteria not marked [x], tick with move check \"all\" or \"2,3\": {}", unmet.join("; ")));
                 }
                 Ok(out)
             }
@@ -602,6 +604,7 @@ pub fn tool_defs() -> Vec<Value> {
             "position": {"type": "string", "description": "for queued: top, or an id to go after"},
             "resolution": {"type": "string", "description": "required for rejected"},
             "shipped_in": st(),
+            "check": {"type": "string", "description": "mark acceptance met: all or 2,3"},
             "by": st(),
         })), &["id", "state"])),
         tool("next", "Top unblocked queued item, claim moves it to in-progress.", obj(with(scope(), json!({"claim": bl(), "by": st()})), &[])),

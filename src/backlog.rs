@@ -523,6 +523,8 @@ pub struct MoveReq {
     pub resolution: Option<String>,
     pub shipped_in: Option<String>,
     pub by: Option<String>,
+    /// Acceptance criteria to mark met in the same write.
+    pub check: Option<Check>,
 }
 
 #[derive(Debug, Clone)]
@@ -531,6 +533,93 @@ pub struct MoveResult {
     pub from: String,
     pub to: String,
     pub unmet: Vec<String>,
+    /// False when the item already had the state and nothing else changed, so nothing was written.
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Check {
+    All,
+    /// 1 based positions in the acceptance list.
+    Some(Vec<usize>),
+}
+
+impl Check {
+    /// `all`, or positions like `2,3` or `1 4`.
+    pub fn parse(s: &str) -> Result<Check> {
+        let s = s.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("all") {
+            return Ok(Check::All);
+        }
+        let mut out = vec![];
+        for p in s.split([',', ' ']).map(str::trim).filter(|p| !p.is_empty()) {
+            match p.parse::<usize>() {
+                Ok(i) if i > 0 => out.push(i),
+                _ => bail!("invalid criterion '{p}', expected all or 1 based numbers like 2,3"),
+            }
+        }
+        Ok(Check::Some(out))
+    }
+}
+
+fn is_met(c: &str) -> bool {
+    c.trim_start().to_ascii_lowercase().starts_with("[x]")
+}
+
+/// Marks the chosen criteria `[x]`. Returns how many changed.
+fn apply_check(n: &mut Note, which: &Check) -> Result<usize> {
+    let Some(Value::Sequence(items)) = n.field("acceptance").cloned() else {
+        bail!("{} has no acceptance criteria", n.id);
+    };
+    if let Check::Some(ix) = which
+        && let Some(bad) = ix.iter().find(|i| **i > items.len())
+    {
+        bail!("{} has {} acceptance criteria, there is no {bad}", n.id, items.len());
+    }
+    let mut changed = 0;
+    let out: Vec<Value> = items
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let want = match which {
+                Check::All => true,
+                Check::Some(ix) => ix.contains(&(i + 1)),
+            };
+            match yaml_scalar_string(&v) {
+                Some(c) if want && !is_met(&c) => {
+                    changed += 1;
+                    let t = c.trim_start();
+                    let t = t.strip_prefix("[ ]").unwrap_or(t).trim_start();
+                    Value::String(format!("[x] {t}"))
+                }
+                _ => v,
+            }
+        })
+        .collect();
+    n.set_field("acceptance", Value::Sequence(out));
+    Ok(changed)
+}
+
+/// Marks acceptance criteria met without changing the state. Writes nothing when all chosen ones already were.
+pub fn check(v: &Vault, id: &str, which: &Check) -> Result<(Note, usize)> {
+    let _g = v.lock()?;
+    let mut n = get_item(v, id)?;
+    let changed = apply_check(&mut n, which)?;
+    if changed > 0 {
+        save(v, &mut n, "check")?;
+    }
+    Ok((n, changed))
+}
+
+pub fn check_text(n: &Note, changed: usize) -> String {
+    let unmet = unmet_acceptance(n);
+    let mut s = if changed == 0 { format!("{}: nothing to tick", n.id) } else { format!("{}: ticked {changed}", n.id) };
+    if unmet.is_empty() {
+        s.push_str(", all acceptance criteria met");
+    } else {
+        let _ = write!(s, ", {} still open: {}", unmet.len(), unmet.join("; "));
+    }
+    s
 }
 
 pub fn unmet_acceptance(n: &Note) -> Vec<String> {
@@ -538,7 +627,7 @@ pub fn unmet_acceptance(n: &Note) -> Vec<String> {
         Some(Value::Sequence(s)) => s
             .iter()
             .filter_map(yaml_scalar_string)
-            .filter(|c| !c.trim_start().to_ascii_lowercase().starts_with("[x]"))
+            .filter(|c| !is_met(c))
             .collect(),
         _ => vec![],
     }
@@ -555,9 +644,14 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let from = state(&n);
     let unchanged = |key: &str, want: &Option<String>| want.as_ref().is_none_or(|w| str_field(&n, key).as_deref() == Some(w.as_str()));
     let shipped_in = req.shipped_in.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    if from == to && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) {
+    let same = from == to && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in);
+    let ticked = match &req.check {
+        Some(c) => apply_check(&mut n, c)?,
+        None => 0,
+    };
+    if same && ticked == 0 {
         let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
-        return Ok(MoveResult { note: n, from, to, unmet });
+        return Ok(MoveResult { note: n, from, to, unmet, changed: false });
     }
     n.set_field("state", Value::String(to.clone()));
     if let Some(r) = &resolution {
@@ -573,18 +667,34 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
     record_state_change(&mut n, &from, &to, req.by.as_deref());
     save(v, &mut n, "move")?;
-    Ok(MoveResult { note: n, from, to, unmet })
+    Ok(MoveResult { note: n, from, to, unmet, changed: true })
 }
 
 pub fn move_text(r: &MoveResult) -> String {
-    let mut s = format!("{} {}: {} -> {}\n", key(&r.note), r.note.title, r.from, r.to);
+    let mut s = if r.changed {
+        format!("{} {}: {} -> {}\n", key(&r.note), r.note.title, r.from, r.to)
+    } else {
+        format!("{} {}: already in {}\n", key(&r.note), r.note.title, r.to)
+    };
     if !r.unmet.is_empty() {
-        let _ = writeln!(s, "warning: {} acceptance criteria not marked met ([x]):", r.unmet.len());
-        for c in &r.unmet {
-            let _ = writeln!(s, "  - {c}");
+        let _ = writeln!(s, "warning: {} acceptance criteria not marked met ([x]), {}:", r.unmet.len(), check_hint(&r.note.id));
+        for (i, c) in unmet_numbered(&r.note) {
+            let _ = writeln!(s, "  {i}. {c}");
         }
     }
     s
+}
+
+pub fn check_hint(id: &str) -> String {
+    format!("tick them with `breadcrumb check {id} [all|2,3]` or move check")
+}
+
+/// Unmet criteria with their 1 based position, as `check` expects it.
+pub fn unmet_numbered(n: &Note) -> Vec<(usize, String)> {
+    match n.field("acceptance") {
+        Some(Value::Sequence(s)) => s.iter().enumerate().filter_map(|(i, v)| yaml_scalar_string(v).filter(|c| !is_met(c)).map(|c| (i + 1, c))).collect(),
+        _ => vec![],
+    }
 }
 
 pub fn promote(v: &Vault, id: &str, to: &str, by: Option<&str>) -> Result<Note> {
