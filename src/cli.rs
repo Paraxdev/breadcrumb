@@ -468,6 +468,9 @@ pub enum ImportCmd {
         /// Print nothing when nothing changed, one line otherwise
         #[arg(long)]
         quiet: bool,
+        /// Replace each imported MEMORY.md with a one line pointer to breadcrumb, keeping MEMORY.md.breadcrumb.bak
+        #[arg(long)]
+        retire_index: bool,
     },
     /// Markdown or text files from a file or directory
     Files {
@@ -825,21 +828,32 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Import(ic) => {
             let v = open()?;
             let mut quiet = false;
+            let mut tail = String::new();
             let rep = match ic {
-                ImportCmd::Claude { claude_dir, dry_run, project_map, quiet: q } => {
+                ImportCmd::Claude { claude_dir, dry_run, project_map, quiet: q, retire_index } => {
                     quiet = q;
                     let claude_dir = match claude_dir {
                         Some(d) => crate::util::absolutize(&d),
                         None => importer::default_claude_dir().context("cannot determine home directory, pass --claude-dir")?,
                     };
-                    importer::import_claude(&v, &importer::ClaudeOpts { claude_dir, dry_run, project_map: importer::parse_project_map(&project_map)? })?
+                    let rep = importer::import_claude(&v, &importer::ClaudeOpts { claude_dir: claude_dir.clone(), dry_run, project_map: importer::parse_project_map(&project_map)? })?;
+                    let dirs = importer::memory_dirs(rep.items.iter().map(|i| i.source.as_str()));
+                    if retire_index {
+                        for p in importer::retire_indexes(&claude_dir, &dirs, dry_run)? {
+                            tail.push_str(&format!("{} {}\n", if dry_run { "would retire" } else { "retired" }, path_str(&p)));
+                        }
+                    } else if !importer::live_indexes(&claude_dir, &dirs).is_empty() {
+                        tail.push_str(importer::RETIRE_HINT);
+                        tail.push('\n');
+                    }
+                    rep
                 }
                 ImportCmd::Files { path, project, kind, tags, dry_run } => importer::import_files(&v, &importer::FilesOpts { path, project, kind, tags, dry_run })?,
             };
             match (quiet, rep.quiet_line()) {
                 (true, None) => {}
                 (true, Some(line)) => out.emit(line, rep.to_json()),
-                (false, _) => out.emit(rep.table(), rep.to_json()),
+                (false, _) => out.emit(format!("{}{tail}", rep.table()), rep.to_json()),
             }
         }
         Cmd::Export(ec) => {

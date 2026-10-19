@@ -79,6 +79,11 @@ fn ops_pref_unpinned(n: &crate::note::Note) -> bool {
 }
 
 pub fn check(v: &Vault) -> Vec<Problem> {
+    check_with(v, crate::importer::default_claude_dir().as_deref())
+}
+
+/// `claude_dir` is where imported Claude Code memory came from, for the duplicate index check.
+pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Problem> {
     let mut out = vec![];
     let mut err = |path: String, id: Option<String>, severity: &'static str, message: String| {
         out.push(Problem { path, id, severity, message });
@@ -167,6 +172,20 @@ pub fn check(v: &Vault) -> Vec<Problem> {
                             err(path.clone(), id.clone(), "error", format!("field '{}' refers to missing note '{r}'", f.name));
                         }
                 }
+            }
+        }
+    }
+    if let Some(cdir) = claude_dir {
+        let dirs = crate::importer::memory_dirs(notes.iter().filter(|n| !n.is_archived()).filter_map(|n| n.source.as_deref()));
+        for p in crate::importer::live_indexes(cdir, &dirs) {
+            let lines = crate::util::read_text(&p).map(|t| t.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0);
+            if lines > crate::importer::INDEX_MAX_LINES {
+                out.push(Problem {
+                    path: crate::util::path_str(&p),
+                    id: None,
+                    severity: "warning",
+                    message: format!("{lines} line Claude memory index beside imported notes loads the same facts twice, run `breadcrumb import claude --retire-index`"),
+                });
             }
         }
     }

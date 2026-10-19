@@ -444,6 +444,7 @@ fn verbatim_unc_paths_normalize_to_the_form_the_shell_reports() {
 fn unpinned_prefs_get_one_line_and_doctor_info() {
     let (_d, v) = common::vault();
     let old = common::add(&v, "Prefers tabs over spaces", "feedback", None, &[]);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let new = common::add(&v, "Works on a laptop with a small screen", "user", None, &[]);
     let pinned = common::add(&v, "Never force push", "feedback", None, &[]);
     breadcrumb::ops::update(&v, &pinned.id, breadcrumb::ops::UpdateReq { pinned: Some(true), body: Some("Ask first.".into()), ..Default::default() }).unwrap();

@@ -144,3 +144,45 @@ fn file_import_is_idempotent() {
     assert_eq!(r2.counts()["docs"].skipped, 2);
     assert_eq!(v.load_notes().len(), 2);
 }
+
+fn cli(vault: &Path, claude: &Path, args: &[&str]) -> String {
+    let o = std::process::Command::new(env!("CARGO_BIN_EXE_breadcrumb"))
+        .arg("--vault")
+        .arg(vault)
+        .args(args)
+        .env_remove("BREADCRUMB_HOME")
+        .env("BREADCRUMB_CLAUDE_DIR", claude)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    String::from_utf8(o.stdout).unwrap()
+}
+
+#[test]
+fn retire_index_is_opt_in_backs_up_and_doctor_warns_before() {
+    let (d, v) = common::vault();
+    let claude = fake_claude(d.path());
+    let index = claude.join("projects/D--zz-nonexistent-webapp/memory/MEMORY.md");
+    let long: String = (0..12).map(|i| format!("- [Fact {i}](fact_{i}.md) one line hook\n")).collect();
+    fs::write(&index, &long).unwrap();
+
+    let out = cli(&v.root, &claude, &["import", "claude"]);
+    assert!(out.trim_end().ends_with(importer::RETIRE_HINT), "{out}");
+    assert_eq!(fs::read_to_string(&index).unwrap(), long, "never automatic");
+    let warn = |v: &breadcrumb::vault::Vault| breadcrumb::doctor::check_with(v, Some(&claude)).into_iter().filter(|p| p.message.contains("--retire-index")).count();
+    assert_eq!(warn(&v), 1);
+
+    let out = cli(&v.root, &claude, &["import", "claude", "--retire-index", "--dry-run"]);
+    assert!(out.contains("would retire") && fs::read_to_string(&index).unwrap() == long, "{out}");
+    let out = cli(&v.root, &claude, &["import", "claude", "--retire-index"]);
+    assert!(out.contains("retired "), "{out}");
+    assert_eq!(fs::read_to_string(&index).unwrap().trim(), importer::INDEX_POINTER);
+    assert_eq!(fs::read_to_string(index.with_file_name(importer::INDEX_BAK)).unwrap(), long);
+    assert_eq!(warn(&v), 0);
+
+    let out = cli(&v.root, &claude, &["import", "claude", "--retire-index"]);
+    assert!(!out.contains("retired") && !out.contains("hint:"), "{out}");
+    let baks = fs::read_dir(index.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("breadcrumb")).count();
+    assert_eq!(baks, 1);
+}

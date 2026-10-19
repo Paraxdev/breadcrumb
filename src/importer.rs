@@ -4,7 +4,7 @@ use crate::note::{DEFAULT_REL, Link, Note, yaml_scalar_string};
 use crate::project::{self, Project};
 use crate::util::{now, path_str, read_text, sha256_hex, slugify};
 use crate::vault::Vault;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_yaml::{Mapping, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -721,4 +721,55 @@ pub fn import_files(v: &Vault, opts: &FilesOpts) -> Result<ImportReport> {
         })?;
     }
     imp.finish("files")
+}
+
+pub const INDEX_NAME: &str = "MEMORY.md";
+pub const INDEX_BAK: &str = "MEMORY.md.breadcrumb.bak";
+/// Doctor warns about an index longer than this beside imported notes.
+pub const INDEX_MAX_LINES: usize = 10;
+pub const INDEX_POINTER: &str = "Memory for this project lives in breadcrumb, its digest is injected at session start (`breadcrumb context`). The old index is in MEMORY.md.breadcrumb.bak.";
+pub const RETIRE_HINT: &str = "hint: `breadcrumb import claude --retire-index` swaps each imported MEMORY.md for a one line pointer to breadcrumb, so its facts stop loading twice";
+
+/// Claude project directory names whose memory files the report covers.
+pub fn memory_dirs<'a>(sources: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for s in sources {
+        if let Some(d) = s.strip_prefix("claude:projects/").and_then(|r| r.split_once("/memory/")).map(|(d, _)| d.to_string())
+            && !out.contains(&d)
+        {
+            out.push(d);
+        }
+    }
+    out
+}
+
+fn index_path(claude_dir: &Path, dname: &str) -> PathBuf {
+    claude_dir.join("projects").join(dname).join("memory").join(INDEX_NAME)
+}
+
+/// Index files of `dnames` that still hold more than the pointer.
+pub fn live_indexes(claude_dir: &Path, dnames: &[String]) -> Vec<PathBuf> {
+    dnames
+        .iter()
+        .map(|d| index_path(claude_dir, d))
+        .filter(|p| read_text(p).is_ok_and(|t| !t.trim().is_empty() && t.trim() != INDEX_POINTER))
+        .collect()
+}
+
+/// Replaces each live index with the pointer line, keeping the old one beside it. Never overwrites a backup.
+pub fn retire_indexes(claude_dir: &Path, dnames: &[String], dry_run: bool) -> Result<Vec<PathBuf>> {
+    let live = live_indexes(claude_dir, dnames);
+    if dry_run {
+        return Ok(live);
+    }
+    for p in &live {
+        let dir = p.parent().expect("index has a parent");
+        let mut bak = dir.join(INDEX_BAK);
+        if bak.exists() {
+            bak = dir.join(format!("MEMORY.md.breadcrumb.{}.bak", now().format("%Y%m%d%H%M%S")));
+        }
+        std::fs::copy(p, &bak).with_context(|| format!("backing up {}", p.display()))?;
+        crate::util::atomic_write(p, format!("{INDEX_POINTER}\n").as_bytes())?;
+    }
+    Ok(live)
 }
