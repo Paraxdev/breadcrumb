@@ -199,3 +199,58 @@ fn session_end_syncs_dirty_vault_in_background() {
     assert_eq!(common::git(&v.root, &["status", "--porcelain"]), "");
     assert!(v.root.join(".local").join("sync.log").exists());
 }
+
+fn stop_text(o: &Output) -> Option<String> {
+    assert!(o.status.success());
+    if o.stdout.is_empty() {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "Stop");
+    assert!(v.get("decision").is_none(), "never blocks");
+    Some(v["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string())
+}
+
+#[test]
+fn stop_reminds_once_about_a_missing_handoff() {
+    let (d, v) = common::vault();
+    let proj = d.path().join("demo-app");
+    std::fs::create_dir_all(&proj).unwrap();
+    breadcrumb::ops::project_link(&v, "demo-app", &proj, None).unwrap();
+    let task = common::add(&v, "Build the parser", "task", Some("demo-app"), &[]);
+    let old = common::add(&v, "Earlier handoff", "handoff", Some("demo-app"), &[]);
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let start = |sid: &str| breadcrumb(&v.root, &["hook", "session-start"], &json!({"cwd": proj, "source": "startup", "session_id": sid}).to_string(), d.path());
+    let stop = |sid: &str, active: bool| stop_text(&breadcrumb(&v.root, &["hook", "stop"], &json!({"cwd": proj, "session_id": sid, "stop_hook_active": active}).to_string(), d.path()));
+    start("s1");
+    assert_eq!(stop("s1", false), None, "nothing changed yet");
+    breadcrumb::backlog::move_item(&v, &task.id, breadcrumb::backlog::MoveReq { state: "in-progress".into(), ..Default::default() }).unwrap();
+    assert_eq!(stop("s1", true), None, "a stop already continued by a hook is left alone");
+    let text = stop("s1", false).expect("reminder");
+    assert!(text.contains("handoff") && text.contains(&format!("in progress: {}", task.id)), "{text}");
+    assert_eq!(stop("s1", false), None, "at most once per session");
+    breadcrumb(&v.root, &["hook", "session-start"], &json!({"cwd": proj, "source": "compact", "session_id": "s1"}).to_string(), d.path());
+    assert_eq!(stop("s1", false), None, "compaction does not rearm it");
+
+    start("s2");
+    std::thread::sleep(Duration::from_millis(1100));
+    breadcrumb::ops::append(&v, &task.id, "progress").unwrap();
+    let new = common::add(&v, "Latest handoff", "handoff", Some("demo-app"), &[]);
+    assert!(new.links.iter().any(|l| l.to == old.id && l.rel == "supersedes"), "links the previous handoff");
+    assert_eq!(stop("s2", false), None, "a handoff was written");
+    let ctx = breadcrumb::ops::context(&v, Some("demo-app"), 15).unwrap();
+    assert!(ctx.contains(&new.id) && !ctx.contains(&old.id), "only the latest handoff: {ctx}");
+}
+
+#[test]
+fn hooks_install_registers_stop_with_opt_out() {
+    let (d, v) = common::vault();
+    let settings = d.path().join("settings.json");
+    let sp = settings.to_str().unwrap();
+    breadcrumb(&v.root, &["hooks", "install", "--settings", sp], "", d.path());
+    let s = read(&settings);
+    assert!(s["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("hook stop"));
+    breadcrumb(&v.root, &["hooks", "install", "--settings", sp, "--no-handoff"], "", d.path());
+    assert!(read(&settings)["hooks"].get("Stop").is_none());
+}

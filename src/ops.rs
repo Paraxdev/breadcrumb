@@ -281,6 +281,13 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
             note.links.push(Link { to, rel: l.rel });
         }
     }
+    if note.kind == HANDOFF && !note.links.iter().any(|l| l.rel == SUPERSEDES) {
+        let mut prev: Vec<Note> = v.load_notes().into_iter().filter(|n| n.kind == HANDOFF && n.project == note.project && !n.is_archived()).collect();
+        sort_notes(&mut prev, SortKey::Updated);
+        if let Some(p) = prev.first() {
+            note.links.push(Link { to: p.id.clone(), rel: SUPERSEDES.into() });
+        }
+    }
     let mut touched = vec![];
     if let Some(p) = &project
         && let Some(created) = ensure_project(v, p)? {
@@ -742,6 +749,8 @@ impl Default for ContextOpts {
 }
 
 pub const PINNED_BODY_MAX: usize = 600;
+pub const HANDOFF: &str = "handoff";
+pub const SUPERSEDES: &str = "supersedes";
 pub const PREFS_LINE_MAX: usize = 400;
 pub const PIN_HINT: &str = "pin it if every session needs the body, unpinned preferences show as a title only";
 const PREF_TITLE_MAX: usize = 60;
@@ -848,7 +857,22 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         }
     }
     out.push_str(&crate::backlog::context_section(&notes, &all));
-    let rest: Vec<&Note> = notes.iter().filter(|n| !n.pinned && !is_pref(n) && !is_open_todo(n) && !crate::backlog::in_digest(n)).collect();
+    let mut handoff_seen: Vec<Option<String>> = vec![];
+    let older_handoff = |n: &Note, seen: &mut Vec<Option<String>>| {
+        if n.kind != HANDOFF {
+            return false;
+        }
+        if seen.contains(&n.project) {
+            return true;
+        }
+        seen.push(n.project.clone());
+        false
+    };
+    let rest: Vec<&Note> = notes
+        .iter()
+        .filter(|n| !n.pinned && !is_pref(n) && !is_open_todo(n) && !crate::backlog::in_digest(n))
+        .filter(|n| !older_handoff(n, &mut handoff_seen))
+        .collect();
     // Prefs used to sit in Recent, so they still count against it and the digest does not grow.
     let recent: Vec<&&Note> = rest.iter().take(opts.recent.saturating_sub(prefs.len().min(opts.recent / 2))).collect();
     if !recent.is_empty() {

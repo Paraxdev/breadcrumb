@@ -317,6 +317,8 @@ pub enum HookCmd {
     Prompt,
     /// PreToolUse on file tools: notes whose path globs match the file
     FileTouch,
+    /// Stop: one handoff reminder when the session changed notes and wrote no handoff
+    Stop,
     /// The detached work SessionEnd starts
     #[command(hide = true)]
     Background {
@@ -344,6 +346,9 @@ pub enum HooksCmd {
         /// Skip the PreToolUse hook that shows notes scoped to the touched file
         #[arg(long)]
         no_file_notes: bool,
+        /// Skip the Stop hook that asks once per session for a handoff note
+        #[arg(long)]
+        no_handoff: bool,
     },
     /// Remove breadcrumb hooks, leaving every other setting alone
     Uninstall {
@@ -621,6 +626,7 @@ fn run_hook(vault: Option<&Path>, h: &HookCmd) {
         HookCmd::SessionStart => print(crate::hooks::session_start(&root, &input(), &cwd()).map(Some)),
         HookCmd::Prompt => print(crate::hooks::prompt(&root, &input(), &cwd())),
         HookCmd::FileTouch => print(crate::hooks::file_touch(&root, &input(), &cwd())),
+        HookCmd::Stop => print(crate::hooks::stop(&root, &input(), &cwd())),
         HookCmd::SessionEnd { no_import } => {
             if let Ok(v) = Vault::open(&root)
                 && (crate::hooks::needs_sync(&v) || (!no_import && crate::hooks::needs_import(&v.root)))
@@ -651,6 +657,7 @@ fn hooks_text(r: &crate::hooks::HookChange) -> String {
         line("SessionEnd", &r.session_end),
         line(crate::hooks::PROMPT_EVENT, &r.prompt),
         line(crate::hooks::FILE_EVENT, &r.file_touch),
+        line(crate::hooks::STOP_EVENT, &r.stop),
     ]
     .join("\n")
 }
@@ -982,8 +989,8 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Hooks(hc) => {
             let explicit_vault = cli.vault.as_deref().map(crate::util::absolutize);
             let (r, verb) = match hc {
-                HooksCmd::Install { settings, no_sync, no_import, no_recall, no_file_notes } => {
-                    let o = crate::hooks::InstallOpts { sync: !no_sync, import: !no_import, recall: !no_recall, file_notes: !no_file_notes };
+                HooksCmd::Install { settings, no_sync, no_import, no_recall, no_file_notes, no_handoff } => {
+                    let o = crate::hooks::InstallOpts { sync: !no_sync, import: !no_import, recall: !no_recall, file_notes: !no_file_notes, handoff: !no_handoff };
                     (crate::hooks::install(&settings_path(settings)?, explicit_vault.as_deref(), o)?, "installed")
                 }
                 HooksCmd::Uninstall { settings } => (crate::hooks::uninstall(&settings_path(settings)?)?, "removed"),

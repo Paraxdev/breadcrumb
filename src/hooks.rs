@@ -12,6 +12,8 @@ pub const START_SUFFIX: &str = "hook session-start";
 pub const END_SUFFIX: &str = "hook session-end";
 pub const PROMPT_SUFFIX: &str = "hook prompt";
 pub const FILE_SUFFIX: &str = "hook file-touch";
+pub const STOP_SUFFIX: &str = "hook stop";
+pub const STOP_EVENT: &str = "Stop";
 pub const START_MATCHER: &str = "startup|resume|clear|compact";
 pub const FILE_MATCHER: &str = "Read|Edit|Write|MultiEdit|NotebookEdit";
 pub const FILE_EVENT: &str = "PreToolUse";
@@ -28,6 +30,7 @@ pub struct HookInput {
     pub session_id: Option<String>,
     pub prompt: Option<String>,
     pub file_path: Option<String>,
+    pub stop_hook_active: bool,
 }
 
 pub fn parse_input(stdin: &str) -> HookInput {
@@ -40,6 +43,7 @@ pub fn parse_input(stdin: &str) -> HookInput {
         session_id: get(&v, "session_id"),
         prompt: get(&v, "prompt"),
         file_path: get(&tool, "file_path").or_else(|| get(&tool, "notebook_path")),
+        stop_hook_active: v.get("stop_hook_active").and_then(Value::as_bool).unwrap_or(false),
     }
 }
 
@@ -62,6 +66,9 @@ pub fn session_start(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Res
             Some("clear") => st = recall::Session::default(),
             Some("compact") => st.shown.clear(),
             _ => {}
+        }
+        if st.started == 0 {
+            st.started = crate::util::now().timestamp();
         }
         st.add_shown(recall::ids_in(&text));
         let _ = recall::save_session(root, sid, &st);
@@ -90,6 +97,55 @@ pub fn prompt(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Result<Opt
         return Ok(None);
     }
     Ok(Some(output(PROMPT_EVENT, &recall::recall_line(&v, &hits))?))
+}
+
+/// Notes of `slug` written since `since` (unix seconds). Only files whose mtime is that recent get parsed.
+fn changed_since(v: &Vault, slug: &str, since: i64) -> Vec<crate::note::Note> {
+    let Ok(rd) = std::fs::read_dir(v.notes_dir(Some(slug))) else { return vec![] };
+    let cutoff = std::time::UNIX_EPOCH + std::time::Duration::from_secs(since.max(0) as u64);
+    rd.flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+        .filter(|e| e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t >= cutoff))
+        .filter_map(|e| {
+            let stem = e.file_name().to_string_lossy().to_string();
+            crate::note::Note::parse(&read_text(&e.path()).ok()?, Some(&stem)).ok()
+        })
+        .filter(|n| n.updated.timestamp() >= since)
+        .collect()
+}
+
+/// Stop: once per session, when it changed the project's notes and wrote no handoff, asks for one.
+pub fn stop(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Result<Option<String>> {
+    let Some(sid) = &input.session_id else { return Ok(None) };
+    if input.stop_hook_active {
+        return Ok(None);
+    }
+    let mut st = recall::load_session(root, sid);
+    if st.handoff_done || st.started == 0 {
+        return Ok(None);
+    }
+    let v = Vault::open(root)?;
+    let cwd = input.cwd.as_deref().unwrap_or(fallback_cwd);
+    let Some(slug) = v.detect_project_fast(cwd) else { return Ok(None) };
+    let changed = changed_since(&v, &slug, st.started);
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    st.handoff_done = true;
+    recall::save_session(root, sid, &st)?;
+    if changed.iter().any(|n| n.kind == "handoff") {
+        return Ok(None);
+    }
+    let mut wip: Vec<String> = v
+        .load_notes()
+        .into_iter()
+        .filter(|n| n.project.as_deref() == Some(slug.as_str()) && !n.is_archived() && crate::backlog::is_item(n) && crate::backlog::state(n) == "in-progress")
+        .map(|n| n.id)
+        .collect();
+    wip.sort();
+    let wip = if wip.is_empty() { String::new() } else { format!(", in progress: {}", wip.join(", ")) };
+    let text = format!("breadcrumb: this session changed {slug} notes but wrote no handoff. Add or update the {slug} handoff note (kind handoff, it links the previous one) with what was done and what is next{wip}.");
+    Ok(Some(output(STOP_EVENT, &text)?))
 }
 
 /// PreToolUse on file tools: notes whose path globs match the file, each id at most once per session.
@@ -326,6 +382,7 @@ pub struct HookChange {
     pub session_end: Option<String>,
     pub prompt: Option<String>,
     pub file_touch: Option<String>,
+    pub stop: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -334,11 +391,12 @@ pub struct InstallOpts {
     pub import: bool,
     pub recall: bool,
     pub file_notes: bool,
+    pub handoff: bool,
 }
 
 impl Default for InstallOpts {
     fn default() -> Self {
-        InstallOpts { sync: true, import: true, recall: true, file_notes: true }
+        InstallOpts { sync: true, import: true, recall: true, file_notes: true, handoff: true }
     }
 }
 
@@ -370,16 +428,18 @@ pub fn install(path: &Path, vault: Option<&Path>, o: InstallOpts) -> Result<Hook
     }
     let prompt = exe_command(vault, PROMPT_SUFFIX)?;
     let file = exe_command(vault, FILE_SUFFIX)?;
+    let stop = exe_command(vault, STOP_SUFFIX)?;
     let hooks = hooks_obj(&mut s)?;
     ensure(hooks, "SessionStart", Some(START_MATCHER), START_SUFFIX, &start, SESSION_TIMEOUT)?;
     let session_end = toggle(hooks, o.sync, Spec { event: "SessionEnd", matcher: None, suffix: END_SUFFIX, command: end, timeout: SESSION_TIMEOUT })?;
     let prompt = toggle(hooks, o.recall, Spec { event: PROMPT_EVENT, matcher: None, suffix: PROMPT_SUFFIX, command: prompt, timeout: RECALL_TIMEOUT })?;
     let file_touch = toggle(hooks, o.file_notes, Spec { event: FILE_EVENT, matcher: Some(FILE_MATCHER), suffix: FILE_SUFFIX, command: file, timeout: RECALL_TIMEOUT })?;
+    let stop = toggle(hooks, o.handoff, Spec { event: STOP_EVENT, matcher: None, suffix: STOP_SUFFIX, command: stop, timeout: RECALL_TIMEOUT })?;
     let changed = s != before;
     if changed {
         save_settings(path, &s)?;
     }
-    Ok(HookChange { settings: path_str(path), changed, session_start: Some(start), session_end, prompt, file_touch })
+    Ok(HookChange { settings: path_str(path), changed, session_start: Some(start), session_end, prompt, file_touch, stop })
 }
 
 pub fn uninstall(path: &Path) -> Result<HookChange> {
@@ -392,6 +452,7 @@ pub fn uninstall(path: &Path) -> Result<HookChange> {
         changed |= remove_from(hooks, "SessionEnd", END_SUFFIX);
         changed |= remove_from(hooks, PROMPT_EVENT, PROMPT_SUFFIX);
         changed |= remove_from(hooks, FILE_EVENT, FILE_SUFFIX);
+        changed |= remove_from(hooks, STOP_EVENT, STOP_SUFFIX);
         if changed && hooks.is_empty() {
             root.shift_remove("hooks");
         }
@@ -399,7 +460,7 @@ pub fn uninstall(path: &Path) -> Result<HookChange> {
     if changed {
         save_settings(path, &s)?;
     }
-    Ok(HookChange { settings: path_str(path), changed, session_start: None, session_end: None, prompt: None, file_touch: None })
+    Ok(HookChange { settings: path_str(path), changed, session_start: None, session_end: None, prompt: None, file_touch: None, stop: None })
 }
 
 pub fn status(path: &Path) -> Result<HookChange> {
@@ -416,5 +477,6 @@ pub fn status(path: &Path) -> Result<HookChange> {
         session_end: find("SessionEnd", END_SUFFIX),
         prompt: find(PROMPT_EVENT, PROMPT_SUFFIX),
         file_touch: find(FILE_EVENT, FILE_SUFFIX),
+        stop: find(STOP_EVENT, STOP_SUFFIX),
     })
 }

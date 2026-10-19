@@ -351,6 +351,12 @@ pub struct Session {
     pub shown: Vec<String>,
     #[serde(default)]
     pub prompted: bool,
+    /// Unix seconds of the first SessionStart, kept across compaction.
+    #[serde(default)]
+    pub started: i64,
+    /// The Stop hook has decided about the handoff reminder, it never fires twice.
+    #[serde(default)]
+    pub handoff_done: bool,
 }
 
 impl Session {
