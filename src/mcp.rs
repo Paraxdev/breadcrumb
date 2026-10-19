@@ -241,6 +241,7 @@ impl Server {
                         links: if a.contains_key("links") { Some(links(a)?) } else { None },
                         by: s(a, "by"),
                         set_paths: if a.contains_key("paths") { Some(strs(a, "paths")) } else { None },
+                        refs: strs(a, "refs"),
                         ..Default::default()
                     },
                 )?;
@@ -276,7 +277,7 @@ impl Server {
                     return Ok(format::ack("queued", &n));
                 }
                 let check = s(a, "check").map(|c| backlog::Check::parse(&c)).transpose()?;
-                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check })?;
+                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs") })?;
                 let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.id, r.to) };
                 if !r.unmet.is_empty() {
                     let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
@@ -558,19 +559,20 @@ pub fn tool_defs() -> Vec<Value> {
     let fields = || json!({"type": "object", "description": "kind fields by name"});
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
+    let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});
     let paths = || json!({"type": "array", "items": {"type": "string"}, "description": "file globs, src/db/**"});
     vec![
-        tool("context", "Reload the project digest that is injected at session start.", obj(with(target(), json!({"kinds": bl()})), &[])),
-        tool("search", "Ranked full-text search, current project plus global by default.", obj(with(with(scope(), filters()), json!({"query": st()})), &["query"])),
+        tool("context", "Reload the session start digest.", obj(with(target(), json!({"kinds": bl()})), &[])),
+        tool("search", "Ranked full-text search, project plus global.", obj(with(with(scope(), filters()), json!({"query": st()})), &["query"])),
         tool("list", "List notes, newest first.", obj(with(with(scope(), filters()), json!({
             "status": {"type": "string", "enum": ["active", "archived", "all"]},
-            "where": {"type": ["object", "array"], "description": "{field: value} or k=v strings"},
+            "where": {"type": ["object", "array"], "description": "{field: value} or k=v, ref=commit:sha"},
             "sort": {"type": "string", "enum": ["updated", "created", "title"]},
         })), &[])),
         tool("get", "Read a note, full includes default keys.", obj(with(id(), json!({"full": bl()})), &["id"])),
         tool("add", "Save one durable fact, decision, gotcha, preference, handoff or idea.", obj(with(target(), json!({
             "title": st(),
-            "kind": {"type": "string", "description": "default note, idea for quick ideas"},
+            "kind": {"type": "string", "description": "default note"},
             "body": st(),
             "tags": arr(),
             "fields": fields(),
@@ -578,7 +580,7 @@ pub fn tool_defs() -> Vec<Value> {
             "pinned": bl(),
             "paths": paths(),
         })), &["title"])),
-        tool("update", "Change a note, status archived archives it.", obj(with(id(), json!({
+        tool("update", "Change a note.", obj(with(id(), json!({
             "title": st(),
             "kind": st(),
             "body": {"type": "string", "description": "replaces the body"},
@@ -589,6 +591,7 @@ pub fn tool_defs() -> Vec<Value> {
             "pinned": bl(),
             "status": {"type": "string", "enum": ["active", "archived"]},
             "paths": paths(),
+            "refs": refs(),
             "verify": {"type": "boolean", "description": "alone: mark accurate"},
         })), &["id"])),
         tool("append", "Append a paragraph to a note.", obj(with(id(), json!({"text": st()})), &["id", "text"])),
@@ -601,14 +604,15 @@ pub fn tool_defs() -> Vec<Value> {
         tool("delete", "Delete a note, prefer archiving with update.", obj(with(id(), json!({"confirm": bl()})), &["id", "confirm"])),
         tool("move", "Change a backlog item's state.", obj(with(id(), json!({
             "state": {"type": "string", "enum": backlog::STATES},
-            "position": {"type": "string", "description": "for queued: top, or an id to go after"},
+            "position": {"type": "string", "description": "queued: top or id to follow"},
             "resolution": {"type": "string", "description": "required for rejected"},
             "shipped_in": st(),
-            "check": {"type": "string", "description": "mark acceptance met: all or 2,3"},
+            "check": {"type": "string", "description": "tick acceptance: all or 2,3"},
+            "refs": refs(),
             "by": st(),
         })), &["id", "state"])),
-        tool("next", "Top unblocked queued item, claim moves it to in-progress.", obj(with(scope(), json!({"claim": bl(), "by": st()})), &[])),
-        tool("backlog", "Backlog board, or the tree or deps of one item.", obj(with(scope(), json!({
+        tool("next", "Top unblocked queued item, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": st()})), &[])),
+        tool("backlog", "Backlog board, or the tree or deps of one item.", obj(with(json!({"project": st()}), json!({
             "view": {"type": "string", "enum": ["board", "tree", "deps"]},
             "id": st(),
             "include_closed": bl(),
@@ -623,11 +627,11 @@ pub fn tool_defs() -> Vec<Value> {
             "name": st(),
             "description": st(),
             "template": st(),
-            "fields": {"type": "array", "items": {"type": ["string", "object"]}, "description": "name:type[:required][:a|b] or objects, types string int float bool date enum list ref url"},
+            "fields": {"type": "array", "items": {"type": ["string", "object"]}, "description": "name:type[:required][:a|b] or {name, type}"},
             "replace": bl(),
             "remove_fields": arr(),
         }), &["name"])}), &[])),
-        tool("workflow", "Claude Code workflow scripts kept in the vault.", obj(with(scope(), json!({
+        tool("workflow", "Workflow scripts kept in the vault.", obj(with(json!({"project": st()}), json!({
             "action": {"type": "string", "enum": ["list", "save", "install", "status"]},
             "paths": {"type": "array", "items": {"type": "string"}, "description": "for save"},
             "to": st(),

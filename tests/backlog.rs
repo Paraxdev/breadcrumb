@@ -202,3 +202,31 @@ fn noop_move_says_already_and_check_ticks_criteria() {
     assert_eq!(acc, serde_yaml::from_str::<Value>("['[x] renders', '[x] saves', '[x] loads']").unwrap());
     assert!(backlog::Check::parse("0").is_err() && backlog::Check::parse("a").is_err());
 }
+
+#[test]
+fn refs_are_set_by_update_and_move_searchable_and_filterable() {
+    let (_d, v) = common::vault();
+    let f = common::add(&v, "Parser rewrite", "feature", None, &[]);
+    let other = common::add(&v, "Unrelated", "task", None, &[]);
+    ops::update(&v, &f.id, ops::UpdateReq { refs: vec!["run:wf_77".into(), "branch:fix/parser".into(), "PR:#12".into()], ..Default::default() }).unwrap();
+    assert_eq!(fresh(&v, &f.id).refs(), vec!["run:wf_77", "branch:fix/parser", "pr:12"]);
+    assert!(ops::update(&v, &f.id, ops::UpdateReq { refs: vec!["nocolon".into()], ..Default::default() }).is_err());
+    ops::update(&v, &f.id, ops::UpdateReq { refs: vec!["-branch:fix/parser".into()], ..Default::default() }).unwrap();
+    let sha = "0123abcd4567ef0123abcd4567ef0123abcd4567";
+    let r = backlog::move_item(&v, &f.id, MoveReq { state: "done".into(), shipped_in: Some(sha.into()), refs: vec!["run:wf_78".into()], ..Default::default() }).unwrap();
+    assert_eq!(r.note.refs(), vec!["run:wf_77".to_string(), "pr:12".into(), "run:wf_78".into(), format!("commit:{sha}")]);
+    assert_eq!(fresh(&v, &f.id).field("shipped_in"), Some(&Value::String(sha.into())));
+    backlog::move_item(&v, &other.id, MoveReq { state: "done".into(), shipped_in: Some("v1.2".into()), ..Default::default() }).unwrap();
+    assert!(fresh(&v, &other.id).refs().is_empty(), "a version is not a commit");
+
+    let compact = breadcrumb::format::note_compact(&fresh(&v, &f.id), false);
+    assert!(compact.contains("refs: run:wf_77 pr:12 run:wf_78 commit:0123abcd"), "{compact}");
+
+    let found = |w: &str| ops::list(&v, &Scope::All, &ops::Filter { wheres: vec![w.into()], ..Default::default() }).unwrap().into_iter().map(|n| n.id).collect::<Vec<_>>();
+    assert_eq!(found("ref=commit:0123abcd"), vec![f.id.clone()]);
+    assert_eq!(found("ref=wf_78"), vec![f.id.clone()]);
+    assert_eq!(found("ref=branch:wf_78"), Vec::<String>::new());
+    assert_eq!(found("ref!=pr:12"), vec![other.id.clone()]);
+    let hits = ops::search(&v, "wf_77", &Scope::All, &ops::Filter::default()).unwrap();
+    assert_eq!(hits.hits.first().map(|h| h.note.id.clone()), Some(f.id.clone()));
+}

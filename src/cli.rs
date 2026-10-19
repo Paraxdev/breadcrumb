@@ -65,6 +65,9 @@ pub struct FilterArgs {
     /// updated, created or title
     #[arg(long, default_value = "updated")]
     pub sort: String,
+    /// Has this ref, type:value or just the value (repeatable)
+    #[arg(long = "ref", value_name = "REF")]
+    pub refs: Vec<String>,
 }
 
 impl FilterArgs {
@@ -73,7 +76,7 @@ impl FilterArgs {
             kind: self.kind.clone(),
             tags: self.tags.clone(),
             status: StatusFilter::parse(&self.status)?,
-            wheres: self.wheres.clone(),
+            wheres: self.wheres.iter().cloned().chain(self.refs.iter().map(|r| format!("ref={r}"))).collect(),
             pinned: self.pinned,
             limit: self.limit,
             sort: SortKey::parse(&self.sort)?,
@@ -248,6 +251,9 @@ pub enum Cmd {
         /// Also mark acceptance criteria met: all, or positions like 2,3
         #[arg(long, value_name = "WHICH")]
         check: Option<String>,
+        /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, -type:value removes (repeatable)
+        #[arg(long = "ref", value_name = "REF", allow_hyphen_values = true)]
+        refs: Vec<String>,
     },
     /// Mark acceptance criteria of an item met ([x])
     Check {
@@ -546,6 +552,9 @@ pub struct UpdateArgs {
     /// +glob or glob adds a file glob, -glob removes it (repeatable)
     #[arg(long = "path-glob", value_name = "GLOB", allow_hyphen_values = true)]
     pub paths: Vec<String>,
+    /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, -type:value removes (repeatable)
+    #[arg(long = "ref", value_name = "REF", allow_hyphen_values = true)]
+    pub refs: Vec<String>,
 }
 
 struct Out {
@@ -733,6 +742,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     links: None,
                     by: u.by,
                     paths: u.paths,
+                    refs: u.refs,
                     ..Default::default()
                 },
             )?;
@@ -924,9 +934,9 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => out.emit(format!("no unblocked queued items in {}", sc.label()), Json::Null),
             }
         }
-        Cmd::Move { id, state, resolution, shipped_in, by, check } => {
+        Cmd::Move { id, state, resolution, shipped_in, by, check, refs } => {
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check })?;
+            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs })?;
             out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "note": r.note.to_json()}));
         }
         Cmd::Check { id, which } => {

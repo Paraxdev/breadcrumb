@@ -135,6 +135,10 @@ pub fn note_compact(n: &Note, full: bool) -> String {
     drop(&mut m, "created", &|_: &Y| true);
     let updated = fmt_date(&n.updated);
     drop(&mut m, crate::note::VERIFIED_KEY, &|v: &Y| v.as_str() == Some(updated.as_str()));
+    let refs = Y::String(crate::note::REFS_KEY.into());
+    if let Some(Y::Sequence(_)) = m.get(&refs) {
+        m.insert(refs, Y::String(n.refs().join(" ")));
+    }
     let yaml = serde_yaml::to_string(&Y::Mapping(m)).unwrap_or_default();
     let body = n.body.trim_end();
     if body.is_empty() { format!("---\n{yaml}---\n") } else { format!("---\n{yaml}---\n{body}\n") }

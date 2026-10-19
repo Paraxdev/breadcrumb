@@ -136,6 +136,15 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
             set_paths(note, crate::recall::normalize_globs(&raw)?);
             continue;
         }
+        if key == crate::note::REFS_KEY {
+            let raw: Vec<String> = match input {
+                FieldInput::Raw(s) => s.split(',').map(str::to_string).collect(),
+                FieldInput::Value(Value::Sequence(xs)) => xs.iter().filter_map(yaml_scalar_string).collect(),
+                FieldInput::Value(x) => yaml_scalar_string(&x).into_iter().collect(),
+            };
+            note.set_refs(crate::note::normalize_refs(&raw)?);
+            continue;
+        }
         if key == crate::note::VERIFIED_KEY {
             bail!("'verified' is set by breadcrumb, use verify to mark a note as still accurate");
         }
@@ -182,6 +191,25 @@ fn set_paths(note: &mut Note, globs: Vec<String>) {
     } else {
         note.set_field(crate::note::PATHS_KEY, Value::Sequence(globs.into_iter().map(Value::String).collect()));
     }
+}
+
+/// `type:value` or `+type:value` adds a ref, `-type:value` removes it.
+pub fn edit_refs(note: &mut Note, edits: &[String]) -> Result<()> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    let mut refs = note.refs();
+    for e in edits {
+        let e = e.trim();
+        if let Some(rm) = e.strip_prefix('-') {
+            let rm = crate::note::normalize_refs(&[rm.to_string()])?;
+            refs.retain(|r| !rm.contains(r));
+        } else {
+            refs.extend(crate::note::normalize_refs(&[e.strip_prefix('+').unwrap_or(e).to_string()])?);
+        }
+    }
+    note.set_refs(crate::note::normalize_refs(&refs)?);
+    Ok(())
 }
 
 fn push_tag(tags: &mut Vec<String>, t: &str) {
@@ -282,6 +310,8 @@ pub struct UpdateReq {
     pub paths: Vec<String>,
     /// Replaces all path globs when set, before `paths`.
     pub set_paths: Option<Vec<String>>,
+    /// `type:value` or `+type:value` adds a ref, `-type:value` removes it.
+    pub refs: Vec<String>,
     /// Actor recorded in the backlog history when the state changes.
     pub by: Option<String>,
     /// `version` of the note the caller edited. A mismatch means someone else changed it meanwhile.
@@ -365,6 +395,7 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         }
         set_paths(&mut note, globs);
     }
+    edit_refs(&mut note, &req.refs)?;
     if let Some(b) = req.body {
         note.body = b.trim_end().to_string();
     }
@@ -604,9 +635,27 @@ pub fn where_matches(n: &Note, expr: &str) -> Result<bool> {
     } else {
         bail!("invalid --where '{expr}', expected key=value or key!=value");
     };
+    if key.trim() == "ref" {
+        return Ok(n.refs().iter().any(|r| ref_matches(r, val.trim())) != negate);
+    }
     let vals = note_values(n, key.trim());
     let hit = vals.iter().any(|x| x.eq_ignore_ascii_case(val.trim()));
     Ok(hit != negate)
+}
+
+/// `want` is a whole ref or just its value. A commit also matches by a prefix of at least 7 characters, either way round.
+pub fn ref_matches(have: &str, want: &str) -> bool {
+    let want = want.to_ascii_lowercase();
+    let have = have.to_ascii_lowercase();
+    let (kind, value) = have.split_once(':').unwrap_or(("", have.as_str()));
+    let (want_kind, want_value) = match want.split_once(':') {
+        Some((k, v)) => (Some(k), v),
+        None => (None, want.as_str()),
+    };
+    if want_kind.is_some_and(|k| k != kind) {
+        return false;
+    }
+    value == want_value || (kind == "commit" && want_value.len() >= 7 && value.len() >= 7 && (value.starts_with(want_value) || want_value.starts_with(value)))
 }
 
 pub fn filter_notes(notes: Vec<Note>, scope: &Scope, f: &Filter) -> Result<Vec<Note>> {
@@ -859,7 +908,7 @@ pub fn define_kind(v: &Vault, def: KindDef, replace: bool, remove_fields: &[Stri
         bail!("invalid kind name '{}', use lowercase letters, digits, '-' or '_'", def.name);
     }
     for f in &def.fields {
-        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY].contains(&f.name.as_str()) {
+        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY, crate::note::REFS_KEY].contains(&f.name.as_str()) {
             bail!("field name '{}' is reserved for note metadata", f.name);
         }
         if f.ty == kind::FieldType::Enum && f.values.is_empty() {

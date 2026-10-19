@@ -525,6 +525,8 @@ pub struct MoveReq {
     pub by: Option<String>,
     /// Acceptance criteria to mark met in the same write.
     pub check: Option<Check>,
+    /// `type:value` refs to add, `-type:value` removes.
+    pub refs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -636,12 +638,12 @@ pub fn unmet_acceptance(n: &Note) -> Vec<String> {
 pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let to = check_state(&req.state)?;
     let resolution = req.resolution.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    if to == "rejected" && resolution.is_none() {
-        bail!("moving to rejected requires a resolution explaining why");
-    }
     let _g = v.lock()?;
     let mut n = get_item(v, id)?;
     let from = state(&n);
+    if to == "rejected" && resolution.is_none() && (from != "rejected" || str_field(&n, "resolution").is_none()) {
+        bail!("moving to rejected requires a resolution explaining why");
+    }
     let unchanged = |key: &str, want: &Option<String>| want.as_ref().is_none_or(|w| str_field(&n, key).as_deref() == Some(w.as_str()));
     let shipped_in = req.shipped_in.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let same = from == to && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in);
@@ -649,7 +651,13 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
         Some(c) => apply_check(&mut n, c)?,
         None => 0,
     };
-    if same && ticked == 0 {
+    let mut ref_edits = req.refs.clone();
+    if let Some(sha) = shipped_in.as_deref().filter(|s| (to == "done" || to == "shipped") && is_sha(s)) {
+        ref_edits.push(format!("commit:{sha}"));
+    }
+    let refs_before = n.refs();
+    crate::ops::edit_refs(&mut n, &ref_edits)?;
+    if same && ticked == 0 && n.refs() == refs_before {
         let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
         return Ok(MoveResult { note: n, from, to, unmet, changed: false });
     }
@@ -668,6 +676,10 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     record_state_change(&mut n, &from, &to, req.by.as_deref());
     save(v, &mut n, "move")?;
     Ok(MoveResult { note: n, from, to, unmet, changed: true })
+}
+
+fn is_sha(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 pub fn move_text(r: &MoveResult) -> String {

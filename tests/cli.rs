@@ -69,7 +69,11 @@ fn cli_end_to_end() {
     ok(&v, &["queue", &iid]);
     assert!(ok(&v, &["next", "--global", "--claim", "--by", "cli"]).contains("claimed"));
     assert!(ok(&v, &["board", "--global"]).contains("in-progress (1)"));
-    assert!(ok(&v, &["move", &iid, "rejected", "--resolution", "nah"]).contains("-> rejected"));
+    assert!(ok(&v, &["move", &iid, "rejected", "--resolution", "nah", "--ref", "run:wf_9"]).contains("-> rejected"));
+    assert!(ok(&v, &["move", &iid, "rejected"]).contains("already in rejected"));
+    assert_eq!(json(&v, &["list", "--global", "--ref", "run:wf_9"])[0]["id"], iid.as_str());
+    ok(&v, &["update", &iid, "--ref", "-run:wf_9"]);
+    assert!(json(&v, &["list", "--global", "--ref", "wf_9"]).as_array().unwrap().is_empty());
     assert!(ok(&v, &["delete", &id, "--yes"]).contains("deleted"));
     let guide = ok(&v, &["guide"]);
     assert!(guide.contains("context") && guide.chars().count() < 900);

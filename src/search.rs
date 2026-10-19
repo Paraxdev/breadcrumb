@@ -64,6 +64,7 @@ pub fn parse_query(q: &str) -> Query {
 struct Prepared {
     title: Vec<String>,
     tags: Vec<String>,
+    refs: Vec<String>,
     fields: Vec<String>,
     body: Vec<String>,
     title_lc: String,
@@ -82,6 +83,7 @@ fn prepare(n: &Note) -> Prepared {
     Prepared {
         title: tokenize(&n.title),
         tags,
+        refs: n.refs().iter().flat_map(|r| tokenize(r)).collect(),
         fields,
         body: tokenize(&n.body),
         title_lc: n.title.to_lowercase(),
@@ -104,6 +106,7 @@ fn term_score(n: &Note, p: &Prepared, term: &str) -> f64 {
     let mut s = 0.0;
     s += 6.0 * token_weight(&p.title, term);
     s += 4.0 * token_weight(&p.tags, term);
+    s += 4.0 * token_weight(&p.refs, term);
     if term.len() >= crate::id::MIN_PREFIX && n.id.starts_with(term) {
         s += 10.0;
     }

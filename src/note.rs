@@ -17,6 +17,33 @@ pub const DEFAULT_REL: &str = "relates";
 /// Optional fields breadcrumb itself maintains: file globs a note applies to, and the date it was last confirmed.
 pub const PATHS_KEY: &str = "paths";
 pub const VERIFIED_KEY: &str = "verified";
+/// Typed pointers to things outside the vault, `type:value` like commit:abc123, run:wf_1, branch:fix/x, pr:12.
+pub const REFS_KEY: &str = "refs";
+
+/// Trimmed `type:value` entries with a lowercase type, deduplicated in order.
+pub fn normalize_refs(raw: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = vec![];
+    for r in raw {
+        let r = r.trim();
+        if r.is_empty() {
+            continue;
+        }
+        let Some((k, val)) = r.split_once(':') else {
+            anyhow::bail!("ref '{r}' must be type:value, like commit:abc123, run:wf_1, branch:fix/x or pr:12");
+        };
+        let k = k.trim().to_ascii_lowercase();
+        let val = val.trim();
+        let val = if k == "pr" { val.trim_start_matches('#') } else { val };
+        if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') || val.is_empty() || val.contains(char::is_whitespace) {
+            anyhow::bail!("ref '{r}' must be type:value with a word type and a value without spaces");
+        }
+        let s = format!("{k}:{val}");
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    Ok(out)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
@@ -381,6 +408,22 @@ impl Note {
             _ => vec![],
         };
         items.into_iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+    }
+
+    pub fn refs(&self) -> Vec<String> {
+        match self.field(REFS_KEY) {
+            Some(Value::Sequence(s)) => s.iter().filter_map(yaml_scalar_string).collect(),
+            Some(v) => yaml_scalar_string(v).map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default(),
+            None => vec![],
+        }
+    }
+
+    pub fn set_refs(&mut self, refs: Vec<String>) {
+        if refs.is_empty() {
+            self.unset_field(REFS_KEY);
+        } else {
+            self.set_field(REFS_KEY, Value::Sequence(refs.into_iter().map(Value::String).collect()));
+        }
     }
 
     pub fn verified(&self) -> Option<DateTime<Utc>> {
