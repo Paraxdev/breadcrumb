@@ -212,6 +212,14 @@ pub enum Cmd {
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
+    /// Machine facts (kind env) for this computer: where files, folders and tools live
+    Env {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// Every machine, not only this one
+        #[arg(long)]
+        all_machines: bool,
+    },
     /// Backlog items grouped by state
     Board {
         #[command(flatten)]
@@ -974,6 +982,13 @@ pub fn run(cli: Cli) -> Result<i32> {
             let body = read_body_arg(body, None)?;
             let n = backlog::capture_idea(&v, &title, body, project, tags, false)?;
             out.emit(format!("captured idea {}  {}", backlog::key(&n), n.title), n.to_json());
+        }
+        Cmd::Env { scope, all_machines } => {
+            let v = open()?;
+            let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
+            let machine = (!all_machines).then(crate::util::machine_name);
+            let notes = ops::env_facts(&v, &sc, machine.as_deref())?;
+            out.emit(format::env_table(&notes, machine.as_deref()), notes_json(&notes));
         }
         Cmd::Board { scope, kind, assignee, include_closed } => {
             let v = open()?;

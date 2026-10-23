@@ -139,6 +139,17 @@ pub fn strip_verbatim(s: &str) -> String {
     }
 }
 
+/// Lowercase name of this computer, BREADCRUMB_MACHINE overrides it.
+pub fn machine_name() -> String {
+    ["BREADCRUMB_MACHINE", "COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| fs::read_to_string("/etc/hostname").ok())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }

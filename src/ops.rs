@@ -293,6 +293,9 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     if !req.paths.is_empty() {
         set_paths(&mut note, crate::recall::normalize_globs(&req.paths)?);
     }
+    if note.kind == crate::kind::ENV && note.field("machine").is_none() {
+        note.set_field("machine", Value::String(crate::util::machine_name()));
+    }
     note.mark_verified();
     k.validate(&mut note.extra)?;
     for l in req.links {
@@ -312,7 +315,7 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
         }
         unpin = all.into_iter().filter(|n| n.kind == HANDOFF && n.project == note.project && n.pinned).collect();
     }
-    let mut touched = vec![];
+    let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
     if let Some(p) = &project
         && let Some(created) = ensure_project(v, p)? {
             touched.push(created);
@@ -523,8 +526,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
     }
     note.mark_verified();
     note.updated = now();
-    let p = v.write_note(&mut note)?;
-    v.commit(&[p], &commit_msg("update", &note))?;
+    let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
+    touched.push(v.write_note(&mut note)?);
+    v.commit(&touched, &commit_msg("update", &note))?;
     Ok(note)
 }
 
@@ -803,6 +807,22 @@ pub fn list_counted(v: &Vault, scope: &Scope, f: &Filter) -> Result<(Vec<Note>, 
         notes.truncate(l);
     }
     Ok((notes, total))
+}
+
+/// Notes of kind env in scope that hold on `machine` (or name no machine), or on every machine, sorted by location.
+pub fn env_facts(v: &Vault, scope: &Scope, machine: Option<&str>) -> Result<Vec<Note>> {
+    let f = Filter { kind: Some(crate::kind::ENV.into()), ..Default::default() };
+    let mut notes = filter_notes(v.load_notes(), scope, &f)?;
+    if let Some(m) = machine {
+        notes.retain(|n| on_machine(n, m));
+    }
+    let key = |n: &Note| (n.field("location").and_then(yaml_scalar_string).unwrap_or_default().to_lowercase(), n.title.to_lowercase());
+    notes.sort_by_key(key);
+    Ok(notes)
+}
+
+pub fn on_machine(n: &Note, machine: &str) -> bool {
+    n.field("machine").and_then(yaml_scalar_string).is_none_or(|x| x.trim().eq_ignore_ascii_case(machine))
 }
 
 pub const DEFAULT_SEARCH_LIMIT: usize = 5;

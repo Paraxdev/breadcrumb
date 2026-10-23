@@ -440,6 +440,8 @@ pub fn parse_field_spec(spec: &str) -> Result<FieldDef> {
     Ok(f)
 }
 
+pub const ENV: &str = "env";
+
 pub fn seed_kinds() -> Vec<KindDef> {
     let enum_field = |name: &str, values: &[&str], default: &str, desc: &str| FieldDef {
         name: name.into(),
@@ -496,7 +498,20 @@ pub fn seed_kinds() -> Vec<KindDef> {
         str_field("workflow_name", "file name without .js under .claude/workflows"),
         str_field("when_to_use", "when an agent should run it"),
     ];
-    let mut all = vec![note, decision, gotcha, todo, handoff, reference, plan, chat, feedback, user, workflow];
+    let mut env = KindDef::new(ENV, "A fact about one machine: where a file or folder lives or which tool exists, listed by `breadcrumb env`, not in the digest");
+    env.fields = vec![
+        str_field("machine", "computer it holds on, this one when not given"),
+        str_field("location", "the file, folder or tool it is about"),
+        FieldDef {
+            name: "access".into(),
+            ty: FieldType::Enum,
+            required: false,
+            description: Some("whether agents may change it".into()),
+            default: None,
+            values: vec!["read-only".into(), "read-write".into()],
+        },
+    ];
+    let mut all = vec![note, decision, gotcha, todo, handoff, reference, plan, chat, feedback, user, workflow, env];
     all.extend(crate::backlog::seed_kinds());
     all
 }

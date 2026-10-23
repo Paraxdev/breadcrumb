@@ -59,6 +59,9 @@ pub fn short_title(t: &str) -> String {
 /// `id kind title`, plus the project when it is not `current`, plus flags and optionally the date.
 pub fn row(n: &Note, current: Option<&str>, date: bool) -> String {
     let mut s = format!("{} {} {}", n.id, n.kind, short_title(&n.title));
+    if let Some(p) = env_path(n) {
+        let _ = write!(s, ": {p}");
+    }
     if n.project.as_deref() != current {
         let _ = write!(s, " ({})", n.scope_label());
     }
@@ -70,6 +73,32 @@ pub fn row(n: &Note, current: Option<&str>, date: bool) -> String {
     }
     if date {
         let _ = write!(s, " {}", fmt_date(&n.updated));
+    }
+    s
+}
+
+fn env_path(n: &Note) -> Option<String> {
+    (n.kind == crate::kind::ENV).then(|| n.field("location").and_then(crate::note::yaml_scalar_string)).flatten().filter(|p| !p.trim().is_empty())
+}
+
+/// Machine facts as a table: id, path, title, a read-only flag, and the machine when the list spans several.
+pub fn env_table(notes: &[Note], machine: Option<&str>) -> String {
+    if notes.is_empty() {
+        return match machine {
+            Some(m) => format!("no machine facts for {m} yet, add one: breadcrumb add -k env -t \"Screen recordings\" --field location=C:/Users/me/Videos --field access=read-only\n"),
+            None => "no machine facts yet\n".into(),
+        };
+    }
+    let width = notes.iter().map(|n| env_path(n).unwrap_or_default().chars().count()).max().unwrap_or(0).min(60);
+    let mut s = String::new();
+    for n in notes {
+        let path = env_path(n).unwrap_or_else(|| "-".into());
+        let ro = if n.field("access").and_then(crate::note::yaml_scalar_string).as_deref() == Some("read-only") { "  [read-only]" } else { "" };
+        let on = match (machine, n.field("machine").and_then(crate::note::yaml_scalar_string)) {
+            (None, Some(m)) => format!("  ({m})"),
+            _ => String::new(),
+        };
+        let _ = writeln!(s, "{}  {path:<width$}  {}{ro}{on}", n.id, short_title(&n.title));
     }
     s
 }

@@ -568,7 +568,7 @@ pub fn tool_defs() -> Vec<Value> {
             "sort": {"type": "string", "enum": ["updated", "created", "title"]},
         })), &[])),
         tool("get", "Read a note, full adds default keys.", obj(with(id(), json!({"full": bl()})), &["id"])),
-        tool("add", "Save one durable fact, decision, gotcha, preference, handoff or idea.", obj(with(target(), json!({
+        tool("add", "Save one durable fact, decision, gotcha, preference, handoff, idea or machine fact (kind env).", obj(with(target(), json!({
             "title": st(),
             "kind": {"type": "string", "description": "default note"},
             "body": st(),

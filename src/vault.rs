@@ -287,13 +287,14 @@ impl Vault {
         Ok(Some(k))
     }
 
-    /// Returns the kind or an error that tells an agent how to define it.
+    /// Returns the kind or an error that tells an agent how to define it. A built-in kind newer than the vault
+    /// comes from the seed, `ensure_kind_file` writes it once a note uses it.
     pub fn require_kind(&self, name: &str) -> Result<KindDef> {
         match self.load_kind(name)? {
             Some(k) => Ok(k),
             None => {
-                if kind::seed_kinds().iter().any(|k| k.name == name) {
-                    bail!("built-in kind '{name}' is missing from this vault, run `breadcrumb init` to add missing built-in kinds");
+                if let Some(k) = kind::seed_kinds().into_iter().find(|k| k.name == name) {
+                    return Ok(k);
                 }
                 let names: Vec<String> = self.load_kinds().into_iter().map(|k| k.name).collect();
                 let suggested = kind::suggest_kind_name(name);
@@ -305,6 +306,17 @@ impl Vault {
                     names.join(", ")
                 )
             }
+        }
+    }
+
+    /// Writes the file of a built-in kind the vault does not have yet. Call while holding the lock.
+    pub fn ensure_kind_file(&self, name: &str) -> Result<Option<PathBuf>> {
+        if self.load_kind(name)?.is_some() {
+            return Ok(None);
+        }
+        match kind::seed_kinds().into_iter().find(|k| k.name == name) {
+            Some(k) => Ok(Some(self.write_kind(&k)?)),
+            None => Ok(None),
         }
     }
 

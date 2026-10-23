@@ -2,6 +2,7 @@
 //! composed to fit one budget so nothing important is cut off at the end.
 
 use crate::format::{row, short_title};
+use crate::kind::ENV;
 use crate::lifecycle::{self, HANDOFF, Lapsed, SUPERSEDES};
 use crate::note::{Note, yaml_display, yaml_scalar_string};
 use crate::ops::{Filter, Scope, SortKey, filter_notes, is_pref, prefs_line, sort_notes};
@@ -181,10 +182,16 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     if notes.is_empty() {
         writeln!(head, "No notes yet.")?;
     }
+    let machine = crate::util::machine_name();
+    let env = notes.iter().filter(|n| n.kind == ENV && crate::ops::on_machine(n, &machine)).count();
+    notes.retain(|n| n.kind != ENV);
     let days = v.config.stale_days;
     let pins = pins_section(&notes, project, days, opts.budget / 2);
     let prefs: Vec<&Note> = notes.iter().filter(|n| !n.pinned && is_pref(n)).collect();
-    let prefs_text = if prefs.is_empty() { String::new() } else { format!("{}\n", prefs_line(&prefs)) };
+    let mut prefs_text = if prefs.is_empty() { String::new() } else { format!("{}\n", prefs_line(&prefs)) };
+    if env > 0 {
+        writeln!(prefs_text, "Machine facts: {env} for {machine}, `breadcrumb env` or list kind env")?;
+    }
     let mut todos = String::new();
     for n in notes.iter().filter(|n| !n.pinned && is_open_todo(n)) {
         if todos.is_empty() {
