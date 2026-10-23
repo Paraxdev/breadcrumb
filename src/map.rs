@@ -86,6 +86,8 @@ impl MapLine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fresh {
     Fresh,
+    /// The symbol is now on this line.
+    Moved(u64),
     Changed,
     Gone,
     Unknown,
@@ -126,14 +128,22 @@ impl CodeMap {
         self.lines.iter().map(|l| l.file.clone()).collect::<BTreeSet<_>>().into_iter().collect()
     }
 
-    pub fn states(&self, current: Option<&HashMap<String, Option<String>>>) -> Vec<Fresh> {
+    /// Files with a line whose saved hash differs from the current one, the only ones worth reading.
+    pub fn changed_files(&self, cur: &HashMap<String, Option<String>>) -> BTreeSet<String> {
+        let differs = |l: &&MapLine| matches!(cur.get(&l.file), Some(Some(h)) if self.blobs.get(&l.key()) != Some(h));
+        self.lines.iter().filter(differs).map(|l| l.file.clone()).collect()
+    }
+
+    /// `texts` holds the current text of the files `changed_files` named, a changed line is fresh while its
+    /// symbol is still in the file and moved when it sits on another line.
+    pub fn states(&self, current: Option<&HashMap<String, Option<String>>>, texts: &HashMap<String, String>) -> Vec<Fresh> {
         self.lines
             .iter()
             .map(|l| match current {
                 None => Fresh::Unknown,
                 Some(cur) => match cur.get(&l.file) {
                     Some(Some(h)) if self.blobs.get(&l.key()) == Some(h) => Fresh::Fresh,
-                    Some(Some(_)) => Fresh::Changed,
+                    Some(Some(_)) => texts.get(&l.file).map_or(Fresh::Changed, |t| locate(l, t)),
                     _ => Fresh::Gone,
                 },
             })
@@ -148,9 +158,13 @@ impl CodeMap {
             return format!("{head}, freshness unknown, no checkout of the repo found here (pass repo)");
         }
         let mut stale: Vec<(String, &str)> = vec![];
-        let mut count = 0;
+        let (mut count, mut moved) = (0, 0);
         for (l, s) in self.lines.iter().zip(states) {
             let why = match s {
+                Fresh::Moved(_) => {
+                    moved += 1;
+                    continue;
+                }
                 Fresh::Changed => "changed",
                 Fresh::Gone => "gone",
                 _ => continue,
@@ -160,14 +174,21 @@ impl CodeMap {
                 stale.push((l.file.clone(), why));
             }
         }
-        if count == 0 {
+        if count == 0 && moved == 0 {
             return format!("{head}, all fresh");
         }
-        let mut named: Vec<String> = stale.iter().take(HEADER_FILES).map(|(f, w)| format!("{f} {w}")).collect();
-        if stale.len() > HEADER_FILES {
-            named.push(format!("+{} files", stale.len() - HEADER_FILES));
+        let mut out = format!("{head}, {} fresh", n - count - moved);
+        if moved > 0 {
+            out.push_str(&format!(", {moved} moved"));
         }
-        format!("{head}, {count} stale ({}), recheck them and map put the corrected lines", named.join(", "))
+        if count > 0 {
+            let mut named: Vec<String> = stale.iter().take(HEADER_FILES).map(|(f, w)| format!("{f} {w}")).collect();
+            if stale.len() > HEADER_FILES {
+                named.push(format!("+{} files", stale.len() - HEADER_FILES));
+            }
+            out.push_str(&format!(", {count} stale ({}), recheck them and map put the corrected lines", named.join(", ")));
+        }
+        out
     }
 
     pub fn render(&self, states: &[Fresh]) -> String {
@@ -186,7 +207,54 @@ impl CodeMap {
 }
 
 fn line_text(l: &MapLine, s: Fresh) -> String {
-    if matches!(s, Fresh::Changed | Fresh::Gone) { format!("[stale] {}", l.text) } else { l.text.clone() }
+    match s {
+        Fresh::Changed | Fresh::Gone => format!("[stale] {}", l.text),
+        Fresh::Moved(to) => {
+            let old = l.line.as_deref().unwrap_or("");
+            let at = format!("{}:{old}", l.file);
+            let shifted = match old.split_once('-') {
+                Some((_, end)) => format!("{to}-{}", end.parse::<u64>().map_or(to, |e| (e + to).saturating_sub(l.first_line_no()))),
+                None => to.to_string(),
+            };
+            let rest = l.text.strip_prefix(&at).unwrap_or("");
+            format!("{}:{shifted}{rest} [moved from {old}]", l.file)
+        }
+        _ => l.text.clone(),
+    }
+}
+
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// First token of the line's description, the name to look for in the file.
+fn symbol_token(l: &MapLine) -> &str {
+    l.symbol.split_whitespace().next().unwrap_or("").trim_matches(|c: char| !is_word(c))
+}
+
+/// Looks the line's symbol up as a whole word in the file's current text, the occurrence nearest the old line wins.
+fn locate(l: &MapLine, text: &str) -> Fresh {
+    let sym = symbol_token(l);
+    if sym.is_empty() {
+        return Fresh::Changed;
+    }
+    let old = l.first_line_no();
+    let mut best: Option<u64> = None;
+    for (i, row) in text.lines().enumerate() {
+        let no = i as u64 + 1;
+        let hit = row.match_indices(sym).any(|(at, m)| {
+            !row[..at].chars().next_back().is_some_and(is_word) && !row[at + m.len()..].chars().next().is_some_and(is_word)
+        });
+        if hit && best.is_none_or(|b| no.abs_diff(old) < b.abs_diff(old)) {
+            best = Some(no);
+        }
+    }
+    match best {
+        None => Fresh::Changed,
+        Some(_) if l.line.is_none() => Fresh::Fresh,
+        Some(n) if n == old => Fresh::Fresh,
+        Some(n) => Fresh::Moved(n),
+    }
 }
 
 pub fn area_of(n: &Note) -> String {
@@ -399,7 +467,15 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
 fn check_all(maps: &[CodeMap], repo: Option<&Path>) -> Vec<Vec<Fresh>> {
     let files: Vec<String> = maps.iter().flat_map(|m| m.files()).collect::<BTreeSet<_>>().into_iter().collect();
     let cur = repo.and_then(|r| current_blobs(r, &files).ok());
-    maps.iter().map(|m| m.states(cur.as_ref())).collect()
+    let mut texts: HashMap<String, String> = HashMap::new();
+    if let (Some(r), Some(c)) = (repo, &cur) {
+        for f in maps.iter().flat_map(|m| m.changed_files(c)) {
+            if let Ok(b) = std::fs::read(r.join(&f)) {
+                texts.insert(f, String::from_utf8_lossy(&b).into_owned());
+            }
+        }
+    }
+    maps.iter().map(|m| m.states(cur.as_ref(), &texts)).collect()
 }
 
 pub fn get_text(v: &Vault, project: &str, area: &str, repo: Option<&Path>) -> Result<String> {

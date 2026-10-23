@@ -49,7 +49,7 @@ fn an_edited_file_marks_its_lines_stale_and_a_deleted_one_gone() {
     assert!(fresh.starts_with(&format!("map stress overlay {}: 2 lines, all fresh\n", r.map.note.id)), "{fresh}");
     assert!(fresh.contains("\nsrc/view/overlay.ts:1 setOverlay, turns the overlay on\n"), "{fresh}");
 
-    write(&root, "src/view/overlay.ts", "export function setOverlay(on: boolean) {}\n");
+    write(&root, "src/view/overlay.ts", "export function showOverlay(on: boolean) {}\n");
     let text = get(&v, &root, "Stress Overlay");
     let header = text.lines().next().unwrap();
     assert!(header.contains("1 stale (src/view/overlay.ts changed)"), "{text}");
@@ -96,7 +96,9 @@ fn put_merges_by_file_and_symbol_and_keeps_each_line_its_own_hash() {
     let r = put(&v, &root, "core", &["src/a.rs:1 alpha, new text"]);
     assert_eq!((r.refreshed, r.added), (1, 0), "{}", r.text());
     let text = get(&v, &root, "core");
-    assert!(text.contains("\nsrc/a.rs:1 alpha, new text") && text.contains("[stale] src/a.rs:2 beta") && text.contains("[stale] src/a.rs:1 gamma"), "{text}");
+    assert!(text.contains("\nsrc/a.rs:1 alpha, new text") && text.contains("
+src/a.rs:2 beta, second") && text.contains("
+src/a.rs:3 gamma, third [moved from 1]"), "{text}");
 
     let req = PutReq { area: "core".into(), project: "app".into(), drop: vec!["src/a.rs gamma".into()], ..Default::default() };
     assert_eq!(map::put(&v, req, &root).unwrap().dropped, 1);
@@ -178,4 +180,77 @@ fn the_mcp_map_tool_puts_and_briefs() {
     assert!(srv.call_tool("map", &args(json!({"action": "list"}))).unwrap().contains("map core"));
     let names: Vec<String> = breadcrumb::mcp::tool_defs().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
     assert!(names.contains(&"map".to_string()) && !names.contains(&"brief".to_string()), "one new tool");
+}
+
+const SRC: &str = "// top\nexport function setOverlay() {}\nexport function clearOverlay() {}\nexport const legend = 1;\n";
+
+fn overlay_map() -> (tempfile::TempDir, Vault, tempfile::TempDir, PathBuf) {
+    let (vd, v, rd, root) = setup(&[("src/a.ts", SRC)]);
+    put(&v, &root, "overlay", &["src/a.ts:2 setOverlay, turns it on", "src/a.ts:3 clearOverlay, turns it off", "src/a.ts:4 legend, colour scale"]);
+    (vd, v, rd, root)
+}
+
+#[test]
+fn a_symbol_pushed_down_by_inserted_lines_is_fresh_at_its_new_line() {
+    let (_vd, v, _rd, root) = overlay_map();
+    write(&root, "src/a.ts", &format!("import x;\nimport y;\n{SRC}"));
+    let text = get(&v, &root, "overlay");
+    assert!(text.lines().next().unwrap().ends_with("3 lines, 0 fresh, 3 moved"), "{text}");
+    assert!(text.contains("\nsrc/a.ts:4 setOverlay, turns it on [moved from 2]\n"), "{text}");
+    assert!(text.contains("\nsrc/a.ts:6 legend, colour scale [moved from 4]\n"), "{text}");
+    assert!(!text.contains("[stale]"), "{text}");
+}
+
+#[test]
+fn a_deleted_symbol_is_stale_while_the_others_stay_usable() {
+    let (_vd, v, _rd, root) = overlay_map();
+    write(&root, "src/a.ts", "// top\nexport function setOverlay() {}\nexport const legend = 1;\n");
+    let text = get(&v, &root, "overlay");
+    assert!(text.lines().next().unwrap().contains("1 fresh, 1 moved, 1 stale (src/a.ts changed)"), "{text}");
+    assert!(text.contains("[stale] src/a.ts:3 clearOverlay, turns it off"), "{text}");
+    assert!(text.contains("\nsrc/a.ts:2 setOverlay, turns it on\n"), "{text}");
+    assert!(text.contains("\nsrc/a.ts:3 legend, colour scale [moved from 4]\n"), "{text}");
+}
+
+#[test]
+fn the_occurrence_nearest_the_old_line_wins_and_a_longer_name_does_not_match() {
+    let body = "legend_old();\nlegendary();\nlegend();\nx\nx\nx\nx\nx\nlegend();\n";
+    let (_vd, v, _rd, root) = setup(&[("src/a.ts", "legend();\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\n")]);
+    put(&v, &root, "m", &["src/a.ts:10 legend, scale"]);
+    write(&root, "src/a.ts", body);
+    let text = get(&v, &root, "m");
+    assert!(text.contains("\nsrc/a.ts:9 legend, scale [moved from 10]\n"), "{text}");
+    write(&root, "src/a.ts", "legend_old();\nlegendary();\nlegend();\n");
+    assert!(get(&v, &root, "m").contains("\nsrc/a.ts:3 legend, scale [moved from 10]\n"));
+    write(&root, "src/a.ts", "legend_old();\nlegendary();\n");
+    assert!(get(&v, &root, "m").contains("[stale] src/a.ts:10 legend"));
+}
+
+#[test]
+fn an_unrelated_edit_leaves_the_other_lines_fresh() {
+    let (_vd, v, _rd, root) = overlay_map();
+    write(&root, "src/a.ts", &SRC.replace("// top", "// header changed"));
+    let text = get(&v, &root, "overlay");
+    assert!(text.lines().next().unwrap().ends_with("3 lines, all fresh"), "{text}");
+    assert!(text.contains("\nsrc/a.ts:2 setOverlay, turns it on\n") && !text.contains("moved"), "{text}");
+}
+
+#[test]
+fn an_unchanged_file_is_fresh_without_being_read() {
+    let (_vd, v, _rd, root) = overlay_map();
+    let m = map::find(&v, "app", "overlay").unwrap();
+    let cur = map::current_blobs(&root, &m.files()).unwrap();
+    assert!(m.changed_files(&cur).is_empty());
+    assert!(m.states(Some(&cur), &Default::default()).iter().all(|s| *s == map::Fresh::Fresh));
+    assert!(get(&v, &root, "overlay").lines().next().unwrap().ends_with("all fresh"));
+}
+
+#[test]
+fn a_put_of_a_moved_line_makes_it_fresh_again() {
+    let (_vd, v, _rd, root) = overlay_map();
+    write(&root, "src/a.ts", &format!("import x;\n{SRC}"));
+    put(&v, &root, "overlay", &["src/a.ts:3 setOverlay, turns it on"]);
+    let text = get(&v, &root, "overlay");
+    assert!(text.contains("\nsrc/a.ts:3 setOverlay, turns it on\n"), "{text}");
+    assert!(text.lines().next().unwrap().ends_with("3 lines, 1 fresh, 2 moved"), "{text}");
 }
