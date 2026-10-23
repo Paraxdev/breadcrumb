@@ -156,7 +156,7 @@ fn brief_keeps_to_its_budget_and_says_what_it_cut() {
     .unwrap();
 
     let b = map::brief(&v, "app", &["big".into(), "src/m39.rs".into()], Some(&root), 1500).unwrap();
-    assert!(b.len() <= 1500 + 200, "{} chars\n{b}", b.len());
+    assert!(b.len() <= 1500, "{} chars\n{b}", b.len());
     assert!(b.contains("src/m39.rs:1 f39") && b.contains(&g.id), "the named file and its gotcha come first\n{b}");
     let cut = b.lines().last().unwrap();
     assert!(cut.starts_with("cut to fit 1500 chars: ") && cut.contains("map lines") && cut.contains("of big"), "{b}");

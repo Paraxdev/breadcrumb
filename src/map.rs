@@ -18,6 +18,10 @@ const HASH_LEN: usize = 12;
 pub const BRIEF_BUDGET: usize = 8000;
 const NOTE_MAX: usize = 360;
 const HEADER_FILES: usize = 3;
+/// Lines of each map for the targets that rank above the gotchas.
+const FIRST_LINES: usize = 5;
+const NOTES_HEAD: usize = 24;
+const CUT_RESERVE: usize = 240;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapLine {
@@ -445,6 +449,8 @@ fn note_text(n: &Note) -> String {
 
 struct Item {
     class: u8,
+    /// Position within its class and map, so maps take turns.
+    rank: usize,
     section: usize,
     order: usize,
     text: String,
@@ -496,24 +502,27 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
     let mut items: Vec<Item> = vec![];
     for (si, (m, st)) in chosen.iter().zip(&states).enumerate() {
         let by_area = areas.iter().any(|i| all[*i].note.id == m.note.id);
-        items.push(Item { class: 0, section: si, order: 0, text: m.header(st), of: m.area(), is_note: false });
+        items.push(Item { class: 0, rank: 0, section: si, order: 0, text: m.header(st), of: m.area(), is_note: false });
+        let mut seen = [0usize; 8];
         for (li, (l, s)) in m.lines.iter().zip(st).enumerate() {
-            let targeted = paths.iter().any(|p| covers(p, &l.file));
+            let named = paths.iter().any(|p| covers(p, &l.file));
             let stale = matches!(s, Fresh::Changed | Fresh::Gone);
-            let class = match (targeted, by_area, stale) {
-                (true, _, _) => 1,
-                (false, true, false) => 3,
+            let class = match (named, by_area, stale) {
+                (true, _, _) if seen[1] < FIRST_LINES => 1,
+                (true, _, _) | (false, true, _) => 3,
                 (false, false, false) => 5,
-                (false, _, true) => 7,
+                (false, false, true) => 7,
             };
-            items.push(Item { class, section: si, order: li + 1, text: line_text(l, *s), of: m.area(), is_note: false });
+            let rank = seen[class as usize];
+            seen[class as usize] += 1;
+            items.push(Item { class, rank, section: si, order: li + 1, text: line_text(l, *s), of: m.area(), is_note: false });
         }
     }
     let notes_section = chosen.len();
     for (o, (rank, _, _, id)) in hits.iter().enumerate() {
         let Ok(n) = v.get(id) else { continue };
         let class = [2, 4, 6][*rank];
-        items.push(Item { class, section: notes_section, order: o, text: note_text(&n), of: n.id.clone(), is_note: true });
+        items.push(Item { class, rank: o, section: notes_section, order: o, text: note_text(&n), of: n.id.clone(), is_note: true });
     }
 
     let shown_targets = targets.iter().map(|t| one_line(t)).collect::<Vec<_>>().join(", ");
@@ -521,16 +530,23 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
     if chosen.is_empty() {
         head.push_str("\nno map covers these yet, after you learn the area save it with `breadcrumb map put <area>` (map tool, action put)");
     }
-    let mut used = head.len() + 1;
     let mut order: Vec<usize> = (0..items.len()).collect();
-    order.sort_by_key(|i| (items[*i].class, items[*i].section, items[*i].order));
-    let mut keep = vec![false; items.len()];
-    for i in order {
-        let len = items[i].text.len() + 1;
-        if items[i].class == 0 || used + len <= budget {
-            keep[i] = true;
-            used += len;
+    order.sort_by_key(|i| (items[*i].class, items[*i].rank, items[*i].section, items[*i].order));
+    let select = |limit: usize| -> Vec<bool> {
+        let mut used = head.len() + 1;
+        let mut keep = vec![false; items.len()];
+        for i in &order {
+            let len = items[*i].text.len() + 1;
+            if items[*i].class == 0 || used + len <= limit {
+                keep[*i] = true;
+                used += len;
+            }
         }
+        keep
+    };
+    let mut keep = select(budget.saturating_sub(NOTES_HEAD));
+    if keep.contains(&false) {
+        keep = select(budget.saturating_sub(NOTES_HEAD + CUT_RESERVE));
     }
     let mut out = head;
     out.push('\n');
@@ -562,7 +578,8 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
             parts.push(format!("{} map lines ({}), map get shows them", cut_lines.len(), names.join(", ")));
         }
         if !cut_notes.is_empty() {
-            parts.push(format!("{} notes ({}), get shows them", cut_notes.len(), cut_notes.join(" ")));
+            let ids: Vec<&str> = cut_notes.iter().take(8).copied().collect();
+            parts.push(format!("{} note{} ({}), get shows them", cut_notes.len(), if cut_notes.len() == 1 { "" } else { "s" }, ids.join(" ")));
         }
         out.push_str(&format!("cut to fit {budget} chars: {}\n", parts.join("; ")));
     }
