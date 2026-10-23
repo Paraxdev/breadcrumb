@@ -144,7 +144,7 @@ pub fn stop(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Result<Optio
         .collect();
     wip.sort();
     let wip = if wip.is_empty() { String::new() } else { format!(", in progress: {}", wip.join(", ")) };
-    let text = format!("breadcrumb: this session changed {slug} notes but wrote no handoff. Add or update the {slug} handoff note (kind handoff, it links the previous one) with what was done and what is next{wip}.");
+    let text = format!("breadcrumb: this session changed {slug} notes but wrote no handoff. Add a {slug} handoff note (kind handoff) with what was done and what is next{wip}, it supersedes the previous one and the next session reads it in full.");
     Ok(Some(output(STOP_EVENT, &text)?))
 }
 
