@@ -62,7 +62,7 @@ fn handshake_list_add_search() {
     names.sort();
     assert_eq!(
         names,
-        ["add", "append", "backlog", "context", "delete", "doctor", "get", "kinds", "link", "list", "move", "next", "project", "search", "sync", "update", "workflow"]
+        ["add", "append", "backlog", "claim", "context", "delete", "doctor", "get", "kinds", "link", "list", "move", "next", "project", "search", "sync", "update", "workflow"]
     );
     assert!(serde_json::to_string(&out[1]["result"]).unwrap().len() < 6600);
     for t in tools {

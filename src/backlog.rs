@@ -103,6 +103,90 @@ pub fn assignee(n: &Note) -> Option<String> {
     str_field(n, "assignee")
 }
 
+pub const CLAIMED_KEY: &str = "claimed";
+pub const SESSION_ENV: &str = "BREADCRUMB_SESSION";
+/// A claim with no write to its item for this long no longer keeps other sessions away.
+pub const CLAIM_STALE_HOURS: i64 = 24;
+
+/// Who this process works as: `by`, else BREADCRUMB_SESSION, else the start of the Claude Code session id.
+pub fn session_name(by: Option<&str>) -> Option<String> {
+    let given = |s: Option<String>| s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+    given(by.map(str::to_string))
+        .or_else(|| given(std::env::var(SESSION_ENV).ok()))
+        .or_else(|| given(std::env::var("CLAUDE_CODE_SESSION_ID").ok()).map(|s| s.chars().take(8).collect()))
+}
+
+pub fn claimed_at(n: &Note) -> Option<chrono::DateTime<chrono::Utc>> {
+    str_field(n, CLAIMED_KEY).and_then(|s| crate::util::parse_time(&s))
+}
+
+pub fn claim_stale(n: &Note) -> bool {
+    let last = claimed_at(n).map_or(n.updated, |c| c.max(n.updated));
+    (now() - last).num_hours() >= CLAIM_STALE_HOURS
+}
+
+/// The assignee while the claim is fresh, unless that is `who`.
+pub fn held_by_other(n: &Note, who: Option<&str>) -> Option<String> {
+    let a = assignee(n)?;
+    if who.is_some_and(|w| w.eq_ignore_ascii_case(&a)) || claim_stale(n) {
+        return None;
+    }
+    Some(a)
+}
+
+fn age(n: &Note) -> String {
+    let mins = (now() - n.updated).num_minutes().max(0);
+    if mins < 120 { format!("{mins} min") } else { format!("{} h", mins / 60) }
+}
+
+fn event_line(what: &str, by: &str) -> String {
+    format!("- {}: {what} (by {by})", now().format("%Y-%m-%dT%H:%MZ"))
+}
+
+/// Sets the assignee to `by` with a timestamp, so `next` in other sessions skips the item until the claim goes stale.
+pub fn claim(v: &Vault, id: &str, by: &str, force: bool) -> Result<Note> {
+    let by = actor(Some(by));
+    let _g = v.lock()?;
+    let mut n = get_item(v, id)?;
+    if is_closed(&state(&n)) {
+        bail!("{} is {}, claims are for open items", n.id, state(&n));
+    }
+    if let Some(h) = held_by_other(&n, Some(&by))
+        && !force
+    {
+        bail!("{} is claimed by {h}, last written {} ago, pass force to take it over", n.id, age(&n));
+    }
+    let (what, by) = match assignee(&n) {
+        Some(p) if !p.eq_ignore_ascii_case(&by) => (format!("claim taken over from {p}"), by),
+        Some(p) => ("claim renewed".to_string(), p),
+        None => ("claimed".to_string(), by),
+    };
+    n.set_field("assignee", Value::String(by.clone()));
+    n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
+    n.body = append_history(&n.body, &event_line(&what, &by));
+    save(v, &mut n, "claim")?;
+    Ok(n)
+}
+
+/// Clears the claim. Releasing another session's fresh claim needs `force`. Ok(None) when nothing was claimed.
+pub fn release(v: &Vault, id: &str, by: &str, force: bool) -> Result<Option<Note>> {
+    let by = actor(Some(by));
+    let _g = v.lock()?;
+    let mut n = get_item(v, id)?;
+    let Some(holder) = assignee(&n) else { return Ok(None) };
+    if let Some(h) = held_by_other(&n, Some(&by))
+        && !force
+    {
+        bail!("{} is claimed by {h}, not {by}, pass force to release it anyway", n.id);
+    }
+    n.unset_field("assignee");
+    n.unset_field(CLAIMED_KEY);
+    let what = if holder.eq_ignore_ascii_case(&by) { "released".to_string() } else { format!("released the claim of {holder}") };
+    n.body = append_history(&n.body, &event_line(&what, &by));
+    save(v, &mut n, "release")?;
+    Ok(Some(n))
+}
+
 pub fn key(n: &Note) -> String {
     match &n.project {
         Some(p) => format!("{}-{}", p.to_ascii_uppercase(), n.id),
@@ -276,6 +360,10 @@ pub struct BoardItem {
     pub priority: String,
     pub rank: Option<f64>,
     pub assignee: Option<String>,
+    /// When a session claimed it.
+    pub claimed: Option<String>,
+    /// A session claim on an open item with no write for a day.
+    pub claim_stale: bool,
     pub project: Option<String>,
     pub parent: Option<String>,
     pub blocked: bool,
@@ -294,6 +382,8 @@ impl BoardItem {
             priority: priority(n),
             rank: rank(n),
             assignee: assignee(n),
+            claimed: str_field(n, CLAIMED_KEY),
+            claim_stale: assignee(n).is_some() && claimed_at(n).is_some() && !is_closed(&state(n)) && claim_stale(n),
             project: n.project.clone(),
             parent: parent(n),
             blocked: idx.is_blocked(n),
@@ -306,7 +396,7 @@ impl BoardItem {
     pub fn short(&self) -> String {
         let mut s = format!("{} {} {} {}", self.id, self.kind, self.priority, crate::format::short_title(&self.title));
         if let Some(a) = &self.assignee {
-            let _ = write!(s, " @{a}");
+            let _ = write!(s, " @{a}{}", if self.claim_stale { " (stale)" } else { "" });
         }
         if self.blocked {
             let _ = write!(s, " [blocked by {}]", self.blocked_by.join(", "));
@@ -320,7 +410,7 @@ impl BoardItem {
     pub fn line(&self) -> String {
         let mut s = format!("{}  {:<7} {}  {}", self.key, self.kind, self.priority, self.title);
         if let Some(a) = &self.assignee {
-            let _ = write!(s, "  @{a}");
+            let _ = write!(s, "  @{a}{}", if self.claim_stale { " (stale claim)" } else { "" });
         }
         if self.blocked {
             let _ = write!(s, "  [blocked by {}]", self.blocked_by.join(", "));
@@ -500,6 +590,12 @@ pub fn queue(v: &Vault, id: &str, pos: QueuePos, by: Option<&str>) -> Result<Not
 
 /// Best queued, unblocked item. With `claim`, moves it to in-progress and assigns it, atomically under the lock.
 pub fn next(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: Option<&str>) -> Result<Option<Note>> {
+    next_as(v, scope, assignee_filter, claim, claim)
+}
+
+/// Like `next`, skipping items another session holds a fresh claim on. Without `me` every fresh claim is someone else's.
+pub fn next_as(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: Option<&str>, me: Option<&str>) -> Result<Option<Note>> {
+    let who = me.or(assignee_filter);
     let _g = v.lock()?;
     let (all, ids) = scoped_items(v, scope)?;
     let idx = Index::new(&all);
@@ -511,6 +607,7 @@ pub fn next(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: Opti
             (Some(want), Some(have)) => have.eq_ignore_ascii_case(want),
             _ => true,
         })
+        .filter(|n| held_by_other(n, who).is_none())
         .collect();
     sort_items(&mut cands);
     let Some(best) = cands.first() else { return Ok(None) };
@@ -519,6 +616,7 @@ pub fn next(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: Opti
         let by = actor(Some(by));
         n.set_field("state", Value::String("in-progress".into()));
         n.set_field("assignee", Value::String(by.clone()));
+        n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
         record_state_change(&mut n, "queued", "in-progress", Some(&by));
         save(v, &mut n, "claim")?;
     }

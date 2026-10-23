@@ -238,7 +238,7 @@ async function loadBoard() {
 
 function card(it) {
   const foot = [];
-  if (it.assignee) foot.push(h("span", { text: "@" + it.assignee }));
+  if (it.assignee) foot.push(h("span", { text: "@" + it.assignee + (it.claim_stale ? " (stale)" : ""), title: it.claimed ? "claimed " + it.claimed : "" }));
   if (it.blocked) foot.push(h("span", { class: "blocked", text: "blocked", title: "blocked by " + it.blocked_by.join(", ") }));
   if (it.progress) foot.push(h("span", { text: it.progress[0] + "/" + it.progress[1] + " done" }));
   const el = h("div", { class: "card", draggable: "true" },

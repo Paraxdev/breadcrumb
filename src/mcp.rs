@@ -290,11 +290,24 @@ impl Server {
             }
             "next" => {
                 let sc = self.scope(&v, a)?;
-                let claim = if b(a, "claim") { Some(s(a, "by").unwrap_or_else(|| backlog::DEFAULT_ACTOR.into())) } else { None };
-                match backlog::next(&v, &sc, s(a, "assignee").as_deref(), claim.as_deref())? {
+                let me = backlog::session_name(s(a, "by").as_deref());
+                let claim = if b(a, "claim") { Some(me.clone().unwrap_or_else(|| backlog::DEFAULT_ACTOR.into())) } else { None };
+                match backlog::next_as(&v, &sc, s(a, "assignee").as_deref(), claim.as_deref(), me.as_deref())? {
                     Some(n) => Ok(format!("{}\n{}", if claim.is_some() { "claimed" } else { "next" }, format::note_compact(&n, false))),
                     None => Ok(format!("no unblocked queued items in {}", sc.label())),
                 }
+            }
+            "claim" => {
+                let id = req_s(a, "id")?;
+                let by = backlog::session_name(s(a, "by").as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.into());
+                if b(a, "release") {
+                    return Ok(match backlog::release(&v, &id, &by, b(a, "force"))? {
+                        Some(n) => format::ack("released", &n),
+                        None => format!("{id} has no claim to release"),
+                    });
+                }
+                let n = backlog::claim(&v, &id, &by, b(a, "force"))?;
+                Ok(format!("{} for {by}", format::ack("claimed", &n)))
             }
             "backlog" => match s(a, "view").as_deref().unwrap_or("board") {
                 "board" => {
@@ -576,6 +589,7 @@ pub fn tool_defs() -> Vec<Value> {
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
     let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});
+    let by = || json!({"type": "string", "description": "session name"});
     let paths = || json!({"type": "array", "items": {"type": "string"}, "description": "file globs, src/db/**"});
     vec![
         tool("context", "Reload the session start digest.", obj(with(target(), json!({"kinds": bl()})), &[])),
@@ -627,7 +641,8 @@ pub fn tool_defs() -> Vec<Value> {
             "refs": refs(),
             "by": st(),
         })), &["id", "state"])),
-        tool("next", "Top unblocked queued item, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": st()})), &[])),
+        tool("next", "Top unblocked queued item no other session claimed, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
+        tool("claim", "Claim an item for this session, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": bl()})), &["id"])),
         tool("backlog", "Board, or tree or deps of one item.", obj(with(json!({"project": st()}), json!({
             "view": {"type": "string", "enum": ["board", "tree", "deps"]},
             "id": st(),

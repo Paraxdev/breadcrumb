@@ -242,8 +242,28 @@ pub enum Cmd {
         /// Move it to in-progress and assign it
         #[arg(long)]
         claim: bool,
+        /// Session name (default: $BREADCRUMB_SESSION, else the Claude Code session id)
         #[arg(long)]
         by: Option<String>,
+    },
+    /// Claim an item for this session, `next` in other sessions skips it until the claim is a day without activity
+    Claim {
+        id: String,
+        /// Session name (default: $BREADCRUMB_SESSION, else the Claude Code session id)
+        #[arg(long)]
+        by: Option<String>,
+        /// Take over another session's fresh claim
+        #[arg(long)]
+        force: bool,
+    },
+    /// Release the claim on an item
+    Release {
+        id: String,
+        #[arg(long)]
+        by: Option<String>,
+        /// Release another session's fresh claim
+        #[arg(long)]
+        force: bool,
     },
     /// Change the state of a backlog item
     Move {
@@ -970,8 +990,9 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Next { scope, assignee, claim, by } => {
             let v = open()?;
             let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
-            let claim_by = if claim { Some(by.unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string())) } else { None };
-            match backlog::next(&v, &sc, assignee.as_deref(), claim_by.as_deref())? {
+            let me = backlog::session_name(by.as_deref());
+            let claim_by = if claim { Some(me.clone().unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string())) } else { None };
+            match backlog::next_as(&v, &sc, assignee.as_deref(), claim_by.as_deref(), me.as_deref())? {
                 Some(n) => {
                     let head = if claim_by.is_some() { "claimed" } else { "next" };
                     let mut text = format!("{head}: {}\n", backlog::item_summary(&n));
@@ -983,6 +1004,18 @@ pub fn run(cli: Cli) -> Result<i32> {
                     out.emit(text, n.to_json());
                 }
                 None => out.emit(format!("no unblocked queued items in {}", sc.label()), Json::Null),
+            }
+        }
+        Cmd::Claim { id, by, force } => {
+            let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
+            let n = backlog::claim(&open()?, &id, &by, force)?;
+            out.emit(format!("claimed {}", backlog::item_summary(&n)), n.to_json());
+        }
+        Cmd::Release { id, by, force } => {
+            let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
+            match backlog::release(&open()?, &id, &by, force)? {
+                Some(n) => out.emit(format!("released {}", backlog::item_summary(&n)), n.to_json()),
+                None => out.emit(format!("{id} has no claim to release"), Json::Null),
             }
         }
         Cmd::Move { id, state, resolution, shipped_in, by, check, refs } => {
