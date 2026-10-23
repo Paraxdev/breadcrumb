@@ -38,11 +38,8 @@ pub fn search_text(r: &SearchResult, scope_label: &str) -> String {
         let _ = writeln!(s, "no matches in {scope_label}");
         return s;
     }
-    if r.fell_back_to_or {
-        let _ = writeln!(s, "(no note matched all terms, showing notes matching any term)");
-    }
     for h in &r.hits {
-        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}", h.note.id, h.note.kind, h.note.scope_label(), h.note.title, lapsed_flag(h));
+        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}", h.note.id, h.note.kind, h.note.scope_label(), h.note.title, hit_flags(r, h));
         if !h.snippet.is_empty() {
             let _ = writeln!(s, "    {}", h.snippet);
         }
@@ -93,8 +90,13 @@ pub fn rows(notes: &[Note], total: usize, current: Option<&str>) -> String {
 
 pub const SNIPPET_MAX: usize = 100;
 
-fn lapsed_flag(h: &crate::search::Hit) -> String {
-    h.lapsed.map(|l| format!(" [{l}]")).unwrap_or_default()
+/// `[expired]` or `[superseded]`, and `(2/3 terms)` for a partial match.
+fn hit_flags(r: &SearchResult, h: &crate::search::Hit) -> String {
+    let mut s = h.lapsed.map(|l| format!(" [{l}]")).unwrap_or_default();
+    if h.matched < r.terms {
+        let _ = write!(s, " ({}/{} terms)", h.matched, r.terms);
+    }
+    s
 }
 
 pub fn search_rows(r: &SearchResult, current: Option<&str>) -> String {
@@ -102,11 +104,8 @@ pub fn search_rows(r: &SearchResult, current: Option<&str>) -> String {
         return "no matches\n".into();
     }
     let mut s = String::new();
-    if r.fell_back_to_or {
-        s.push_str("no note matched every term, showing any-term matches\n");
-    }
     for h in &r.hits {
-        let _ = writeln!(s, "{}{}", row(&h.note, current, false), lapsed_flag(h));
+        let _ = writeln!(s, "{}{}", row(&h.note, current, false), hit_flags(r, h));
         let snip = crate::util::one_line(&h.snippet);
         if !snip.is_empty() {
             let _ = writeln!(s, "  {}", crate::util::truncate_chars(&snip, SNIPPET_MAX));

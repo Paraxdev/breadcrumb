@@ -214,10 +214,8 @@ impl Server {
                 if ops::is_pref(&n) && !n.pinned {
                     out.push_str(&format!("\n{}", ops::PIN_HINT));
                 }
-                let similar = similar_notes(&v, &n);
-                if !similar.is_empty() {
-                    let xs: Vec<String> = similar.iter().map(|x| format!("{} \"{}\"", x.id, crate::util::truncate_chars(&crate::util::one_line(&x.title), 50))).collect();
-                    out.push_str(&format!("\npossibly related, update or link instead if duplicate: {}", xs.join(", ")));
+                if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
+                    out.push_str(&format!("\n{h}"));
                 }
                 Ok(out)
             }
@@ -402,36 +400,6 @@ impl Server {
             other => bail!("unknown tool '{other}'"),
         }
     }
-}
-
-/// Near duplicates of a freshly added note: notes in its project or global that match every title term,
-/// exact titles first. Any-term matches are ignored, one shared common word is not a duplicate.
-fn similar_notes(v: &Vault, n: &crate::note::Note) -> Vec<crate::note::Note> {
-    let pool: Vec<_> = v
-        .load_notes()
-        .into_iter()
-        .filter(|x| x.id != n.id && !x.is_archived() && (x.project == n.project || x.project.is_none()))
-        .collect();
-    let r = crate::search::search(pool, &n.title);
-    if r.fell_back_to_or {
-        return vec![];
-    }
-    let title = crate::util::one_line(&n.title).to_lowercase();
-    let terms = crate::search::tokenize(&n.title);
-    let mut hits: Vec<(bool, usize, f64, crate::note::Note)> = r
-        .hits
-        .into_iter()
-        .filter(|h| h.score >= 6.0)
-        .map(|h| {
-            let exact = crate::util::one_line(&h.note.title).to_lowercase() == title;
-            let toks = crate::search::tokenize(&h.note.title);
-            let in_title = terms.iter().filter(|t| toks.contains(t)).count();
-            (exact, in_title, h.score, h.note)
-        })
-        .filter(|(exact, in_title, _, _)| *exact || *in_title * 2 >= terms.len().max(1))
-        .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)));
-    hits.into_iter().take(3).map(|h| h.3).collect()
 }
 
 fn s(a: &Map<String, Value>, k: &str) -> Option<String> {

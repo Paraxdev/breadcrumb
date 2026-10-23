@@ -22,8 +22,10 @@ pub struct SearchResult {
     pub hits: Vec<Hit>,
     /// Matches before any limit was applied.
     pub total: usize,
-    /// True when no note matched every term and results are any-term matches.
+    /// True when no note matched every term and results are partial matches.
     pub fell_back_to_or: bool,
+    /// Words in the query, to tell partial matches apart.
+    pub terms: usize,
 }
 
 pub fn tokenize(s: &str) -> Vec<String> {
@@ -145,14 +147,30 @@ fn snippet(n: &Note, q: &Query) -> String {
     best.map(|(_, l)| crate::util::truncate_chars(l, 160)).unwrap_or_default()
 }
 
-/// Scores notes against a query. Sorting: score, then most recently updated.
+/// Durable knowledge first, long session logs last: they match many words without being about any of them.
+fn kind_weight(kind: &str) -> f64 {
+    match kind {
+        "decision" | "gotcha" | "feedback" | "user" => 1.15,
+        "handoff" | "chat-summary" | "workflow" => 0.7,
+        _ => 1.0,
+    }
+}
+
+/// Up to a fifth more for a note written today, half of that after a month.
+fn recency(n: &Note) -> f64 {
+    let days = (crate::util::now() - n.updated).num_days().max(0) as f64;
+    1.0 + 0.2 * 0.5f64.powf(days / 30.0)
+}
+
+/// Scores notes against a query. Notes matching more terms come first, then by score weighted by kind and recency.
+/// Partial matches are kept only within a few terms of the best match, so a long query never lists everything that
+/// shares one word with it.
 pub fn search(notes: Vec<Note>, q: &str) -> SearchResult {
     let query = parse_query(q);
     if query.terms.is_empty() && query.phrases.is_empty() {
-        return SearchResult { hits: vec![], total: 0, fell_back_to_or: false };
+        return SearchResult { hits: vec![], total: 0, fell_back_to_or: false, terms: 0 };
     }
-    let mut and_hits = vec![];
-    let mut or_hits = vec![];
+    let mut hits = vec![];
     for n in notes {
         let p = prepare(&n);
         if !query.phrases.iter().all(|ph| p.title_lc.contains(ph.as_str()) || p.body_lc.contains(ph.as_str())) {
@@ -175,16 +193,18 @@ pub fn search(notes: Vec<Note>, q: &str) -> SearchResult {
                 score += s;
             }
         }
-        if matched == query.terms.len() {
+        if matched > 0 || query.terms.is_empty() {
             let snip = snippet(&n, &query);
-            and_hits.push(Hit { note: n, score, snippet: snip, matched, lapsed: None });
-        } else if matched > 0 {
-            let snip = snippet(&n, &query);
-            or_hits.push(Hit { note: n, score, snippet: snip, matched, lapsed: None });
+            hits.push(Hit { note: n, score, snippet: snip, matched, lapsed: None });
         }
     }
-    let fell_back = and_hits.is_empty() && !or_hits.is_empty();
-    let mut hits = if fell_back { or_hits } else { and_hits };
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.note.updated.cmp(&a.note.updated)));
-    SearchResult { total: hits.len(), hits, fell_back_to_or: fell_back }
+    let terms = query.terms.len();
+    let best = hits.iter().map(|h| h.matched).max().unwrap_or(0);
+    let floor = best.saturating_sub(terms / 4).max(1.min(terms));
+    hits.retain(|h| h.matched >= floor);
+    let rank = |h: &Hit| h.score * kind_weight(&h.note.kind) * recency(&h.note);
+    hits.sort_by(|a, b| {
+        b.matched.cmp(&a.matched).then(rank(b).partial_cmp(&rank(a)).unwrap_or(std::cmp::Ordering::Equal)).then(b.note.updated.cmp(&a.note.updated))
+    });
+    SearchResult { total: hits.len(), fell_back_to_or: !hits.is_empty() && best < terms, hits, terms }
 }

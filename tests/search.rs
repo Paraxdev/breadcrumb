@@ -81,3 +81,33 @@ fn phrases_must_appear_and_snippet_is_best_line() {
     assert_eq!(r.hits[0].note.id, "eeee0001");
     assert_eq!(r.hits[0].snippet, "the build cache is stale here");
 }
+
+#[test]
+fn more_matched_terms_rank_first_and_one_word_matches_drop_out_of_long_queries() {
+    let notes = vec![
+        note("ffff0001", "Drop handling", &[], "an hdr file dropped on the window is ignored on linux"),
+        note("ffff0002", "HDRI size limit", &[], ""),
+        note("ffff0003", "Linux packaging", &[], ""),
+        note("ffff0004", "Window title", &[], ""),
+    ];
+    let r = search(notes, "hdr dropped window ignored linux size");
+    assert!(r.fell_back_to_or && r.terms == 6);
+    let ids: Vec<&str> = r.hits.iter().map(|h| h.note.id.as_str()).collect();
+    assert_eq!(ids, vec!["ffff0001"], "5 of 6 terms keeps 4 of 6 and up, one word matches are noise: {ids:?}");
+
+    let r = search(vec![note("gggg0001", "Parser cache", &[], ""), note("gggg0002", "Parser", &[], "")], "parser cache");
+    assert_eq!(r.hits.len(), 1, "a note matching every term hides partial ones");
+}
+
+#[test]
+fn kind_and_recency_break_ties_between_equal_matches() {
+    let mut log = note("hhhh0001", "Shader cache", &[], "");
+    log.kind = "handoff".into();
+    let mut rule = note("hhhh0002", "Shader cache", &[], "");
+    rule.kind = "decision".into();
+    let mut old = note("hhhh0003", "Shader cache", &[], "");
+    old.updated = breadcrumb::util::now() - chrono::Duration::days(400);
+    let new = note("hhhh0004", "Shader cache", &[], "");
+    let ids: Vec<String> = search(vec![log, old, new, rule], "shader cache").hits.into_iter().map(|h| h.note.id).collect();
+    assert_eq!(ids, vec!["hhhh0002", "hhhh0004", "hhhh0003", "hhhh0001"]);
+}

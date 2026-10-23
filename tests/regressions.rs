@@ -315,7 +315,7 @@ fn mcp_survives_invalid_utf8() {
 }
 
 #[test]
-fn mcp_duplicate_hint_needs_every_title_term_and_lists_exact_titles_first() {
+fn mcp_duplicate_hint_needs_two_shared_title_words_and_lists_exact_titles_first() {
     let (d, v) = common::vault();
     let srv = Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
     let mut input = call(1, "add", json!({"title": "Parser task"}));
@@ -324,13 +324,14 @@ fn mcp_duplicate_hint_needs_every_title_term_and_lists_exact_titles_first() {
         input.extend(call(10 + i as u64, "add", json!({"title": t})));
     }
     let out = mcp_run(&srv, input);
-    assert!(!text(&out[1]).contains("possibly related"), "{}", text(&out[1]));
+    assert!(!text(&out[1]).contains("possible duplicates"), "one shared word is not a duplicate: {}", text(&out[1]));
+    assert!(text(&out[3]).contains("possible duplicates"), "{}", text(&out[3]));
     let first_dup = text(&out[2]).split_whitespace().nth(1).unwrap().to_string();
     let last = text(&out[8]);
     let hint = last.lines().nth(1).unwrap_or_default();
     let first_hint = hint.split_once(": ").map(|x| x.1).unwrap_or_default();
     assert!(first_hint.starts_with(&format!("{first_dup} \"conc 1 1\"")), "{last}");
-    assert!(hint.matches('"').count() <= 6, "at most 3 related notes: {last}");
+    assert_eq!(hint.matches('"').count(), 4, "at most 2 similar notes: {last}");
 }
 
 #[test]

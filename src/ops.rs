@@ -327,6 +327,59 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     Ok(note)
 }
 
+pub const SIMILAR_MAX: usize = 2;
+
+fn title_terms(title: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for t in search::tokenize(title) {
+        if !crate::recall::STOPWORDS.contains(&t.as_str()) && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Same word, or one a prefix of the other when both have 4 or more chars, like limit and limits.
+fn same_term(a: &str, b: &str) -> bool {
+    a == b || (a.len() >= 4 && b.len() >= 4 && (a.starts_with(b) || b.starts_with(a)))
+}
+
+/// Notes that may hold the same fact as `n`, at most SIMILAR_MAX: an equal title, or two or more shared title words
+/// covering half of the longer title, or a third when they share a tag. Handoffs are new every session, so never.
+pub fn similar(v: &Vault, n: &Note) -> Vec<Note> {
+    if n.kind == HANDOFF {
+        return vec![];
+    }
+    let all = v.load_notes();
+    let lapsed = crate::lifecycle::Lapsed::of(&all);
+    let mine = title_terms(&n.title);
+    let title = crate::util::one_line(&n.title).to_lowercase();
+    let mut hits: Vec<(bool, f64, Note)> = all
+        .into_iter()
+        .filter(|x| x.id != n.id && x.kind != HANDOFF && !x.is_archived() && !lapsed.hides(x) && (x.project == n.project || x.project.is_none()))
+        .filter_map(|x| {
+            let exact = crate::util::one_line(&x.title).to_lowercase() == title;
+            let theirs = title_terms(&x.title);
+            let shared = mine.iter().filter(|a| theirs.iter().any(|b| same_term(a, b))).count();
+            let tags = n.tags.iter().filter(|t| x.has_tag(t)).count().min(3);
+            let cover = shared as f64 / mine.len().max(theirs.len()).max(1) as f64;
+            let alike = exact || (shared >= 2 && (cover >= 0.5 || (cover >= 0.34 && tags > 0)));
+            let kind = if x.kind == n.kind { 0.05 } else { 0.0 };
+            alike.then_some((exact, cover + 0.1 * tags as f64 + kind, x))
+        })
+        .collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)).then(b.2.updated.cmp(&a.2.updated)));
+    hits.into_iter().take(SIMILAR_MAX).map(|h| h.2).collect()
+}
+
+pub fn similar_hint(xs: &[Note]) -> Option<String> {
+    if xs.is_empty() {
+        return None;
+    }
+    let items: Vec<String> = xs.iter().map(|x| format!("{} \"{}\"", x.id, crate::util::truncate_chars(&crate::util::one_line(&x.title), 60))).collect();
+    Some(format!("possible duplicates, update one instead if it holds the same fact: {}", items.join(", ")))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UpdateReq {
     pub title: Option<String>,
@@ -752,7 +805,7 @@ pub fn list_counted(v: &Vault, scope: &Scope, f: &Filter) -> Result<(Vec<Note>, 
     Ok((notes, total))
 }
 
-pub const DEFAULT_SEARCH_LIMIT: usize = 20;
+pub const DEFAULT_SEARCH_LIMIT: usize = 5;
 
 /// Superseded and expired notes rank after every note that still holds, and say so.
 pub fn search(v: &Vault, query: &str, scope: &Scope, f: &Filter) -> Result<SearchResult> {

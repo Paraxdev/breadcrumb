@@ -302,7 +302,7 @@ pub fn file_notes(v: &Vault, cwd: &Path, file: &Path, exclude: &HashSet<String>)
     Some((format!("breadcrumb notes for {rel}: {}", items.join("; ")), hits.into_iter().map(|e| e.id).collect()))
 }
 
-const STOPWORDS: &[&str] = &[
+pub const STOPWORDS: &[&str] = &[
     "the", "and", "for", "are", "but", "not", "you", "your", "with", "this", "that", "these", "those", "from", "into", "onto", "have",
     "has", "had", "was", "were", "will", "would", "should", "could", "can", "cant", "does", "did", "doing", "done", "just", "also",
     "then", "than", "there", "their", "them", "they", "what", "when", "where", "which", "while", "who", "why", "how", "all", "any",

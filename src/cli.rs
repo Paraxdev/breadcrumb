@@ -770,6 +770,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             if ops::is_pref(&n) && !n.pinned {
                 created.push_str(&format!("\n{}, `breadcrumb update {} --pin`", ops::PIN_HINT, n.id));
             }
+            if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
+                created.push_str(&format!("\n{h}"));
+            }
             out.emit(format!("added {}  {}  {}  {}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
         }
         Cmd::Get { id } => {
