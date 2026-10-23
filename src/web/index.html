@@ -288,7 +288,7 @@ async function loadNotes() {
   try { data = await api("GET", "/api/notes?" + qs.join("&")); } catch (e) { toast(e.message, "err"); return; }
   const list = $("notes-list");
   list.replaceChildren();
-  if (data.fell_back_to_or) list.append(h("div", { class: "muted", style: "margin:4px 0 8px", text: "No note matched every term, showing notes that match any term." }));
+  if (data.fell_back_to_or) list.append(h("div", { class: "muted", style: "margin:4px 0 8px", text: "No note matched every term, showing the closest matches." }));
   if (!data.notes.length) { list.append(h("div", { class: "empty", text: q ? "No matches." : "No notes in this scope yet." })); return; }
   for (const n of data.notes) {
     list.append(h("div", { class: "row", onclick: () => openNote(n.id) },

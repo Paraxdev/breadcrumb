@@ -14,10 +14,11 @@ use std::path::{Path, PathBuf};
 pub const SUPPORTED_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 pub const LATEST_VERSION: &str = "2025-06-18";
 
-pub const INSTRUCTIONS: &str = "breadcrumb is your persistent memory and backlog across sessions. \
-The project context is injected at session start, call context only if it is missing or you switch project. \
-Search before add, prefer update or append over near duplicates, one fact per note, never store secrets. \
-Save decisions, gotchas, user preferences and handoffs, pin preferences every session needs. Track work with move and next.";
+pub const INSTRUCTIONS: &str = "breadcrumb is your memory and backlog across sessions. \
+The project digest is injected at session start, call context only if it is missing or you switch project. \
+Search before add, update instead of near duplicates, one fact per note, no secrets. \
+Save decisions, gotchas, preferences and handoffs, pin what every session needs, rules for one night get expires. \
+Track work with next, claim and move.";
 
 const LIST_LIMIT: usize = 20;
 

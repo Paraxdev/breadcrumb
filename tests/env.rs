@@ -83,3 +83,11 @@ fn breadcrumb_env_lists_this_machine_unless_asked_for_all() {
     assert!(out.contains("(box1)") && out.contains("(box2)"), "{out}");
     assert!(run(&["env", "--global"]).starts_with("no machine facts for box1 yet"));
 }
+
+#[test]
+fn kinds_list_built_in_kinds_the_vault_has_no_file_for() {
+    let (_d, v) = common::vault();
+    std::fs::remove_file(v.root.join("kinds").join("env.toml")).unwrap();
+    assert!(v.load_kinds().iter().any(|k| k.name == "env"));
+    assert!(breadcrumb::format::kinds_compact(&v.load_kinds()).contains("env: A fact about one machine"));
+}

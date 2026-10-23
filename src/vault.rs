@@ -264,6 +264,12 @@ impl Vault {
                 }
             }
         }
+        // Built-in kinds newer than the vault have no file yet, require_kind accepts them all the same.
+        for k in kind::seed_kinds() {
+            if !self.kinds_dir().join(format!("{}.toml", k.name)).exists() {
+                kinds.push(k);
+            }
+        }
         kinds.sort_by(|a, b| a.name.cmp(&b.name));
         (kinds, errors)
     }
