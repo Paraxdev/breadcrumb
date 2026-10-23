@@ -441,7 +441,7 @@ pub enum MapCmd {
         /// `file:line symbol, what it does` (repeatable)
         #[arg(long = "line", value_name = "LINE")]
         lines: Vec<String>,
-        /// File with one map line per line, - reads stdin
+        /// File with one map line per line, `-` reads stdin
         #[arg(long, value_name = "FILE")]
         lines_file: Option<PathBuf>,
         /// Path glob the area covers (repeatable), default the files its lines name
