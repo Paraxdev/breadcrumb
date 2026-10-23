@@ -2,6 +2,7 @@
 
 pub mod backlog;
 pub mod cli;
+pub mod digest;
 pub mod doctor;
 pub mod export;
 pub mod fix;
@@ -12,6 +13,7 @@ pub mod hooks;
 pub mod id;
 pub mod importer;
 pub mod kind;
+pub mod lifecycle;
 pub mod mcp;
 pub mod note;
 pub mod ops;

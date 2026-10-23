@@ -41,8 +41,11 @@ fn session_start_prints_capped_project_digest() {
     let text = context_of(&breadcrumb(&v.root, &["hook", "session-start"], &input, d.path()));
     assert!(text.starts_with("breadcrumb context: demo-app\n"), "{text}");
     assert!(text.chars().count() <= breadcrumb::hooks::CONTEXT_CAP);
-    assert!(text.contains("truncated") && text.contains("for more)"), "{text}");
-    assert!(!text.contains("Kinds:") && !text.contains("\n\n"));
+    assert!(!text.contains("truncated") && !text.contains("filler"), "pins are one line each and all fit: {text}");
+    for i in 0..12 {
+        assert!(text.contains(&format!(" note Long note {i}\n")), "{text}");
+    }
+    assert!(text.contains("Recent (") && !text.contains("Kinds:") && !text.contains("\n\n"), "{text}");
 
     let text = context_of(&breadcrumb(&v.root, &["hook", "session-start"], "not json", &proj));
     assert!(text.starts_with("breadcrumb context: demo-app"));
@@ -240,7 +243,9 @@ fn stop_reminds_once_about_a_missing_handoff() {
     assert!(new.links.iter().any(|l| l.to == old.id && l.rel == "supersedes"), "links the previous handoff");
     assert_eq!(stop("s2", false), None, "a handoff was written");
     let ctx = breadcrumb::ops::context(&v, Some("demo-app"), 15).unwrap();
-    assert!(ctx.contains(&new.id) && !ctx.contains(&old.id), "only the latest handoff: {ctx}");
+    assert!(ctx.contains(&format!("Latest handoff {} (", new.id)), "{ctx}");
+    assert_eq!(ctx.matches(&old.id).count(), 1, "the previous handoff is only named: {ctx}");
+    assert!(ctx.contains(&format!("previous {}", old.id)), "{ctx}");
 }
 
 #[test]

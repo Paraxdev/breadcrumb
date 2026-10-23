@@ -176,7 +176,7 @@ impl Server {
         match name {
             "context" => {
                 let p = self.target_project(&v, a)?;
-                ops::context_with(&v, p.as_deref(), ContextOpts { recent: u(a, "limit").unwrap_or(15), kinds: b(a, "kinds") })
+                ops::context_with(&v, p.as_deref(), ContextOpts { recent: u(a, "limit").unwrap_or(15), kinds: b(a, "kinds"), ..Default::default() })
             }
             "search" => {
                 let q = req_s(a, "query")?;
@@ -201,7 +201,7 @@ impl Server {
                         kind: s(a, "kind"),
                         project,
                         tags: strs(a, "tags"),
-                        fields: fields(a, "fields")?,
+                        fields: note_fields(a)?,
                         pinned: b(a, "pinned"),
                         body: s(a, "body").map(|x| crate::util::normalize_newlines(&x)),
                         source: s(a, "source"),
@@ -236,7 +236,7 @@ impl Server {
                         title: s(a, "title"),
                         kind: s(a, "kind"),
                         tags,
-                        fields: fields(a, "fields")?,
+                        fields: note_fields(a)?,
                         unset: strs(a, "unset"),
                         body: s(a, "body").map(|x| crate::util::normalize_newlines(&x)),
                         pinned: a.get("pinned").and_then(Value::as_bool),
@@ -465,6 +465,11 @@ fn fields(a: &Map<String, Value>, k: &str) -> Result<Vec<(String, FieldInput)>> 
     }
 }
 
+/// `fields` plus the options that are fields under the hood.
+fn note_fields(a: &Map<String, Value>) -> Result<Vec<(String, FieldInput)>> {
+    Ok(ops::with_field(fields(a, "fields")?, crate::digest::SUMMARY_KEY, s(a, "summary")))
+}
+
 fn links(a: &Map<String, Value>) -> Result<Vec<Link>> {
     let mut out = vec![];
     if let Some(Value::Array(xs)) = a.get("links") {
@@ -564,7 +569,7 @@ pub fn tool_defs() -> Vec<Value> {
     let scope = || json!({"project": {"type": "string", "description": "slug, global or all"}});
     let target = || json!({"project": {"type": "string", "description": "slug or global"}});
     let filters = || json!({"kind": st(), "tags": arr(), "limit": int()});
-    let fields = || json!({"type": "object", "description": "kind fields by name"});
+    let fields = || json!({"type": "object", "description": "kind fields, summary: digest line of a pin"});
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
     let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});

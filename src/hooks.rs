@@ -20,7 +20,7 @@ pub const FILE_EVENT: &str = "PreToolUse";
 pub const PROMPT_EVENT: &str = "UserPromptSubmit";
 const SESSION_TIMEOUT: u64 = 10;
 const RECALL_TIMEOUT: u64 = 5;
-pub const CONTEXT_CAP: usize = 3000;
+pub const CONTEXT_CAP: usize = crate::digest::DIGEST_BUDGET;
 const RECENT: usize = 10;
 
 #[derive(Debug, Default)]
@@ -56,7 +56,7 @@ pub fn session_start(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Res
     let v = Vault::open(root)?;
     let cwd = input.cwd.as_deref().unwrap_or(fallback_cwd);
     let project = v.detect_project_fast(cwd);
-    let body = crate::ops::context_with(&v, project.as_deref(), crate::ops::ContextOpts { recent: RECENT, kinds: false })?;
+    let body = crate::ops::context_with(&v, project.as_deref(), crate::ops::ContextOpts { recent: RECENT, ..Default::default() })?;
     let text = cap(body.trim_end(), CONTEXT_CAP);
     if let Some(sid) = &input.session_id {
         recall::prune_sessions(root);

@@ -534,6 +534,9 @@ pub struct AddArgs {
     /// File glob relative to the project root the note applies to, like src/engine/** (repeatable)
     #[arg(long = "path-glob", value_name = "GLOB")]
     pub paths: Vec<String>,
+    /// One line the session digest shows for a pinned note, instead of the title's first sentence
+    #[arg(long)]
+    pub summary: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -570,6 +573,9 @@ pub struct UpdateArgs {
     /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, -type:value removes (repeatable)
     #[arg(long = "ref", value_name = "REF", allow_hyphen_values = true)]
     pub refs: Vec<String>,
+    /// One line the session digest shows for a pinned note
+    #[arg(long)]
+    pub summary: Option<String>,
 }
 
 struct Out {
@@ -725,7 +731,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     kind: a.kind,
                     project,
                     tags: a.tags,
-                    fields: ops::parse_field_args(&a.fields)?,
+                    fields: ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary),
                     pinned: a.pin,
                     body: read_body_arg(a.body, a.body_file)?,
                     source: a.source,
@@ -754,7 +760,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     title: u.title,
                     kind: u.kind,
                     tags: u.tags,
-                    fields: ops::parse_field_args(&u.fields)?,
+                    fields: ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary),
                     unset: u.unset,
                     body: read_body_arg(u.body, u.body_file)?,
                     pinned,

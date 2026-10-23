@@ -185,6 +185,14 @@ pub fn parse_field_args(args: &[String]) -> Result<Vec<(String, FieldInput)>> {
         .collect()
 }
 
+/// Adds an option that is a plain field under the hood, like summary, as one line of text.
+pub fn with_field(mut fields: Vec<(String, FieldInput)>, key: &str, val: Option<String>) -> Vec<(String, FieldInput)> {
+    if let Some(s) = val.map(|s| crate::util::one_line(&s)).filter(|s| !s.is_empty()) {
+        fields.push((key.to_string(), FieldInput::Value(Value::String(s))));
+    }
+    fields
+}
+
 fn set_paths(note: &mut Note, globs: Vec<String>) {
     if globs.is_empty() {
         note.unset_field(crate::note::PATHS_KEY);
@@ -281,18 +289,27 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
             note.links.push(Link { to, rel: l.rel });
         }
     }
-    if note.kind == HANDOFF && !note.links.iter().any(|l| l.rel == SUPERSEDES) {
-        let mut prev: Vec<Note> = v.load_notes().into_iter().filter(|n| n.kind == HANDOFF && n.project == note.project && !n.is_archived()).collect();
-        sort_notes(&mut prev, SortKey::Updated);
-        if let Some(p) = prev.first() {
+    // One living handoff per project: the new one supersedes the current one and older pinned ones stop being pinned.
+    let mut unpin: Vec<Note> = vec![];
+    if note.kind == HANDOFF {
+        let all = v.load_notes();
+        if !note.links.iter().any(|l| l.rel == SUPERSEDES)
+            && let Some(p) = crate::lifecycle::latest_handoff(&all, note.project.as_deref(), &crate::lifecycle::Lapsed::of(&all))
+        {
             note.links.push(Link { to: p.id.clone(), rel: SUPERSEDES.into() });
         }
+        unpin = all.into_iter().filter(|n| n.kind == HANDOFF && n.project == note.project && n.pinned).collect();
     }
     let mut touched = vec![];
     if let Some(p) = &project
         && let Some(created) = ensure_project(v, p)? {
             touched.push(created);
         }
+    for n in &mut unpin {
+        n.pinned = false;
+        n.clear_kept("pinned");
+        touched.push(v.write_note(n)?);
+    }
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("add", &note))?;
     Ok(note)
@@ -732,35 +749,19 @@ pub fn search(v: &Vault, query: &str, scope: &Scope, f: &Filter) -> Result<Searc
     Ok(r)
 }
 
-fn is_open_todo(n: &Note) -> bool {
-    n.kind == "todo" && !matches!(n.field("done"), Some(Value::Bool(true)))
-}
+pub use crate::digest::{ContextOpts, context, context_with};
+pub use crate::lifecycle::{HANDOFF, SUPERSEDES};
 
-#[derive(Clone, Copy, Debug)]
-pub struct ContextOpts {
-    pub recent: usize,
-    pub kinds: bool,
-}
-
-impl Default for ContextOpts {
-    fn default() -> Self {
-        ContextOpts { recent: 15, kinds: false }
-    }
-}
-
-pub const PINNED_BODY_MAX: usize = 600;
-pub const HANDOFF: &str = "handoff";
-pub const SUPERSEDES: &str = "supersedes";
 pub const PREFS_LINE_MAX: usize = 400;
-pub const PIN_HINT: &str = "pin it if every session needs the body, unpinned preferences show as a title only";
+pub const PIN_HINT: &str = "pin it if every session must see it, unpinned preferences only share one short line";
 const PREF_TITLE_MAX: usize = 60;
 
-/// Feedback and user notes hold preferences, they only reach a new session with their body when pinned.
+/// Feedback and user notes hold preferences, they only reach a new session with a line of their own when pinned.
 pub fn is_pref(n: &Note) -> bool {
     n.kind == "feedback" || n.kind == "user"
 }
 
-fn prefs_line(prefs: &[&Note]) -> String {
+pub fn prefs_line(prefs: &[&Note]) -> String {
     let mut s = "Prefs (unpinned):".to_string();
     for (i, n) in prefs.iter().enumerate() {
         let item = format!(" {} {};", n.id, crate::util::truncate_chars(&crate::util::one_line(&n.title), PREF_TITLE_MAX));
@@ -772,124 +773,6 @@ fn prefs_line(prefs: &[&Note]) -> String {
         s.push_str(&item);
     }
     s.trim_end_matches(';').to_string()
-}
-
-/// Compact digest agents read at session start.
-pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String> {
-    context_with(v, project, ContextOpts { recent: limit, kinds: false })
-}
-
-fn pinned_body(n: &Note) -> String {
-    let body: Vec<&str> = n.body.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
-    let body = body.join("\n");
-    if body.chars().count() <= PINNED_BODY_MAX {
-        return body;
-    }
-    let cut: String = body.chars().take(PINNED_BODY_MAX).collect();
-    format!("{}... (get {} for more)", cut.trim_end(), n.id)
-}
-
-pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Result<String> {
-    use crate::format::{row, short_title};
-    use std::fmt::Write;
-    let mut out = String::new();
-    let proj = match project {
-        Some(slug) => v.load_project(slug)?,
-        None => None,
-    };
-    match (&proj, project) {
-        (Some(p), _) => {
-            write!(out, "breadcrumb context: {}", p.slug)?;
-            if !p.description.trim().is_empty() {
-                write!(out, ", {}", crate::util::one_line(&p.description))?;
-            }
-            out.push('\n');
-        }
-        (None, Some(slug)) => writeln!(out, "breadcrumb context: {slug} (not registered yet)")?,
-        (None, None) => {
-            writeln!(out, "breadcrumb context: global (no project for this directory)")?;
-            let slugs: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
-            if !slugs.is_empty() {
-                writeln!(out, "Known projects: {}, bind this directory with the project tool", slugs.join(", "))?;
-            }
-        }
-    }
-    if let Some(slug) = project {
-        let wfs = crate::workflow::list(v, &Scope::Project { slug: slug.to_string(), with_global: false });
-        if !wfs.is_empty() {
-            let names: Vec<String> = wfs.iter().map(|w| w.summary()).collect();
-            writeln!(out, "Workflows: {}", names.join(", "))?;
-        }
-    }
-    let scope = match project {
-        Some(slug) => Scope::Project { slug: slug.to_string(), with_global: true },
-        None => Scope::Global,
-    };
-    let all = v.load_notes();
-    let mut notes = filter_notes(all.clone(), &scope, &Filter::default())?;
-    sort_notes(&mut notes, SortKey::Updated);
-    if notes.is_empty() {
-        writeln!(out, "No notes yet.")?;
-    }
-    let pinned: Vec<&Note> = notes.iter().filter(|n| n.pinned).collect();
-    if !pinned.is_empty() {
-        writeln!(out, "Pinned:")?;
-        for n in &pinned {
-            let scope = if n.project.as_deref() != project { format!(" ({})", n.scope_label()) } else { String::new() };
-            writeln!(out, "[{} {}] {}{scope}{}", n.id, n.kind, short_title(&n.title), crate::recall::stale_mark(n, v.config.stale_days))?;
-            let body = pinned_body(n);
-            if !body.is_empty() {
-                writeln!(out, "{body}")?;
-            }
-        }
-    }
-    let prefs: Vec<&Note> = notes.iter().filter(|n| !n.pinned && is_pref(n)).collect();
-    if !prefs.is_empty() {
-        writeln!(out, "{}", prefs_line(&prefs))?;
-    }
-    let todos: Vec<&Note> = notes.iter().filter(|n| !n.pinned && is_open_todo(n)).collect();
-    if !todos.is_empty() {
-        writeln!(out, "Todos:")?;
-        for n in &todos {
-            let prio = n.field("priority").map(yaml_display).map(|p| format!(" {p}")).unwrap_or_default();
-            let scope = if n.project.as_deref() != project { format!(" ({})", n.scope_label()) } else { String::new() };
-            writeln!(out, "{} {}{prio}{scope}", n.id, short_title(&n.title))?;
-        }
-    }
-    out.push_str(&crate::backlog::context_section(&notes, &all));
-    let mut handoff_seen: Vec<Option<String>> = vec![];
-    let older_handoff = |n: &Note, seen: &mut Vec<Option<String>>| {
-        if n.kind != HANDOFF {
-            return false;
-        }
-        if seen.contains(&n.project) {
-            return true;
-        }
-        seen.push(n.project.clone());
-        false
-    };
-    let rest: Vec<&Note> = notes
-        .iter()
-        .filter(|n| !n.pinned && !is_pref(n) && !is_open_todo(n) && !crate::backlog::in_digest(n))
-        .filter(|n| !older_handoff(n, &mut handoff_seen))
-        .collect();
-    // Prefs used to sit in Recent, so they still count against it and the digest does not grow.
-    let recent: Vec<&&Note> = rest.iter().take(opts.recent.saturating_sub(prefs.len().min(opts.recent / 2))).collect();
-    if !recent.is_empty() {
-        if rest.len() > recent.len() {
-            writeln!(out, "Recent ({} of {}):", recent.len(), rest.len())?;
-        } else {
-            writeln!(out, "Recent:")?;
-        }
-        for n in recent {
-            writeln!(out, "{}{}", row(n, project, false), crate::recall::stale_mark(n, v.config.stale_days))?;
-        }
-    }
-    if opts.kinds {
-        writeln!(out, "Kinds:")?;
-        out.push_str(&crate::format::kinds_compact(&v.load_kinds()));
-    }
-    Ok(out)
 }
 
 pub fn project_add(v: &Vault, slug: &str, name: Option<&str>, description: Option<&str>, paths: &[String]) -> Result<(Project, bool)> {

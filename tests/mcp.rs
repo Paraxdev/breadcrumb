@@ -64,7 +64,7 @@ fn handshake_list_add_search() {
         names,
         ["add", "append", "backlog", "context", "delete", "doctor", "get", "kinds", "link", "list", "move", "next", "project", "search", "sync", "update", "workflow"]
     );
-    assert!(serde_json::to_string(&out[1]["result"]).unwrap().len() < 6000);
+    assert!(serde_json::to_string(&out[1]["result"]).unwrap().len() < 6600);
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
         assert!(t["inputSchema"]["properties"].is_object(), "{}", t["name"]);
