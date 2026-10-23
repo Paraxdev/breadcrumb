@@ -455,11 +455,19 @@ pub enum QueuePos {
 }
 
 fn save(v: &Vault, n: &mut Note, op: &str) -> Result<()> {
+    save_with(v, n, op, vec![])
+}
+
+/// Writes `n` and the notes changed along with it in one commit.
+fn save_with(v: &Vault, n: &mut Note, op: &str, mut also: Vec<Note>) -> Result<()> {
     let k = v.require_kind(&n.kind)?;
     k.validate(&mut n.extra)?;
     n.updated = now();
-    let p = v.write_note(n)?;
-    v.commit(&[p], &format!("breadcrumb: {op} {} {}", n.id, crate::util::one_line(&n.title)))?;
+    let mut paths = vec![v.write_note(n)?];
+    for o in &mut also {
+        paths.push(v.write_note(o)?);
+    }
+    v.commit(&paths, &format!("breadcrumb: {op} {} {}", n.id, crate::util::one_line(&n.title)))?;
     Ok(())
 }
 
@@ -674,7 +682,10 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     }
     let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
     record_state_change(&mut n, &from, &to, req.by.as_deref());
-    save(v, &mut n, "move")?;
+    // Notes with `expires: until:<this item>` stop holding now.
+    let mut waiting = if is_closed(&to) { crate::lifecycle::waiting_for(&v.load_notes(), &n.id) } else { vec![] };
+    waiting.iter_mut().for_each(crate::lifecycle::mark);
+    save_with(v, &mut n, "move", waiting)?;
     Ok(MoveResult { note: n, from, to, unmet, changed: true })
 }
 

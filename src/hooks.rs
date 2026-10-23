@@ -227,7 +227,7 @@ pub fn needs_import(root: &Path) -> bool {
     !sig.is_empty() && read_text(&import_sig_file(root)).map(|s| s.trim().to_string()).unwrap_or_default() != sig
 }
 
-/// What the detached SessionEnd child does: import Claude memory quietly, then sync when needed.
+/// What the detached SessionEnd child does: import Claude memory quietly, mark expired notes, then sync when needed.
 pub fn background(root: &Path, import: bool) -> Result<()> {
     let v = Vault::open(root)?;
     if import && let Some(dir) = crate::importer::default_claude_dir().filter(|d| d.is_dir()) {
@@ -242,6 +242,11 @@ pub fn background(root: &Path, import: bool) -> Result<()> {
             }
             Err(e) => eprintln!("import claude failed: {e:#}"),
         }
+    }
+    match crate::lifecycle::sweep(&v) {
+        Ok(due) if !due.is_empty() => println!("{} expired {} notes", crate::util::fmt_time(&crate::util::now()), due.len()),
+        Ok(_) => {}
+        Err(e) => eprintln!("expire failed: {e:#}"),
     }
     if needs_sync(&v) {
         let r = crate::export::sync(&v, None)?;

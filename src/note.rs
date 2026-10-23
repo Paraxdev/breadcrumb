@@ -19,6 +19,8 @@ pub const PATHS_KEY: &str = "paths";
 pub const VERIFIED_KEY: &str = "verified";
 /// Typed pointers to things outside the vault, `type:value` like commit:abc123, run:wf_1, branch:fix/x, pr:12.
 pub const REFS_KEY: &str = "refs";
+/// When the note stops holding: a date, a time or `until:<id>`. See lifecycle.
+pub const EXPIRES_KEY: &str = "expires";
 
 /// Trimmed `type:value` entries with a lowercase type, deduplicated in order.
 pub fn normalize_refs(raw: &[String]) -> anyhow::Result<Vec<String>> {

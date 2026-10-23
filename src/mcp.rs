@@ -377,8 +377,10 @@ impl Server {
             }
             "doctor" if b(a, "fix") => {
                 let changes = crate::fix::plan(&v);
-                let applied = if b(a, "apply") { Some(crate::fix::apply(&v, &changes)?) } else { None };
-                Ok(crate::fix::text(&changes, applied).replace("--yes", "apply: true"))
+                let apply = b(a, "apply");
+                let applied = if apply { Some(crate::fix::apply(&v, &changes)?) } else { None };
+                let expired = if apply { crate::lifecycle::sweep(&v)? } else { crate::lifecycle::sweep_plan(&v) };
+                Ok(format!("{}{}", crate::fix::text(&changes, applied), crate::lifecycle::sweep_text(&expired, apply)).replace("--yes", "apply: true"))
             }
             "doctor" => {
                 let problems = crate::doctor::check(&v);
@@ -467,7 +469,8 @@ fn fields(a: &Map<String, Value>, k: &str) -> Result<Vec<(String, FieldInput)>> 
 
 /// `fields` plus the options that are fields under the hood.
 fn note_fields(a: &Map<String, Value>) -> Result<Vec<(String, FieldInput)>> {
-    Ok(ops::with_field(fields(a, "fields")?, crate::digest::SUMMARY_KEY, s(a, "summary")))
+    let f = ops::with_field(fields(a, "fields")?, crate::digest::SUMMARY_KEY, s(a, "summary"));
+    Ok(ops::with_field(f, crate::note::EXPIRES_KEY, s(a, "expires")))
 }
 
 fn links(a: &Map<String, Value>) -> Result<Vec<Link>> {
@@ -569,7 +572,7 @@ pub fn tool_defs() -> Vec<Value> {
     let scope = || json!({"project": {"type": "string", "description": "slug, global or all"}});
     let target = || json!({"project": {"type": "string", "description": "slug or global"}});
     let filters = || json!({"kind": st(), "tags": arr(), "limit": int()});
-    let fields = || json!({"type": "object", "description": "kind fields, summary: digest line of a pin"});
+    let fields = || json!({"type": "object", "description": "kind fields, summary: digest line of a pin, expires: date, 3d or until:id"});
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
     let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});
@@ -651,6 +654,6 @@ pub fn tool_defs() -> Vec<Value> {
             "force": bl(),
         })), &[])),
         tool("sync", "Commit, pull and push the vault.", obj(json!({"message": st()}), &[])),
-        tool("doctor", "Validate notes, fix: repair stale paths.", obj(json!({"fix": bl(), "apply": bl()}), &[])),
+        tool("doctor", "Validate notes, fix: repair stale paths, mark expired notes.", obj(json!({"fix": bl(), "apply": bl()}), &[])),
     ]
 }

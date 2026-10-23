@@ -42,7 +42,7 @@ pub fn search_text(r: &SearchResult, scope_label: &str) -> String {
         let _ = writeln!(s, "(no note matched all terms, showing notes matching any term)");
     }
     for h in &r.hits {
-        let _ = writeln!(s, "{}  {:<12} {:<14} {}", h.note.id, h.note.kind, h.note.scope_label(), h.note.title);
+        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}", h.note.id, h.note.kind, h.note.scope_label(), h.note.title, lapsed_flag(h));
         if !h.snippet.is_empty() {
             let _ = writeln!(s, "    {}", h.snippet);
         }
@@ -93,6 +93,10 @@ pub fn rows(notes: &[Note], total: usize, current: Option<&str>) -> String {
 
 pub const SNIPPET_MAX: usize = 100;
 
+fn lapsed_flag(h: &crate::search::Hit) -> String {
+    h.lapsed.map(|l| format!(" [{l}]")).unwrap_or_default()
+}
+
 pub fn search_rows(r: &SearchResult, current: Option<&str>) -> String {
     if r.hits.is_empty() {
         return "no matches\n".into();
@@ -102,7 +106,7 @@ pub fn search_rows(r: &SearchResult, current: Option<&str>) -> String {
         s.push_str("no note matched every term, showing any-term matches\n");
     }
     for h in &r.hits {
-        let _ = writeln!(s, "{}", row(&h.note, current, false));
+        let _ = writeln!(s, "{}{}", row(&h.note, current, false), lapsed_flag(h));
         let snip = crate::util::one_line(&h.snippet);
         if !snip.is_empty() {
             let _ = writeln!(s, "  {}", crate::util::truncate_chars(&snip, SNIPPET_MAX));

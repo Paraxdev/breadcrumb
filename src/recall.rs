@@ -179,11 +179,21 @@ pub struct IndexEntry {
     pub paths: Vec<String>,
     pub fresh: i64,
     pub exempt: bool,
+    /// Superseded or expired when the index was built.
+    #[serde(default)]
+    pub lapsed: bool,
+    /// Unix seconds an `expires` date or time runs out, checked on every read since time passes without file changes.
+    #[serde(default)]
+    pub expires: Option<i64>,
 }
 
 impl IndexEntry {
     fn stale(&self, days: u64) -> bool {
         !self.exempt && DateTime::from_timestamp(self.fresh, 0).is_some_and(|t| stale_since(t, days))
+    }
+
+    fn holds(&self) -> bool {
+        !self.lapsed && self.expires.is_none_or(|t| now().timestamp() < t)
     }
 }
 
@@ -196,7 +206,8 @@ struct PathIndex {
 /// Names, sizes and mtimes of every note file. Directory listings carry those on all platforms we target,
 /// so this costs no file reads.
 fn notes_signature(v: &Vault) -> String {
-    let mut parts: Vec<String> = vec![];
+    // The version rebuilds an index written by an older binary, which lacks newer entry fields.
+    let mut parts: Vec<String> = vec!["v2".into()];
     for d in v.notes_dirs() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
@@ -227,9 +238,10 @@ pub fn path_index(v: &Vault) -> Vec<IndexEntry> {
     {
         return idx.notes;
     }
-    let notes: Vec<IndexEntry> = v
-        .load_notes()
-        .into_iter()
+    let all = v.load_notes();
+    let lapsed = crate::lifecycle::Lapsed::of(&all);
+    let notes: Vec<IndexEntry> = all
+        .iter()
         .filter(|n| !n.is_archived())
         .filter_map(|n| {
             let paths = n.path_globs();
@@ -240,7 +252,12 @@ pub fn path_index(v: &Vault) -> Vec<IndexEntry> {
                 project: n.project.clone(),
                 paths,
                 fresh: n.fresh_at().timestamp(),
-                exempt: stale_exempt(&n),
+                exempt: stale_exempt(n),
+                lapsed: lapsed.hides(n),
+                expires: match crate::lifecycle::expiry(n) {
+                    Some(crate::lifecycle::Expiry::At(t)) => Some(t.timestamp()),
+                    _ => None,
+                },
             })
         })
         .collect();
@@ -272,7 +289,7 @@ pub fn file_notes(v: &Vault, cwd: &Path, file: &Path, exclude: &HashSet<String>)
     let mut hits: Vec<IndexEntry> = path_index(v)
         .into_iter()
         .filter(|e| e.project.as_deref().is_none_or(|p| p == slug))
-        .filter(|e| !exclude.contains(&e.id))
+        .filter(|e| !exclude.contains(&e.id) && e.holds())
         .filter(|e| e.paths.iter().any(|g| glob_match(g, &rel)))
         .collect();
     if hits.is_empty() {
@@ -323,8 +340,10 @@ pub fn recall(v: &Vault, project: Option<&str>, prompt: &str, exclude: &HashSet<
         Some(slug) => Scope::Project { slug: slug.to_string(), with_global: true },
         None => Scope::Global,
     };
-    let Ok(notes) = crate::ops::filter_notes(v.load_notes(), &scope, &Filter::default()) else { return vec![] };
-    let notes: Vec<Note> = notes.into_iter().filter(|n| !exclude.contains(&n.id)).collect();
+    let all = v.load_notes();
+    let lapsed = crate::lifecycle::Lapsed::of(&all);
+    let Ok(notes) = crate::ops::filter_notes(all, &scope, &Filter::default()) else { return vec![] };
+    let notes: Vec<Note> = notes.into_iter().filter(|n| !exclude.contains(&n.id) && !lapsed.hides(n)).collect();
     let need = terms.len().min(2);
     crate::search::search(notes, &terms.join(" "))
         .hits

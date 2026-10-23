@@ -13,6 +13,8 @@ pub struct Hit {
     pub snippet: String,
     /// How many query terms the note matched.
     pub matched: usize,
+    /// Set by callers that know the whole vault: superseded or expired.
+    pub lapsed: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,10 +177,10 @@ pub fn search(notes: Vec<Note>, q: &str) -> SearchResult {
         }
         if matched == query.terms.len() {
             let snip = snippet(&n, &query);
-            and_hits.push(Hit { note: n, score, snippet: snip, matched });
+            and_hits.push(Hit { note: n, score, snippet: snip, matched, lapsed: None });
         } else if matched > 0 {
             let snip = snippet(&n, &query);
-            or_hits.push(Hit { note: n, score, snippet: snip, matched });
+            or_hits.push(Hit { note: n, score, snippet: snip, matched, lapsed: None });
         }
     }
     let fell_back = and_hits.is_empty() && !or_hits.is_empty();

@@ -182,7 +182,7 @@ pub enum Cmd {
     McpConfig,
     /// Validate every note and report problems
     Doctor {
-        /// Propose fixes for stale file paths: rewrite moved ones, drop or mark the rest (dry run without --yes)
+        /// Propose fixes: rewrite moved file paths, drop or mark gone ones, mark expired notes (dry run without --yes)
         #[arg(long)]
         fix: bool,
         /// Apply the --fix changes in one commit
@@ -537,6 +537,9 @@ pub struct AddArgs {
     /// One line the session digest shows for a pinned note, instead of the title's first sentence
     #[arg(long)]
     pub summary: Option<String>,
+    /// When it stops holding: a date (the last day), an RFC3339 time, 3d or 12h from now, or until:<id> is closed
+    #[arg(long, value_name = "WHEN")]
+    pub expires: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -576,6 +579,9 @@ pub struct UpdateArgs {
     /// One line the session digest shows for a pinned note
     #[arg(long)]
     pub summary: Option<String>,
+    /// A date, an RFC3339 time, 3d or 12h from now, or until:<id>, `--unset expires` drops it
+    #[arg(long, value_name = "WHEN")]
+    pub expires: Option<String>,
 }
 
 struct Out {
@@ -638,7 +644,7 @@ fn run_hook(vault: Option<&Path>, h: &HookCmd) {
         HookCmd::Stop => print(crate::hooks::stop(&root, &input(), &cwd())),
         HookCmd::SessionEnd { no_import } => {
             if let Ok(v) = Vault::open(&root)
-                && (crate::hooks::needs_sync(&v) || (!no_import && crate::hooks::needs_import(&v.root)))
+                && (crate::hooks::needs_sync(&v) || (!no_import && crate::hooks::needs_import(&v.root)) || !crate::lifecycle::sweep_plan(&v).is_empty())
             {
                 let _ = crate::hooks::spawn_background(&v.root, !no_import);
             }
@@ -731,7 +737,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     kind: a.kind,
                     project,
                     tags: a.tags,
-                    fields: ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary),
+                    fields: ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires),
                     pinned: a.pin,
                     body: read_body_arg(a.body, a.body_file)?,
                     source: a.source,
@@ -760,7 +766,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     title: u.title,
                     kind: u.kind,
                     tags: u.tags,
-                    fields: ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary),
+                    fields: ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires),
                     unset: u.unset,
                     body: read_body_arg(u.body, u.body_file)?,
                     pinned,
@@ -922,7 +928,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             let v = open()?;
             let changes = crate::fix::plan(&v);
             let applied = if yes { Some(crate::fix::apply(&v, &changes)?) } else { None };
-            out.emit(crate::fix::text(&changes, applied), json!({"applied": applied, "changes": changes}));
+            let expired = if yes { crate::lifecycle::sweep(&v)? } else { crate::lifecycle::sweep_plan(&v) };
+            let text = format!("{}{}", crate::fix::text(&changes, applied), crate::lifecycle::sweep_text(&expired, yes));
+            out.emit(text, json!({"applied": applied, "changes": changes, "expired": expired}));
         }
         Cmd::Doctor { .. } => {
             let v = open()?;

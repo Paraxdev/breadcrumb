@@ -145,6 +145,18 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
             note.set_refs(crate::note::normalize_refs(&raw)?);
             continue;
         }
+        if key == crate::note::EXPIRES_KEY && k.field(&key).is_none() {
+            let raw = match input {
+                FieldInput::Raw(s) => s,
+                FieldInput::Value(x) => yaml_scalar_string(&x).unwrap_or_default(),
+            };
+            if raw.trim().is_empty() {
+                note.unset_field(&key);
+            } else {
+                note.set_field(&key, Value::String(crate::lifecycle::normalize_expires(v, &raw)?));
+            }
+            continue;
+        }
         if key == crate::note::VERIFIED_KEY {
             bail!("'verified' is set by breadcrumb, use verify to mark a note as still accurate");
         }
@@ -742,9 +754,16 @@ pub fn list_counted(v: &Vault, scope: &Scope, f: &Filter) -> Result<(Vec<Note>, 
 
 pub const DEFAULT_SEARCH_LIMIT: usize = 20;
 
+/// Superseded and expired notes rank after every note that still holds, and say so.
 pub fn search(v: &Vault, query: &str, scope: &Scope, f: &Filter) -> Result<SearchResult> {
-    let notes = filter_notes(v.load_notes(), scope, f)?;
+    let all = v.load_notes();
+    let lapsed = crate::lifecycle::Lapsed::of(&all);
+    let notes = filter_notes(all, scope, f)?;
     let mut r = search::search(notes, query);
+    for h in &mut r.hits {
+        h.lapsed = lapsed.label(&h.note);
+    }
+    r.hits.sort_by_key(|h| h.lapsed.is_some());
     r.hits.truncate(f.limit.unwrap_or(DEFAULT_SEARCH_LIMIT));
     Ok(r)
 }
@@ -842,7 +861,7 @@ pub fn define_kind(v: &Vault, def: KindDef, replace: bool, remove_fields: &[Stri
         bail!("invalid kind name '{}', use lowercase letters, digits, '-' or '_'", def.name);
     }
     for f in &def.fields {
-        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY, crate::note::REFS_KEY].contains(&f.name.as_str()) {
+        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY, crate::note::REFS_KEY, crate::note::EXPIRES_KEY].contains(&f.name.as_str()) {
             bail!("field name '{}' is reserved for note metadata", f.name);
         }
         if f.ty == kind::FieldType::Enum && f.values.is_empty() {

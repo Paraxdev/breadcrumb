@@ -110,6 +110,7 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
     for (p, e) in note_errors {
         err(v.rel(&p), None, "error", e);
     }
+    let lapsed = crate::lifecycle::Lapsed::of(&notes);
     let mut ids: HashMap<String, Vec<String>> = HashMap::new();
     for n in &notes {
         ids.entry(n.id.clone()).or_default().push(n.path.as_ref().map(|p| v.rel(p)).unwrap_or_default());
@@ -158,6 +159,16 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
         {
             for m in missing_refs(n, rs) {
                 err(path.clone(), id.clone(), "warning", format!("mentions `{m}`, which does not exist in the project checkout"));
+            }
+        }
+        if let Some(crate::lifecycle::Expiry::Invalid(raw)) = crate::lifecycle::expiry(n) {
+            err(path.clone(), id.clone(), "warning", format!("expires '{raw}' is not a date, an RFC3339 time or until:<id>, so it never expires"));
+        }
+        if let Some(e) = lapsed.expired(n).filter(|_| !n.is_archived()) {
+            if crate::lifecycle::needs_mark(n) {
+                err(path.clone(), id.clone(), "warning", format!("{} but still pinned or an accepted decision, `breadcrumb doctor --fix --yes` marks it", e.why));
+            } else if e.when.is_none_or(|t| (crate::util::now() - t).num_days() < crate::lifecycle::RECENTLY_DAYS) {
+                err(path.clone(), id.clone(), "info", format!("{}, hidden from the digest and ranked last in search", e.why));
             }
         }
         if ops_pref_unpinned(n) {
