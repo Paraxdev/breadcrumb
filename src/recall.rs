@@ -192,7 +192,7 @@ impl IndexEntry {
         !self.exempt && DateTime::from_timestamp(self.fresh, 0).is_some_and(|t| stale_since(t, days))
     }
 
-    fn holds(&self) -> bool {
+    pub fn holds(&self) -> bool {
         !self.lapsed && self.expires.is_none_or(|t| now().timestamp() < t)
     }
 }

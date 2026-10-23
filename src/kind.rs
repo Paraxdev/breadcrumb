@@ -511,7 +511,9 @@ pub fn seed_kinds() -> Vec<KindDef> {
             values: vec!["read-only".into(), "read-write".into()],
         },
     ];
-    let mut all = vec![note, decision, gotcha, todo, handoff, reference, plan, chat, feedback, user, workflow, env];
+    let mut map = KindDef::new(crate::map::MAP, "A code map of one area: lines of `file:line symbol, what it does`, checked against the working tree, written with `breadcrumb map put`");
+    map.fields = vec![FieldDef { required: true, ..str_field(crate::map::AREA_KEY, "area name, one map per area and project") }];
+    let mut all = vec![note, decision, gotcha, todo, handoff, reference, plan, chat, feedback, user, workflow, env, map];
     all.extend(crate::backlog::seed_kinds());
     all
 }

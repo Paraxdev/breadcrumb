@@ -46,7 +46,7 @@ pub struct ScopeSel {
     pub all: bool,
 }
 
-fn check_slug(slug: &str) -> Result<String> {
+pub(crate) fn check_slug(slug: &str) -> Result<String> {
     let s = slug.trim().to_string();
     if is_valid_slug(&s) {
         Ok(s)
@@ -97,7 +97,7 @@ fn unknown_project_error(v: &Vault, slug: &str) -> anyhow::Error {
     )
 }
 
-fn ensure_project(v: &Vault, slug: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn ensure_project(v: &Vault, slug: &str) -> Result<Option<PathBuf>> {
     if v.load_project(slug)?.is_some() {
         return Ok(None);
     }
@@ -239,7 +239,7 @@ fn push_tag(tags: &mut Vec<String>, t: &str) {
     }
 }
 
-fn commit_msg(op: &str, n: &Note) -> String {
+pub(crate) fn commit_msg(op: &str, n: &Note) -> String {
     format!("breadcrumb: {op} {} {}", n.id, crate::util::one_line(&n.title))
 }
 
@@ -298,6 +298,9 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     }
     note.mark_verified();
     k.validate(&mut note.extra)?;
+    if note.kind == crate::map::MAP {
+        crate::map::check_new(v, &note)?;
+    }
     for l in req.links {
         let to = v.resolve_id(&l.to)?;
         if !note.links.iter().any(|x| x.to == to && x.rel == l.rel) {

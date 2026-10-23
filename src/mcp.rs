@@ -383,6 +383,26 @@ impl Server {
                     other => bail!("action must be list, save, install or status, got '{other}'"),
                 }
             }
+            "map" => {
+                let cwd = self.cwd_of(a);
+                let slug = crate::workflow::resolve_project(&v, s(a, "project").as_deref(), &cwd)?;
+                let repo = || crate::map::repo_for(&v, &slug, s(a, "repo").as_deref().map(Path::new), &cwd);
+                match s(a, "action").as_deref().unwrap_or("brief") {
+                    "brief" => crate::map::brief(&v, &slug, &strs(a, "targets"), repo().ok().as_deref(), u(a, "budget").unwrap_or(crate::map::BRIEF_BUDGET)),
+                    "list" => Ok(crate::map::list_text(&v, &slug, repo().ok().as_deref())),
+                    "get" => crate::map::get_text(&v, &slug, &req_s(a, "area")?, repo().ok().as_deref()),
+                    "put" => {
+                        // Map lines hold commas, so a single string is split on newlines only.
+                        let lines = match a.get("lines") {
+                            Some(Value::String(x)) => vec![x.clone()],
+                            _ => strs(a, "lines"),
+                        };
+                        let req = crate::map::PutReq { area: req_s(a, "area")?, project: slug.clone(), lines, paths: strs(a, "paths"), drop: strs(a, "drop") };
+                        Ok(crate::map::put(&v, req, &repo()?)?.text())
+                    }
+                    other => bail!("action must be brief, list, get or put, got '{other}'"),
+                }
+            }
             "sync" => {
                 let r = crate::export::sync(&v, s(a, "message").as_deref())?;
                 Ok(format!("{}{}", if r.committed { "committed pending changes\n" } else { "" }, r.message))
@@ -636,6 +656,16 @@ pub fn tool_defs() -> Vec<Value> {
             "paths": {"type": "array", "items": {"type": "string"}, "description": "for save"},
             "to": st(),
             "force": bl(),
+        })), &[])),
+        tool("map", "Code maps: brief (default) targets before editing, put lines, same file and symbol replaces.", obj(with(json!({"project": st()}), json!({
+            "action": {"type": "string", "enum": ["brief", "list", "get", "put"]},
+            "targets": {"type": "array", "items": {"type": "string"}, "description": "files, dirs or areas"},
+            "area": st(),
+            "lines": {"type": "array", "items": {"type": "string"}, "description": "file:line symbol, what it does"},
+            "paths": paths(),
+            "drop": {"type": "array", "items": {"type": "string"}, "description": "file or file symbol"},
+            "repo": st(),
+            "budget": int(),
         })), &[])),
         tool("sync", "Commit, pull and push the vault.", obj(json!({"message": st()}), &[])),
         tool("doctor", "Validate notes, fix: repair stale paths, mark expired notes.", obj(json!({"fix": bl(), "apply": bl()}), &[])),

@@ -311,6 +311,23 @@ pub enum Cmd {
     /// Back up and restore Claude Code workflow scripts (.claude/workflows)
     #[command(subcommand)]
     Workflow(WorkflowCmd),
+    /// Code maps of a project's areas, lines of `file:line symbol, what it does` checked against the working tree
+    #[command(subcommand)]
+    Map(MapCmd),
+    /// What to read before working on files, directories or map areas: their map lines with stale ones marked,
+    /// and the gotchas, decisions and feedback whose path globs match, in about 2k tokens
+    Brief {
+        #[arg(required = true, num_args = 1..)]
+        targets: Vec<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Git checkout to check freshness against (default: the one holding the cwd, else a recorded project path)
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Most chars to print
+        #[arg(long, default_value_t = crate::map::BRIEF_BUDGET)]
+        budget: usize,
+    },
     /// Local web UI on 127.0.0.1
     Serve {
         #[arg(long, default_value_t = 7878)]
@@ -413,6 +430,45 @@ pub enum ProjectCmd {
         /// Directory to bind (default: current directory)
         #[arg(long)]
         path: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MapCmd {
+    /// Create the area's map or merge lines into it, a line for the same file and symbol replaces the old one
+    Put {
+        area: String,
+        /// `file:line symbol, what it does` (repeatable)
+        #[arg(long = "line", value_name = "LINE")]
+        lines: Vec<String>,
+        /// File with one map line per line, - reads stdin
+        #[arg(long, value_name = "FILE")]
+        lines_file: Option<PathBuf>,
+        /// Path glob the area covers (repeatable), default the files its lines name
+        #[arg(long = "path-glob", value_name = "GLOB")]
+        paths: Vec<String>,
+        /// Remove the lines of a file, or one line by `file symbol` (repeatable)
+        #[arg(long, value_name = "KEY")]
+        drop: Vec<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+    },
+    /// Show an area's map with stale lines marked
+    Get {
+        area: String,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+    },
+    /// One header line per map of the project
+    List {
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
     },
 }
 
@@ -1060,6 +1116,14 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(format!("promoted {}", backlog::item_summary(&n)), n.to_json());
         }
         Cmd::Workflow(wc) => return workflow_cmd(&out, &open()?, wc, &cwd),
+        Cmd::Map(mc) => map_cmd(&out, &open()?, mc, &cwd)?,
+        Cmd::Brief { targets, project, repo, budget } => {
+            let v = open()?;
+            let slug = workflow::resolve_project(&v, project.as_deref(), &cwd)?;
+            let repo = crate::map::repo_for(&v, &slug, repo.as_deref(), &cwd).ok();
+            let text = crate::map::brief(&v, &slug, &targets, repo.as_deref(), budget)?;
+            out.emit(&text, json!({"project": slug, "brief": text}));
+        }
         Cmd::Serve { port, open: open_browser } => {
             open()?;
             crate::serve::run(&root, port, open_browser)?;
@@ -1135,6 +1199,36 @@ fn project_cmd(out: &Out, v: &Vault, pc: ProjectCmd, cwd: &Path) -> Result<()> {
                 text.push_str("\n  (path and remotes were already linked)");
             }
             out.emit(text, json!({"project": format::project_json(&r.project), "created": r.created, "added_path": r.added_path, "added_remotes": r.added_remotes}));
+        }
+    }
+    Ok(())
+}
+
+fn map_cmd(out: &Out, v: &Vault, mc: MapCmd, cwd: &Path) -> Result<()> {
+    use crate::map;
+    match mc {
+        MapCmd::Put { area, mut lines, lines_file, paths, drop, project, repo } => {
+            let slug = workflow::resolve_project(v, project.as_deref(), cwd)?;
+            let repo = map::repo_for(v, &slug, repo.as_deref(), cwd)?;
+            match lines_file {
+                Some(f) if f.as_os_str() == "-" => lines.extend(read_body_arg(Some("-".into()), None)?),
+                Some(f) => lines.extend(read_body_arg(None, Some(f))?),
+                None => {}
+            }
+            let r = map::put(v, map::PutReq { area, project: slug, lines, paths, drop }, &repo)?;
+            out.emit(r.text(), r.map.note.to_json());
+        }
+        MapCmd::Get { area, project, repo } => {
+            let slug = workflow::resolve_project(v, project.as_deref(), cwd)?;
+            let repo = map::repo_for(v, &slug, repo.as_deref(), cwd).ok();
+            let text = map::get_text(v, &slug, &area, repo.as_deref())?;
+            out.emit(&text, json!({"project": slug, "map": text}));
+        }
+        MapCmd::List { project, repo } => {
+            let slug = workflow::resolve_project(v, project.as_deref(), cwd)?;
+            let repo = map::repo_for(v, &slug, repo.as_deref(), cwd).ok();
+            let text = map::list_text(v, &slug, repo.as_deref());
+            out.emit(&text, json!({"project": slug, "maps": text}));
         }
     }
     Ok(())
