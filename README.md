@@ -9,6 +9,7 @@ breadcrumb import claude             # optional, pulls in Claude Code auto-memor
 breadcrumb import claude --retire-index  # optional, swaps each MEMORY.md for a pointer to breadcrumb
 claude mcp add --scope user breadcrumb -- /path/to/breadcrumb mcp
 breadcrumb --help
+crumb next                           # crumb is a shorter alias for breadcrumb
 ```
 
 Notes are plain markdown files with YAML frontmatter, every write is a git commit, and `breadcrumb sync` pushes to whatever remote you set. Run `breadcrumb guide` for the agent conventions.

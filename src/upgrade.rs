@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const OLD_PREFIX: &str = "breadcrumb.old-";
+const BINS: [&str; 2] = ["breadcrumb", "crumb"];
 
 fn current_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("cannot determine the breadcrumb executable path")?;
@@ -37,7 +38,16 @@ pub struct UpgradeReport {
     pub old: String,
 }
 
-/// Renames the running exe aside (Windows allows that, not overwriting it), then lets cargo install the new one.
+fn restore(aside: &[(PathBuf, PathBuf)]) -> Result<()> {
+    for (exe, old) in aside {
+        let _ = std::fs::remove_file(exe);
+        std::fs::rename(old, exe).with_context(|| format!("restoring {} from {}", path_str(exe), path_str(old)))?;
+    }
+    Ok(())
+}
+
+/// Renames the running exe and its sibling bins aside (Windows allows that, not overwriting them), then lets cargo install the new ones.
+/// Both bins move because cargo writes both, and either one can be held open by an MCP server.
 pub fn upgrade(from: Option<&Path>) -> Result<UpgradeReport> {
     let src = match from {
         Some(d) => crate::util::absolutize(d),
@@ -47,9 +57,25 @@ pub fn upgrade(from: Option<&Path>) -> Result<UpgradeReport> {
         bail!("{} has no Cargo.toml", path_str(&src));
     }
     let exe = current_exe()?;
+    let dir = exe.parent().context("the breadcrumb executable has no parent directory")?;
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let old = exe.with_file_name(format!("{OLD_PREFIX}{secs}{}", std::env::consts::EXE_SUFFIX));
-    std::fs::rename(&exe, &old).with_context(|| format!("renaming {} aside", path_str(&exe)))?;
+    let mut targets = vec![exe.clone()];
+    for b in BINS {
+        let p = dir.join(format!("{b}{}", std::env::consts::EXE_SUFFIX));
+        if p.exists() && !targets.contains(&p) {
+            targets.push(p);
+        }
+    }
+    let mut aside = Vec::new();
+    for t in &targets {
+        let stem = t.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let old = t.with_file_name(format!("{OLD_PREFIX}{stem}-{secs}{}", std::env::consts::EXE_SUFFIX));
+        if let Err(e) = std::fs::rename(t, &old) {
+            restore(&aside)?;
+            return Err(e).with_context(|| format!("renaming {} aside", path_str(t)));
+        }
+        aside.push((t.clone(), old));
+    }
     let status = crate::util::hidden(&mut Command::new("cargo"))
         .args(["install", "--path"])
         .arg(&src)
@@ -59,15 +85,13 @@ pub fn upgrade(from: Option<&Path>) -> Result<UpgradeReport> {
         .status();
     let ok = matches!(&status, Ok(s) if s.success());
     if !ok || !exe.exists() {
-        if !ok {
-            let _ = std::fs::remove_file(&exe);
-        }
-        std::fs::rename(&old, &exe).with_context(|| format!("restoring {} from {}", path_str(&exe), path_str(&old)))?;
+        restore(&aside)?;
         match status {
             Err(e) => bail!("could not run cargo: {e}"),
             Ok(s) if !s.success() => bail!("cargo install failed ({s}), the previous breadcrumb is restored"),
             Ok(_) => bail!("cargo installed breadcrumb somewhere other than {}, that copy was left as is and the previous one restored", path_str(&exe)),
         }
     }
-    Ok(UpgradeReport { exe: path_str(&exe), source: path_str(&src), old: path_str(&old) })
+    let old = aside.first().map(|(_, o)| path_str(o)).unwrap_or_default();
+    Ok(UpgradeReport { exe: path_str(&exe), source: path_str(&src), old })
 }
