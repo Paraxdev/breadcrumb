@@ -53,3 +53,9 @@ Notes carry a `verified` date, set on every write. `breadcrumb verify <id>` conf
 ## Upgrade and serve
 
 `breadcrumb upgrade` rebuilds from the source checkout and reinstalls even while an MCP server or `breadcrumb serve` holds the exe open on Windows, running processes keep the old version until their client restarts them. Killing `breadcrumb serve` between requests is safe, writes happen under the vault lock and Ctrl+C lets in-flight requests finish.
+
+## Answering from the web
+
+`breadcrumb serve` (127.0.0.1:7878) has a Questions page at `/questions`, linked from the start page: open questions across projects with their item and project, each option as a button with its description, several picks when the question is multi, free text when it allows it, and a second list of answers no agent has acknowledged yet. It uses `GET /api/questions` and `POST /api/question/<qid>/answer` with `{"choices": [1, 3], "text": "..."}`, which run the same checks as `breadcrumb answer`.
+
+For the phone, run `breadcrumb serve --remote --allow-host <name>` (repeatable) behind a TLS proxy such as `tailscale serve --bg 7878`. It still binds 127.0.0.1 only. It accepts those Host names as well, writes `serve-token` (256 bit, owner only where the OS allows) under the user's app data directory, outside the vault, and prints `https://<name>/login?token=...`. Opening that link once per device stores the token in an HttpOnly, Secure, SameSite=Strict cookie, delete the file and restart to rotate it. Every request needs the cookie, otherwise it gets a login hint page and no data. Remote mode allows only the Questions page, its list and answer endpoints, and a read only board at `/board`, everything else answers 403. Without `--remote` nothing changes.
