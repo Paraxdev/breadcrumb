@@ -36,6 +36,10 @@ button.ghost { background: transparent; border-color: transparent; }
 header { display: flex; gap: 10px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 header h1 { font-size: 17px; margin: 0 8px 0 0; letter-spacing: .3px; }
 .tabs { display: flex; gap: 4px; }
+.tablink { display: inline-flex; gap: 6px; align-items: center; padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel2); color: var(--text); text-decoration: none; }
+.tablink:hover { border-color: var(--accent); }
+.tablink .pill:empty { display: none; }
+html[data-remote] #idea-form, html[data-remote] #new-btn, html[data-remote] #tab-notes { display: none; }
 .tabs button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .spacer { flex: 1; }
 #idea-form { display: flex; gap: 6px; }
@@ -93,6 +97,7 @@ pre.md { white-space: pre-wrap; word-break: break-word; background: var(--panel2
   <div class="tabs">
     <button id="tab-board" class="active">Board</button>
     <button id="tab-notes">Notes</button>
+    <a id="tab-questions" class="tablink" href="/questions">Questions <span id="qcount" class="pill"></span></a>
   </div>
   <div class="spacer"></div>
   <form id="idea-form">
@@ -130,6 +135,7 @@ pre.md { white-space: pre-wrap; word-break: break-word; background: var(--panel2
 "use strict";
 const S = { projects: [], kinds: [], states: [], priorities: [], backlogKinds: [], project: "all", view: "board" };
 const $ = (id) => document.getElementById(id);
+const REMOTE = document.documentElement.hasAttribute("data-remote");
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -190,7 +196,8 @@ async function init() {
   for (const k of S.backlogKinds) $("board-kind").append(h("option", { value: k, text: k }));
   for (const k of S.kinds) $("notes-kind").append(h("option", { value: k.name, text: k.name }));
   const savedView = store("breadcrumb-view");
-  show(savedView === "notes" ? "notes" : "board");
+  show(savedView === "notes" && !REMOTE ? "notes" : "board");
+  api("GET", "/api/questions").then((d) => { $("qcount").textContent = d.open.length || ""; }).catch(() => {});
 }
 
 $("project").onchange = (e) => { S.project = e.target.value; store("breadcrumb-project", S.project); refresh(); };
@@ -250,7 +257,8 @@ function card(it) {
     foot.length ? h("div", { class: "foot" }, foot) : null);
   el.addEventListener("dragstart", (e) => { S.drag = { id: it.id, state: it.state }; e.dataTransfer.setData("text/plain", it.id); e.dataTransfer.effectAllowed = "move"; el.classList.add("dragging"); });
   el.addEventListener("dragend", () => { el.classList.remove("dragging"); S.drag = null; });
-  el.addEventListener("click", () => openNote(it.id));
+  if (REMOTE) el.draggable = false;
+  else el.addEventListener("click", () => openNote(it.id));
   return el;
 }
 

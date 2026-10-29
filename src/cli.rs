@@ -385,6 +385,12 @@ pub enum Cmd {
         port: u16,
         #[arg(long)]
         open: bool,
+        /// Accept the --allow-host names behind a TLS proxy such as `tailscale serve`, with a login token, questions and a read only board only
+        #[arg(long, requires = "allow_host")]
+        remote: bool,
+        /// Host name remote mode accepts, for example pc-name.tailnet.ts.net (repeatable)
+        #[arg(long, value_name = "NAME", requires = "remote")]
+        allow_host: Vec<String>,
     },
     /// Entry points that Claude Code hooks call (reads the hook JSON on stdin, never fails)
     #[command(subcommand)]
@@ -1228,9 +1234,10 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text = crate::map::brief(&v, &slug, &targets, repo.as_deref(), budget)?;
             out.emit(&text, json!({"project": slug, "brief": text}));
         }
-        Cmd::Serve { port, open: open_browser } => {
+        Cmd::Serve { port, open: open_browser, remote, allow_host } => {
             open()?;
-            crate::serve::run(&root, port, open_browser)?;
+            let hosts = if remote { Some(allow_host.iter().map(String::as_str).map(crate::serve::normalize_host).collect::<Result<Vec<_>>>()?) } else { None };
+            crate::serve::run(&root, port, open_browser, hosts)?;
         }
         Cmd::Hook(_) => {}
         Cmd::Hooks(hc) => {

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>breadcrumb questions</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --panel2: #eef0f4; --text: #1d2330; --muted: #667085;
+  --border: #d9dde5; --accent: #3a63d8; --accent-text: #ffffff; --danger: #c43d3d; --ok: #2f855a;
+  --sel: #e4ebff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151b; --panel: #1a1e26; --panel2: #232833; --text: #e6e9ef; --muted: #98a2b3;
+    --border: #2e3440; --accent: #7aa2ff; --accent-text: #0d1117; --danger: #f87171; --ok: #4ade80;
+    --sel: #26324f;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151b; --panel: #1a1e26; --panel2: #232833; --text: #e6e9ef; --muted: #98a2b3;
+  --border: #2e3440; --accent: #7aa2ff; --accent-text: #0d1117; --danger: #f87171; --ok: #4ade80;
+  --sel: #26324f;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow-wrap: anywhere; }
+header { display: flex; gap: 8px; align-items: center; padding: 10px 12px; background: var(--panel); border-bottom: 1px solid var(--border); }
+header h1 { font-size: 18px; margin: 0; flex: 1; }
+main { max-width: 720px; margin: 0 auto; padding: 12px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 20px 0 8px; }
+button, textarea { font: inherit; color: inherit; }
+button, .btn { min-height: 48px; padding: 8px 14px; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; color: var(--text); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; width: 100%; }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, textarea:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+.meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.pill { border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; white-space: nowrap; }
+.item { font-weight: 600; }
+.qtext { margin: 8px 0; font-size: 17px; }
+.opts { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.opt { width: 100%; justify-content: flex-start; text-align: left; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 14px; }
+.opt .desc { color: var(--muted); font-size: 14px; }
+.opt[aria-pressed="true"] { background: var(--sel); border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.hint { color: var(--muted); font-size: 14px; margin: 4px 0; }
+textarea { width: 100%; min-height: 72px; padding: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin: 4px 0 10px; resize: vertical; }
+.ans { color: var(--ok); font-weight: 600; }
+.err { color: var(--danger); margin: 6px 0 0; min-height: 1.2em; }
+.empty { color: var(--muted); padding: 8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Questions</h1>
+  <button id="reload" type="button">Refresh</button>
+  <a class="btn" href="/board">Board</a>
+</header>
+<main>
+  <h2 id="open-h">Open</h2>
+  <div id="open"></div>
+  <h2 id="seen-h">Answered, not yet picked up by an agent</h2>
+  <div id="unseen"></div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "text") el.textContent = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) {
+    if (k === null || k === undefined || k === false) continue;
+    el.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  }
+  return el;
+}
+
+async function api(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const r = await fetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+
+let dirty = false;
+
+function head(r) {
+  return h("div", { class: "meta" },
+    h("span", { class: "pill", text: r.project || "global" }),
+    h("span", { class: "pill", text: r.state }),
+    h("span", { text: r.qid }));
+}
+
+function openCard(r) {
+  const q = r.question;
+  const picked = new Set();
+  const err = h("div", { class: "err", role: "alert" });
+  const submit = h("button", { class: "primary", type: "button", text: "Submit answer", disabled: true });
+  const text = q.free ? h("textarea", { placeholder: "Or write your own answer", "aria-label": "Free text answer" }) : null;
+  const buttons = q.options.map((o, i) => {
+    const b = h("button", { class: "opt", type: "button", "aria-pressed": "false" },
+      h("span", { text: (i + 1) + ". " + o.label }), o.desc ? h("span", { class: "desc", text: o.desc }) : null);
+    b.onclick = () => {
+      const n = i + 1;
+      if (picked.has(n)) picked.delete(n);
+      else { if (!q.multi) picked.clear(); picked.add(n); }
+      buttons.forEach((x, j) => x.setAttribute("aria-pressed", String(picked.has(j + 1))));
+      update();
+    };
+    return b;
+  });
+  function update() {
+    dirty = picked.size > 0 || (text && text.value.trim() !== "");
+    submit.disabled = !dirty;
+  }
+  if (text) text.oninput = update;
+  submit.onclick = async () => {
+    submit.disabled = true; err.textContent = "";
+    try {
+      const body = { choices: [...picked].sort((a, b) => a - b) };
+      if (text && text.value.trim()) body.text = text.value.trim();
+      await api("POST", "/api/question/" + encodeURIComponent(r.qid) + "/answer", body);
+      dirty = false;
+      load();
+    } catch (e) { err.textContent = e.message; submit.disabled = false; }
+  };
+  const how = q.multi ? "Pick one or more" : "Pick one";
+  return h("div", { class: "card" }, head(r),
+    h("div", { class: "item", text: r.title }),
+    h("div", { class: "qtext", text: q.text }),
+    h("div", { class: "hint", text: how + (q.free ? ", or write an answer" : "") }),
+    h("div", { class: "opts" }, buttons), text, submit, err);
+}
+
+function unseenCard(r) {
+  const a = r.question.answer || {};
+  return h("div", { class: "card" }, head(r),
+    h("div", { class: "item", text: r.title }),
+    h("div", { text: r.question.text }),
+    h("div", { class: "ans", text: r.answer }),
+    h("div", { class: "hint", text: "answered " + (a.at || "") + (a.by ? " by " + a.by : "") }));
+}
+
+function fill(el, heading, label, rows, make) {
+  heading.textContent = label + " (" + rows.length + ")";
+  el.replaceChildren(...(rows.length ? rows.map(make) : [h("div", { class: "empty", text: "Nothing here." })]));
+}
+
+async function load() {
+  try {
+    const d = await api("GET", "/api/questions");
+    fill($("open"), $("open-h"), "Open", d.open, openCard);
+    fill($("unseen"), $("seen-h"), "Answered, not yet picked up by an agent", d.unseen, unseenCard);
+  } catch (e) {
+    $("open").replaceChildren(h("div", { class: "err", text: e.message }));
+  }
+}
+
+$("reload").onclick = () => { dirty = false; load(); };
+setInterval(() => { if (!dirty && !document.hidden) load(); }, 30000);
+load();
+</script>
+</body>
+</html>

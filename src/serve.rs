@@ -3,18 +3,23 @@
 use crate::backlog::{self, BoardFilter, MoveReq};
 use crate::kind;
 use crate::note::{Link, Note};
+use crate::question;
 use crate::ops::{self, AddReq, FieldInput, Filter, Scope, SortKey, StatusFilter, UpdateReq};
 use crate::vault::Vault;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const INDEX_HTML: &str = include_str!("web/index.html");
+const QUESTIONS_HTML: &str = include_str!("web/questions.html");
+const LOGIN_HTML: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>breadcrumb</title><body style=\"font:16px system-ui;margin:2em auto;max-width:30em;padding:0 16px\"><h1>breadcrumb</h1><p>Sign in with the login link that <code>breadcrumb serve --remote</code> printed when it started.</p>";
+pub const COOKIE: &str = "crumb_token";
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const MAX_HEADERS: usize = 100;
 
@@ -42,11 +47,20 @@ pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    pub headers: Vec<(&'static str, String)>,
 }
 
 impl Response {
     pub fn json(status: u16, v: &Value) -> Response {
-        Response { status, content_type: "application/json; charset=utf-8", body: serde_json::to_vec(v).unwrap_or_default() }
+        Response { status, content_type: "application/json; charset=utf-8", body: serde_json::to_vec(v).unwrap_or_default(), headers: vec![] }
+    }
+
+    fn html(status: u16, body: &str) -> Response {
+        Response { status, content_type: "text/html; charset=utf-8", body: body.as_bytes().to_vec(), headers: vec![] }
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
 
     fn error(status: u16, msg: impl Into<String>) -> Response {
@@ -63,6 +77,8 @@ fn reason(status: u16) -> &'static str {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        303 => "See Other",
+        401 => "Unauthorized",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
@@ -149,12 +165,16 @@ pub fn read_request<R: BufRead>(r: &mut R) -> Result<Option<Request>> {
 pub fn write_response<W: Write>(w: &mut W, resp: &Response) -> Result<()> {
     write!(
         w,
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n",
         resp.status,
         reason(resp.status),
         resp.content_type,
         resp.body.len()
     )?;
+    for (k, v) in &resp.headers {
+        write!(w, "{k}: {v}\r\n")?;
+    }
+    w.write_all(b"\r\n")?;
     w.write_all(&resp.body)?;
     w.flush()?;
     Ok(())
@@ -172,20 +192,55 @@ fn is_local_host(h: &str) -> bool {
     matches!(h.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "::1")
 }
 
+/// Remote mode: extra Host names behind a TLS proxy and the one token that unlocks them.
+pub struct Remote {
+    pub hosts: Vec<String>,
+    pub token: String,
+}
+
 pub struct App {
     pub vault_root: PathBuf,
     pub port: u16,
+    pub remote: Option<Remote>,
+}
+
+/// Compares SHA-256 digests of both sides, so neither the length nor the first differing byte shows in the timing.
+pub fn token_eq(a: &str, b: &str) -> bool {
+    let (da, db) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
+    da.iter().zip(db.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn cookie_value<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    header.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v)
+}
+
+/// Lowercases and strips a scheme, port and trailing slash, so `https://PC.ts.net:443/` and `pc.ts.net` are one name.
+pub fn normalize_host(raw: &str) -> Result<String> {
+    let h = raw.trim().trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
+    let h = host_of(h).to_ascii_lowercase();
+    if h.is_empty() || h.contains(['/', ' ', '@', '?', '#']) {
+        bail!("'{raw}' is not a host name");
+    }
+    Ok(h)
 }
 
 impl App {
     pub fn new(vault_root: &Path, port: u16) -> App {
-        App { vault_root: vault_root.to_path_buf(), port }
+        App { vault_root: vault_root.to_path_buf(), port, remote: None }
+    }
+
+    pub fn with_remote(vault_root: &Path, port: u16, hosts: Vec<String>, token: String) -> App {
+        App { vault_root: vault_root.to_path_buf(), port, remote: Some(Remote { hosts, token }) }
+    }
+
+    fn allowed_host(&self, host: &str) -> bool {
+        is_local_host(host) || self.remote.as_ref().is_some_and(|r| r.hosts.iter().any(|h| h.eq_ignore_ascii_case(host)))
     }
 
     /// DNS rebinding and CSRF defenses: local Host only, and writes need a JSON body from a local origin.
     fn guard(&self, req: &Request) -> Option<Response> {
         match req.header("host") {
-            Some(h) if is_local_host(host_of(h)) => {}
+            Some(h) if self.allowed_host(host_of(h)) => {}
             _ => return Some(Response::error(403, "forbidden host, use http://127.0.0.1 or http://localhost")),
         }
         if matches!(req.method.as_str(), "POST" | "PATCH" | "PUT" | "DELETE") {
@@ -194,10 +249,12 @@ impl App {
                 return Some(Response::error(415, "writes require Content-Type: application/json"));
             }
             if let Some(origin) = req.header("origin") {
-                let ok = origin
+                let local = origin
                     .strip_prefix("http://")
                     .map(|rest| is_local_host(host_of(rest)) && (self.port == 0 || rest.ends_with(&format!(":{}", self.port))))
                     .unwrap_or(false);
+                let remote = self.remote.as_ref().is_some_and(|r| r.hosts.iter().any(|h| origin.eq_ignore_ascii_case(&format!("https://{h}"))));
+                let ok = local || remote;
                 if !ok {
                     return Some(Response::error(403, "cross-origin write rejected"));
                 }
@@ -209,15 +266,50 @@ impl App {
         None
     }
 
+    /// Remote mode only: the login route, then the token cookie, then the short list of allowed routes.
+    fn remote_gate(&self, r: &Remote, req: &Request, segs: &[&str]) -> Option<Response> {
+        if req.method == "GET" && segs == ["login"] {
+            if !req.param("token").is_some_and(|t| token_eq(t, &r.token)) {
+                return Some(Response::html(401, LOGIN_HTML));
+            }
+            let mut resp = Response::html(303, "");
+            resp.headers.push(("Location", "/".into()));
+            resp.headers.push(("Set-Cookie", format!("{COOKIE}={}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Strict", r.token)));
+            return Some(resp);
+        }
+        let authed = req.header("cookie").and_then(|c| cookie_value(c, COOKIE)).is_some_and(|t| token_eq(t, &r.token));
+        if !authed {
+            return Some(Response::html(401, LOGIN_HTML));
+        }
+        let allowed = matches!(
+            (req.method.as_str(), segs),
+            ("GET", [] | ["questions"] | ["board"] | ["api", "questions" | "board" | "projects" | "kinds"]) | ("POST", ["api", "question", _, "answer"])
+        );
+        if allowed { None } else { Some(Response::error(403, "not available in remote mode")) }
+    }
+
     pub fn handle(&self, req: &Request) -> Response {
+        let segs: Vec<&str> = req.path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        if !matches!(req.header("host"), Some(h) if self.allowed_host(host_of(h))) {
+            return Response::error(403, "forbidden host, use http://127.0.0.1 or http://localhost");
+        }
+        if let Some(r) = &self.remote
+            && let Some(resp) = self.remote_gate(r, req, &segs)
+        {
+            return resp;
+        }
         if let Some(r) = self.guard(req) {
             return r;
         }
-        let segs: Vec<&str> = req.path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
         let res = match (req.method.as_str(), segs.as_slice()) {
-            ("GET", []) | ("GET", ["index.html"]) => {
-                return Response { status: 200, content_type: "text/html; charset=utf-8", body: INDEX_HTML.as_bytes().to_vec() };
+            ("GET", []) if self.remote.is_some() => return Response::html(200, QUESTIONS_HTML),
+            ("GET", []) | ("GET", ["index.html"]) | ("GET", ["board"]) => {
+                let page = if self.remote.is_some() { INDEX_HTML.replacen("<html lang=\"en\">", "<html lang=\"en\" data-remote=\"1\">", 1) } else { INDEX_HTML.to_string() };
+                return Response::html(200, &page);
             }
+            ("GET", ["questions"]) => return Response::html(200, QUESTIONS_HTML),
+            ("GET", ["api", "questions"]) => self.questions(),
+            ("POST", ["api", "question", qid, "answer"]) => self.answer(qid, req),
             ("GET", ["api", "projects"]) => self.projects(),
             ("GET", ["api", "kinds"]) => self.kinds(),
             ("GET", ["api", "board"]) => self.board(req),
@@ -243,6 +335,41 @@ impl App {
                 Response::error(status, msg)
             }
         }
+    }
+
+    fn questions(&self) -> Result<Response> {
+        let v = self.vault()?;
+        let notes: Vec<Note> = v.load_notes().into_iter().filter(|n| !n.is_archived()).collect();
+        let row = |n: &Note, q: &question::Question| {
+            json!({"qid": question::qid(n, q), "item": n.id, "title": n.title, "project": n.project, "state": backlog::state(n), "question": q, "answer": q.answer_text()})
+        };
+        let open: Vec<Value> = question::open_in(&notes).iter().map(|(n, q)| row(n, q)).collect();
+        let mut unseen = vec![];
+        for n in notes.iter().filter(|n| backlog::is_item(n)) {
+            unseen.extend(question::questions(n).iter().filter(|q| q.unseen()).map(|q| row(n, q)));
+        }
+        Ok(Response::json(200, &json!({"open": open, "unseen": unseen})))
+    }
+
+    fn answer(&self, qid: &str, req: &Request) -> Result<Response> {
+        let v = self.vault()?;
+        let b = body_obj(req)?;
+        let mut choices: Vec<usize> = vec![];
+        if let Some(Value::Array(xs)) = b.get("choices") {
+            for x in xs {
+                match x.as_u64() {
+                    Some(i) if i > 0 => {
+                        if !choices.contains(&(i as usize)) {
+                            choices.push(i as usize);
+                        }
+                    }
+                    _ => bail!("choices must be option numbers starting at 1"),
+                }
+            }
+        }
+        let by = str_of(&b, "by").unwrap_or_else(|| "web".to_string());
+        let (n, q) = question::answer(&v, qid, &choices, b.get("text").and_then(Value::as_str), &by)?;
+        Ok(Response::json(200, &json!({"qid": question::qid(&n, &q), "answer": q.answer_text(), "question": q})))
     }
 
     fn vault(&self) -> Result<Vault> {
@@ -572,15 +699,46 @@ fn open_browser(url: &str) {
     }
 }
 
-pub fn run(vault_root: &Path, port: u16, open: bool) -> Result<()> {
+/// Reads the saved token or makes a new 256 bit one, stored outside the vault so git never tracks it.
+pub fn load_or_create_token(dir: &Path) -> Result<String> {
+    let file = dir.join("serve-token");
+    if let Ok(t) = std::fs::read_to_string(&file) {
+        let t = t.trim();
+        if t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(t.to_string());
+        }
+    }
+    let token: String = crate::util::random_bytes::<32>().iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(&file).and_then(|mut f| f.write_all(token.as_bytes())).with_context(|| format!("saving {}", file.display()))?;
+    Ok(token)
+}
+
+pub fn run(vault_root: &Path, port: u16, open: bool, remote_hosts: Option<Vec<String>>) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("binding 127.0.0.1:{port}, is it already in use? try --port"))?;
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}/");
     eprintln!("breadcrumb web UI on {url} (vault {}), Ctrl+C to stop", crate::util::path_str(vault_root));
-    if open {
-        open_browser(&url);
-    }
+    let app = match remote_hosts {
+        Some(hosts) => {
+            let dir = dirs::data_local_dir().context("cannot find the app data directory")?.join("breadcrumb");
+            let token = load_or_create_token(&dir)?;
+            eprintln!("remote mode on, token file {}", dir.join("serve-token").display());
+            eprintln!("log in once per device: https://{}/login?token={token}", hosts[0]);
+            App::with_remote(vault_root, port, hosts, token)
+        }
+        None => {
+            if open {
+                open_browser(&url);
+            }
+            App::new(vault_root, port)
+        }
+    };
     install_ctrl_handler();
-    serve_listener(listener, Arc::new(App::new(vault_root, port)));
+    serve_listener(listener, Arc::new(app));
     Ok(())
 }
