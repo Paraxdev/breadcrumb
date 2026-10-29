@@ -139,7 +139,7 @@ fn age(n: &Note) -> String {
     if mins < 120 { format!("{mins} min") } else { format!("{} h", mins / 60) }
 }
 
-fn event_line(what: &str, by: &str) -> String {
+pub(crate) fn event_line(what: &str, by: &str) -> String {
     format!("- {}: {what} (by {by})", now().format("%Y-%m-%dT%H:%MZ"))
 }
 
@@ -150,6 +150,9 @@ pub fn claim(v: &Vault, id: &str, by: &str, force: bool) -> Result<Note> {
     let mut n = get_item(v, id)?;
     if is_closed(&state(&n)) {
         bail!("{} is {}, claims are for open items", n.id, state(&n));
+    }
+    if let Some(q) = crate::question::open_questions(&n).first() {
+        bail!("{} is waiting on the user, question {}: {}. Work on something else, the user answers with `breadcrumb answer {}`", n.id, crate::question::qid(&n, q), q.text, crate::question::qid(&n, q));
     }
     if let Some(h) = held_by_other(&n, Some(&by))
         && !force
@@ -164,6 +167,7 @@ pub fn claim(v: &Vault, id: &str, by: &str, force: bool) -> Result<Note> {
     n.set_field("assignee", Value::String(by.clone()));
     n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
     n.body = append_history(&n.body, &event_line(&what, &by));
+    crate::question::ack_in(&mut n, &by);
     save(v, &mut n, "claim")?;
     Ok(n)
 }
@@ -369,6 +373,10 @@ pub struct BoardItem {
     pub blocked: bool,
     pub blocked_by: Vec<String>,
     pub progress: Option<(usize, usize)>,
+    /// An open question locks the item until the user answers.
+    pub waiting: bool,
+    /// An answer the agents have not acknowledged yet.
+    pub answered: bool,
 }
 
 impl BoardItem {
@@ -389,6 +397,8 @@ impl BoardItem {
             blocked: idx.is_blocked(n),
             blocked_by: idx.open_blockers(n),
             progress: idx.progress(&n.id),
+            waiting: crate::question::locked(n),
+            answered: crate::question::answered_unseen(n),
         }
     }
 
@@ -404,6 +414,7 @@ impl BoardItem {
         if let Some((d, t)) = self.progress {
             let _ = write!(s, " ({d}/{t} done)");
         }
+        s.push_str(self.question_mark());
         s
     }
 
@@ -418,7 +429,16 @@ impl BoardItem {
         if let Some((d, t)) = self.progress {
             let _ = write!(s, "  ({d}/{t} done)");
         }
+        s.push_str(self.question_mark());
         s
+    }
+
+    fn question_mark(&self) -> &'static str {
+        match (self.waiting, self.answered) {
+            (true, _) => " [waiting on user]",
+            (_, true) => " [answered]",
+            _ => "",
+        }
     }
 }
 
@@ -442,6 +462,20 @@ fn scoped_items(v: &Vault, scope: &Scope) -> Result<(Vec<Note>, Vec<String>)> {
     Ok((all, ids))
 }
 
+/// Board column for items locked by an open question, whatever their state.
+pub const WAITING: &str = "waiting-on-user";
+
+fn waiting_items(all: &[Note], ids: &HashSet<&str>, f: &BoardFilter, idx: &Index) -> Vec<BoardItem> {
+    let mut items: Vec<&Note> = all
+        .iter()
+        .filter(|n| ids.contains(n.id.as_str()) && crate::question::locked(n))
+        .filter(|n| f.kind.as_ref().is_none_or(|k| n.kind.eq_ignore_ascii_case(k)))
+        .filter(|n| f.assignee.as_ref().is_none_or(|a| assignee(n).is_some_and(|x| x.eq_ignore_ascii_case(a))))
+        .collect();
+    sort_items(&mut items);
+    items.iter().map(|n| BoardItem::from_note(n, idx)).collect()
+}
+
 pub fn board(v: &Vault, scope: &Scope, f: &BoardFilter) -> Result<Vec<Column>> {
     let (all, ids) = scoped_items(v, scope)?;
     let idx = Index::new(&all);
@@ -453,12 +487,15 @@ pub fn board(v: &Vault, scope: &Scope, f: &BoardFilter) -> Result<Vec<Column>> {
         }
         let mut items: Vec<&Note> = all
             .iter()
-            .filter(|n| ids.contains(n.id.as_str()) && state(n) == st)
+            .filter(|n| ids.contains(n.id.as_str()) && state(n) == st && !crate::question::locked(n))
             .filter(|n| f.kind.as_ref().is_none_or(|k| n.kind.eq_ignore_ascii_case(k)))
             .filter(|n| f.assignee.as_ref().is_none_or(|a| assignee(n).is_some_and(|x| x.eq_ignore_ascii_case(a))))
             .collect();
         sort_items(&mut items);
         cols.push(Column { state: st.to_string(), items: items.iter().map(|n| BoardItem::from_note(n, &idx)).collect() });
+        if st == "in-progress" {
+            cols.push(Column { state: WAITING.to_string(), items: waiting_items(&all, &ids, f, &idx) });
+        }
     }
     Ok(cols)
 }
@@ -509,7 +546,7 @@ pub fn capture_idea(v: &Vault, title: &str, body: Option<String>, project: Optio
     )
 }
 
-fn get_item(v: &Vault, id: &str) -> Result<Note> {
+pub(crate) fn get_item(v: &Vault, id: &str) -> Result<Note> {
     let n = v.get(id)?;
     if !is_item(&n) {
         bail!(
@@ -544,7 +581,7 @@ pub enum QueuePos {
     After(String),
 }
 
-fn save(v: &Vault, n: &mut Note, op: &str) -> Result<()> {
+pub(crate) fn save(v: &Vault, n: &mut Note, op: &str) -> Result<()> {
     save_with(v, n, op, vec![])
 }
 
@@ -595,6 +632,12 @@ pub fn next(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: Opti
 
 /// Like `next`, skipping items another session holds a fresh claim on. Without `me` every fresh claim is someone else's.
 pub fn next_as(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: Option<&str>, me: Option<&str>) -> Result<Option<Note>> {
+    Ok(next_notice(v, scope, assignee_filter, claim, me)?.map(|(n, _)| n))
+}
+
+/// Like `next_as`, plus the question notice of the picked item as it was before a claim acknowledged its answers.
+/// Items with an unacknowledged answer come before the rest, in any open or built state.
+pub fn next_notice(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: Option<&str>, me: Option<&str>) -> Result<Option<(Note, String)>> {
     let who = me.or(assignee_filter);
     let _g = v.lock()?;
     let (all, ids) = scoped_items(v, scope)?;
@@ -602,7 +645,8 @@ pub fn next_as(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: O
     let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let mut cands: Vec<&Note> = all
         .iter()
-        .filter(|n| ids.contains(n.id.as_str()) && state(n) == "queued" && !idx.is_blocked(n))
+        .filter(|n| ids.contains(n.id.as_str()) && !crate::question::locked(n))
+        .filter(|n| crate::question::answered_unseen(n) && state(n) != "rejected" || state(n) == "queued" && !idx.is_blocked(n))
         .filter(|n| match (assignee_filter, assignee(n)) {
             (Some(want), Some(have)) => have.eq_ignore_ascii_case(want),
             _ => true,
@@ -610,17 +654,25 @@ pub fn next_as(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, claim: O
         .filter(|n| held_by_other(n, who).is_none())
         .collect();
     sort_items(&mut cands);
+    cands.sort_by_key(|n| !crate::question::answered_unseen(n));
     let Some(best) = cands.first() else { return Ok(None) };
     let mut n = (*best).clone();
+    let notice = crate::question::notice(&n);
     if let Some(by) = claim {
         let by = actor(Some(by));
-        n.set_field("state", Value::String("in-progress".into()));
-        n.set_field("assignee", Value::String(by.clone()));
-        n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
-        record_state_change(&mut n, "queued", "in-progress", Some(&by));
+        let from = state(&n);
+        if from == "queued" {
+            n.set_field("state", Value::String("in-progress".into()));
+            record_state_change(&mut n, "queued", "in-progress", Some(&by));
+        }
+        if !is_closed(&from) {
+            n.set_field("assignee", Value::String(by.clone()));
+            n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
+        }
+        crate::question::ack_in(&mut n, &by);
         save(v, &mut n, "claim")?;
     }
-    Ok(Some(n))
+    Ok(Some((n, notice)))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -984,7 +1036,7 @@ pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
             let _ = writeln!(s, "{}", BoardItem::from_note(n, &idx).short());
         }
     }
-    let mut queued: Vec<&Note> = items.iter().copied().filter(|n| state(n) == "queued").collect();
+    let mut queued: Vec<&Note> = items.iter().copied().filter(|n| state(n) == "queued" && !crate::question::locked(n)).collect();
     sort_items(&mut queued);
     if !queued.is_empty() {
         s.push_str("Queued (next takes the first unblocked):\n");
@@ -992,6 +1044,7 @@ pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
             let _ = writeln!(s, "{}", BoardItem::from_note(n, &idx).short());
         }
     }
+    s.push_str(&crate::question::digest_lines(&items));
     s
 }
 

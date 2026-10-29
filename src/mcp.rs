@@ -4,6 +4,7 @@ use crate::backlog::{self, BoardFilter, MoveReq, QueuePos};
 use crate::format;
 use crate::kind::{self, FieldDef, FieldType, KindDef};
 use crate::note::Link;
+use crate::question;
 use crate::ops::{self, AddReq, ContextOpts, FieldInput, Filter, ScopeSel, SortKey, StatusFilter, UpdateReq};
 use crate::vault::Vault;
 use anyhow::{Result, anyhow, bail};
@@ -14,11 +15,7 @@ use std::path::{Path, PathBuf};
 pub const SUPPORTED_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 pub const LATEST_VERSION: &str = "2025-06-18";
 
-pub const INSTRUCTIONS: &str = "breadcrumb is your memory and backlog across sessions. \
-The project digest is injected at session start, call context only if it is missing or you switch project. \
-Search before add, update instead of near duplicates, one fact per note, no secrets. \
-Save decisions, gotchas, preferences and handoffs, pin what every session needs, rules for one night get expires. \
-Track work with next, claim and move.";
+pub const INSTRUCTIONS: &str = "breadcrumb is your memory and backlog across sessions. The digest comes at session start, call context if it is missing. Search before add, update not duplicate, one fact per note, no secrets. Save decisions, gotchas, preferences and handoffs, pin what every session needs, expires for one night rules. Track work with next, claim and move. Ask the user with question, act on answered items first.";
 
 const LIST_LIMIT: usize = 20;
 
@@ -156,6 +153,51 @@ impl Server {
         ops::resolve_scope(v, &sel, &self.cwd_of(a))
     }
 
+    fn question(&self, v: &Vault, a: &Map<String, Value>) -> Result<String> {
+        let by = backlog::session_name(s(a, "by").as_deref());
+        match s(a, "action").as_deref().unwrap_or("list") {
+            "ask" => {
+                let options: Vec<question::Opt> = match a.get("options") {
+                    Some(Value::Array(xs)) => xs
+                        .iter()
+                        .map(|x| match x {
+                            Value::Object(o) => question::Opt { label: s(o, "label").unwrap_or_default(), desc: s(o, "desc").unwrap_or_default() },
+                            other => question::parse_options(&[other.as_str().unwrap_or_default().to_string()]).pop().unwrap_or(question::Opt { label: String::new(), desc: String::new() }),
+                        })
+                        .collect(),
+                    _ => vec![],
+                };
+                let req = question::AskReq { id: req_s(a, "id")?, text: req_s(a, "text")?, options, multi: b(a, "multi"), free: b(a, "free"), by };
+                let (n, q) = question::ask(v, req)?;
+                Ok(format!("asked {}, {} is locked until the user answers, pick other work", question::qid(&n, &q), n.id))
+            }
+            "answer" => {
+                let tokens: Vec<String> = match a.get("choices") {
+                    Some(Value::Array(xs)) => xs.iter().map(|x| s_of(x)).collect(),
+                    Some(x) => vec![s_of(x)],
+                    None => vec![],
+                };
+                let (n, q) = question::answer(v, &req_s(a, "id")?, &question::parse_choices(&tokens)?, s(a, "answer").as_deref(), by.as_deref().unwrap_or("user"))?;
+                Ok(format!("answered {}: {}", question::qid(&n, &q), q.answer_text()))
+            }
+            "ack" => Ok(match question::ack(v, &req_s(a, "id")?, by.as_deref().unwrap_or("agent"))? {
+                Some(n) => format::ack("acknowledged", &n),
+                None => "no unacknowledged answer".to_string(),
+            }),
+            "withdraw" => Ok(format::ack("withdrew the question on", &question::withdraw(v, &req_s(a, "id")?, by.as_deref().unwrap_or("agent"))?)),
+            "list" => {
+                let has_scope = s(a, "project").is_some() || b(a, "global");
+                let notes = if has_scope { ops::filter_notes(v.load_notes(), &self.scope(v, a)?, &Filter::default())? } else { v.load_notes() };
+                let mut text: String = question::open_in(&notes).iter().map(|(n, q)| question::render(n, q)).collect();
+                for n in notes.iter().filter(|n| question::answered_unseen(n)) {
+                    text.push_str(&question::notice(n));
+                }
+                Ok(if text.is_empty() { "no open questions".to_string() } else { text })
+            }
+            other => bail!("action must be ask, list, answer, ack or withdraw, got '{other}'"),
+        }
+    }
+
     fn target_project(&self, v: &Vault, a: &Map<String, Value>) -> Result<Option<String>> {
         let p = s(a, "project");
         let global = b(a, "global") || p.as_deref() == Some("global");
@@ -192,7 +234,10 @@ impl Server {
                 let (notes, total) = ops::list_counted(&v, &sc, &f)?;
                 Ok(format::rows(&notes, total, self.current(&v, a).as_deref()))
             }
-            "get" => Ok(format::note_compact(&v.get(&req_s(a, "id")?)?, b(a, "full"))),
+            "get" => {
+                let n = v.get(&req_s(a, "id")?)?;
+                Ok(format!("{}{}", format::note_compact(&n, b(a, "full")), question::notice(&n)))
+            }
             "add" => {
                 let project = self.target_project(&v, a)?;
                 let n = ops::add(
@@ -291,8 +336,8 @@ impl Server {
                 let sc = self.scope(&v, a)?;
                 let me = backlog::session_name(s(a, "by").as_deref());
                 let claim = if b(a, "claim") { Some(me.clone().unwrap_or_else(|| backlog::DEFAULT_ACTOR.into())) } else { None };
-                match backlog::next_as(&v, &sc, s(a, "assignee").as_deref(), claim.as_deref(), me.as_deref())? {
-                    Some(n) => Ok(format!("{}\n{}", if claim.is_some() { "claimed" } else { "next" }, format::note_compact(&n, false))),
+                match backlog::next_notice(&v, &sc, s(a, "assignee").as_deref(), claim.as_deref(), me.as_deref())? {
+                    Some((n, notice)) => Ok(format!("{}\n{notice}{}", if claim.is_some() { "claimed" } else { "next" }, format::note_compact(&n, false))),
                     None => Ok(format!("no unblocked queued items in {}", sc.label())),
                 }
             }
@@ -305,9 +350,11 @@ impl Server {
                         None => format!("{id} has no claim to release"),
                     });
                 }
+                let notice = question::notice(&v.get(&id)?);
                 let n = backlog::claim(&v, &id, &by, b(a, "force"))?;
-                Ok(format!("{} for {by}", format::ack("claimed", &n)))
+                Ok(format!("{} for {by}\n{notice}", format::ack("claimed", &n)).trim_end().to_string())
             }
+            "question" => self.question(&v, a),
             "backlog" => match s(a, "view").as_deref().unwrap_or("board") {
                 "board" => {
                     let sc = self.scope(&v, a)?;
@@ -429,6 +476,13 @@ fn s(a: &Map<String, Value>, k: &str) -> Option<String> {
         Value::Number(n) => Some(n.to_string()),
         Value::Bool(b) => Some(b.to_string()),
         _ => None,
+    }
+}
+
+fn s_of(v: &Value) -> String {
+    match v {
+        Value::String(x) => x.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -632,6 +686,17 @@ pub fn tool_defs() -> Vec<Value> {
         })), &["id", "state"])),
         tool("next", "Top unblocked queued item no other session claimed, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
         tool("claim", "Claim an item for this session, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": bl()})), &["id"])),
+        tool("question", "Ask the user about an item (locks it), list open questions, record an answer, ack, withdraw.", obj(json!({
+            "action": {"type": "string", "enum": ["ask", "list", "answer", "ack", "withdraw"]},
+            "id": {"type": "string", "description": "item id, abc123.1 to answer"},
+            "text": st(),
+            "options": {"type": "array", "items": {"type": ["string", "object"]}},
+            "multi": bl(),
+            "free": bl(),
+            "choices": {"type": "array", "items": {"type": ["integer", "string"]}},
+            "answer": st(),
+            "by": by(),
+        }), &[])),
         tool("backlog", "Board, or tree or deps of one item.", obj(with(json!({"project": st()}), json!({
             "view": {"type": "string", "enum": ["board", "tree", "deps"]},
             "id": st(),

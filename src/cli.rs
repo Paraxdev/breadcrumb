@@ -2,6 +2,8 @@ use crate::backlog::{self, BoardFilter, MoveReq, QueuePos};
 use crate::export;
 use crate::format;
 use crate::importer;
+use crate::note::Note;
+use crate::question;
 use crate::kind::{self, KindDef};
 use crate::ops::{self, AddReq, Filter, Scope, ScopeSel, SortKey, StatusFilter, UpdateReq};
 use crate::util::{path_str, read_body_arg};
@@ -272,6 +274,55 @@ pub enum Cmd {
         /// Release another session's fresh claim
         #[arg(long)]
         force: bool,
+    },
+    /// Ask the user a question about an item, an open question locks the item until it is answered
+    Ask {
+        /// Item id
+        id: String,
+        text: String,
+        /// Answer option as `label: description`, two to four (repeatable)
+        #[arg(long = "option", short = 'o')]
+        options: Vec<String>,
+        /// More than one option may be picked
+        #[arg(long)]
+        multi: bool,
+        /// The user may answer in free text too
+        #[arg(long)]
+        free: bool,
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// List the open questions (--answered adds answers no agent acknowledged yet)
+    Questions {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[arg(long)]
+        answered: bool,
+    },
+    /// Answer a question by option numbers (`answer abc123.1 2`, `answer abc123.1 1,3`) or --text. Without an id it walks the open questions
+    Answer {
+        /// Question id like abc123.1, or an item id with one open question
+        qid: Option<String>,
+        /// Option numbers
+        choices: Vec<String>,
+        #[arg(long)]
+        text: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// Acknowledge the answers on an item, which clears its unseen flag (claiming it does the same)
+    Ack {
+        id: String,
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// Withdraw an open question, which unlocks the item
+    Unask {
+        qid: String,
+        #[arg(long)]
+        by: Option<String>,
     },
     /// Change the state of a backlog item
     Move {
@@ -841,7 +892,9 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Get { id } => {
             let n = open()?.get(&id)?;
-            out.emit(format::note_full(&n), n.to_json());
+            let notice = question::notice(&n);
+            out.emit(format!("{}{}{notice}", format::note_full(&n), if notice.is_empty() { "" } else { "
+" }), n.to_json());
         }
         Cmd::Update(u) => {
             let v = open()?;
@@ -1066,10 +1119,10 @@ pub fn run(cli: Cli) -> Result<i32> {
             let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
             let me = backlog::session_name(by.as_deref());
             let claim_by = if claim { Some(me.clone().unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string())) } else { None };
-            match backlog::next_as(&v, &sc, assignee.as_deref(), claim_by.as_deref(), me.as_deref())? {
-                Some(n) => {
+            match backlog::next_notice(&v, &sc, assignee.as_deref(), claim_by.as_deref(), me.as_deref())? {
+                Some((n, notice)) => {
                     let head = if claim_by.is_some() { "claimed" } else { "next" };
-                    let mut text = format!("{head}: {}\n", backlog::item_summary(&n));
+                    let mut text = format!("{head}: {}\n{notice}", backlog::item_summary(&n));
                     if !n.body.trim().is_empty() {
                         text.push('\n');
                         text.push_str(n.body.trim());
@@ -1082,8 +1135,59 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Claim { id, by, force } => {
             let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
-            let n = backlog::claim(&open()?, &id, &by, force)?;
-            out.emit(format!("claimed {}", backlog::item_summary(&n)), n.to_json());
+            let v = open()?;
+            let notice = question::notice(&v.get(&id)?);
+            let n = backlog::claim(&v, &id, &by, force)?;
+            out.emit(format!("claimed {}\n{notice}", backlog::item_summary(&n)), n.to_json());
+        }
+        Cmd::Ask { id, text, options, multi, free, by } => {
+            let req = question::AskReq { id, text, options: question::parse_options(&options), multi, free, by };
+            let (n, q) = question::ask(&open()?, req)?;
+            out.emit(format!("asked {}, {} is waiting on the user until `breadcrumb answer {}`", question::qid(&n, &q), n.id, question::qid(&n, &q)), n.to_json());
+        }
+        Cmd::Questions { scope, answered } => {
+            let v = open()?;
+            let notes = question_scope(&v, &scope, &cwd)?;
+            let open_qs = question::open_in(&notes);
+            let mut text = String::new();
+            for (n, q) in &open_qs {
+                text.push_str(&question::render(n, q));
+            }
+            let unseen: Vec<&Note> = notes.iter().filter(|n| question::answered_unseen(n)).collect();
+            if answered {
+                for n in &unseen {
+                    text.push_str(&question::notice(n));
+                }
+            }
+            if text.is_empty() {
+                text = "no open questions\n".to_string();
+            }
+            let data = json!({"open": open_qs.iter().map(|(n, q)| json!({"qid": question::qid(n, q), "item": n.id, "question": q})).collect::<Vec<_>>(), "unseen_answers": unseen.iter().map(|n| n.id.clone()).collect::<Vec<_>>()});
+            out.emit(text, data);
+        }
+        Cmd::Answer { qid, choices, text, scope, by } => {
+            let v = open()?;
+            let by = by.unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
+            match qid {
+                Some(qid) => {
+                    let picks = question::parse_choices(&choices)?;
+                    let (n, q) = question::answer(&v, &qid, &picks, text.as_deref(), &by)?;
+                    out.emit(format!("answered {}: {}", question::qid(&n, &q), q.answer_text()), n.to_json());
+                }
+                None => return answer_walk(&out, &v, &scope, &cwd, &by),
+            }
+        }
+        Cmd::Ack { id, by } => {
+            let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
+            match question::ack(&open()?, &id, &by)? {
+                Some(n) => out.emit(format!("acknowledged the answers on {}", backlog::item_summary(&n)), n.to_json()),
+                None => out.emit(format!("{id} has no unacknowledged answer"), Json::Null),
+            }
+        }
+        Cmd::Unask { qid, by } => {
+            let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
+            let n = question::withdraw(&open()?, &qid, &by)?;
+            out.emit(format!("withdrew the question on {}", backlog::item_summary(&n)), n.to_json());
         }
         Cmd::Release { id, by, force } => {
             let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
@@ -1232,6 +1336,64 @@ fn map_cmd(out: &Out, v: &Vault, mc: MapCmd, cwd: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Notes of the chosen scope, every project and global unless a scope flag says otherwise.
+fn question_scope(v: &Vault, scope: &ScopeArgs, cwd: &Path) -> Result<Vec<Note>> {
+    let mut sel = scope.sel();
+    sel.all = sel.all || (sel.project.is_none() && !sel.global);
+    let sc = ops::resolve_scope(v, &sel, cwd)?;
+    ops::filter_notes(v.load_notes(), &sc, &ops::Filter::default())
+}
+
+/// Walks the open questions one by one. Needs a terminal on stdin, otherwise lists them with the non interactive forms.
+fn answer_walk(out: &Out, v: &Vault, scope: &ScopeArgs, cwd: &Path, by: &str) -> Result<i32> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let open_qs = question::open_in(&question_scope(v, scope, cwd)?);
+    if open_qs.is_empty() {
+        out.emit("no open questions", Json::Null);
+        return Ok(0);
+    }
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        let list: String = open_qs.iter().map(|(n, q)| question::render(n, q)).collect();
+        bail!("no terminal to ask on, answer with `breadcrumb answer <qid> <numbers>` or `--text \"...\"`:\n{list}");
+    }
+    let total = open_qs.len();
+    let mut done = 0;
+    for (i, (n, q)) in open_qs.iter().enumerate() {
+        println!("\n[{}/{total}] {}", i + 1, question::render(n, q));
+        loop {
+            print!("answer (enter skips, q quits): ");
+            std::io::stdout().flush().ok();
+            let mut line = String::new();
+            if stdin.lock().read_line(&mut line)? == 0 {
+                return Ok(0);
+            }
+            let line = line.trim();
+            if line.is_empty() {
+                break;
+            }
+            if line.eq_ignore_ascii_case("q") {
+                println!("{done} answered");
+                return Ok(0);
+            }
+            let (picks, text) = match question::parse_choices(&[line.to_string()]) {
+                Ok(p) => (p, None),
+                Err(_) => (vec![], Some(line)),
+            };
+            match question::answer(v, &question::qid(n, q), &picks, text, by) {
+                Ok((_, a)) => {
+                    println!("recorded: {}", a.answer_text());
+                    done += 1;
+                    break;
+                }
+                Err(e) => println!("{e:#}"),
+            }
+        }
+    }
+    println!("{done} answered");
+    Ok(0)
 }
 
 fn workflow_cmd(out: &Out, v: &Vault, wc: WorkflowCmd, cwd: &Path) -> Result<i32> {
