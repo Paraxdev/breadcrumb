@@ -53,7 +53,7 @@ fn cli_end_to_end() {
     assert_eq!(list.as_array().unwrap().len(), 1);
     let hits = json(&v, &["search", "--all", "stdin"]);
     assert_eq!(hits["hits"][0]["id"], id.as_str());
-    assert!(ok(&v, &["context", "--global"]).contains(&format!("Pinned (get an id for its body):\n{} {id} gotcha From stdin\n", got["slug"].as_str().unwrap())));
+    assert!(ok(&v, &["context", "--global"]).contains(&format!("Pinned (get an id for its body):\n{id} gotcha From stdin\n")));
 
     let o = breadcrumb(&v, &["delete", &id], None);
     assert!(!o.status.success());

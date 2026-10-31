@@ -20,7 +20,7 @@ Notes are plain markdown files with YAML frontmatter, every write is a git commi
 
 ## Digest
 
-The digest (`breadcrumb context`, the `context` tool and the SessionStart hook) fits in about 6000 chars, so nothing important is cut off at the end. Every pinned note gets one line, `slug id kind summary`, from its `summary` field (`breadcrumb add --summary ...`) or else its title's first sentence, decisions and preferences first and newest first, and agents `get` the body when they need it. Then the project's latest handoff in full, the unpinned preferences on one line, the backlog and recent notes. One handoff per project is live: a new one supersedes the current one (a `supersedes` link) and unpins older ones. Superseded notes, by a `supersedes` link, a `superseded` tag or `decision_status: superseded`, never show in the digest.
+The digest (`breadcrumb context`, the `context` tool and the SessionStart hook) fits in about 6000 chars, so nothing important is cut off at the end. Every pinned note gets one line, `id kind summary`, no slug because pins are rules and not named to the user, from its `summary` field (`breadcrumb add --summary ...`) or else its title's first sentence, decisions and preferences first and newest first, and agents `get` the body when they need it. Then the project's latest handoff in full, the unpinned preferences on one line, the backlog and recent notes. One handoff per project is live: a new one supersedes the current one (a `supersedes` link) and unpins older ones. Superseded notes, by a `supersedes` link, a `superseded` tag or `decision_status: superseded`, never show in the digest.
 
 ## Expiring notes
 

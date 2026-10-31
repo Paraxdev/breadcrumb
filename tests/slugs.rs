@@ -97,7 +97,8 @@ fn output_puts_the_slug_first_and_keeps_the_id() {
     let scope = Scope::Project { slug: "app".into(), with_global: false };
 
     let d = digest::context(&v, Some("app"), 15).unwrap();
-    assert!(d.contains(&format!("pinned-rule {} decision", pinned.id)), "{d}");
+    assert!(d.contains(&format!("
+{} decision", pinned.id)), "pins are rules, no slug: {d}");
     backlog::move_item(&v, &a.id, backlog::MoveReq { state: "in-progress".into(), ..Default::default() }).unwrap();
     assert!(digest::context(&v, Some("app"), 15).unwrap().contains(&want));
 

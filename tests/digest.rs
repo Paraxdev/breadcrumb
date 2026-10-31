@@ -82,9 +82,9 @@ fn pins_are_one_line_each_rules_first_and_lapsed_notes_never_show() {
     assert_eq!(
         pins,
         vec![
-            format!("{} feedback New rule", new_rule.handle()).as_str(),
-            format!("{} decision Short own summary", old_rule.handle()).as_str(),
-            format!("{} gotcha Pinned gotcha", gotcha.handle()).as_str()
+            format!("{} feedback New rule", new_rule.id).as_str(),
+            format!("{} decision Short own summary", old_rule.id).as_str(),
+            format!("{} gotcha Pinned gotcha", gotcha.id).as_str()
         ],
         "{ctx}"
     );

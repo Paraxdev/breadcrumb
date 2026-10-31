@@ -79,8 +79,7 @@ fn pins_section(notes: &[Note], project: Option<&str>, stale_days: u64, max: usi
     let mut s = PINS_HEAD.to_string();
     let mut rest: Vec<&str> = vec![];
     for n in &pins {
-        let room = SUMMARY_MAX.saturating_sub(n.slug().map_or(0, |s| s.len() + 1));
-        let line = format!("{} {} {}{}{}\n", n.handle(), n.kind, truncate_chars(&summary(n), room), scope_suffix(n, project), crate::recall::stale_mark(n, stale_days));
+        let line = format!("{} {} {}{}{}\n", n.id, n.kind, summary(n), scope_suffix(n, project), crate::recall::stale_mark(n, stale_days));
         if rest.is_empty() && s.chars().count() + line.chars().count() <= max {
             s.push_str(&line);
         } else {
