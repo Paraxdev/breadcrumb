@@ -236,7 +236,13 @@ impl Server {
             }
             "get" => {
                 let n = v.get(&req_s(a, "id")?)?;
-                Ok(format!("{}{}", format::note_compact(&n, b(a, "full")), question::notice(&n)))
+                if b(a, "body") {
+                    let (text, cut) = format::body_only(&n, u(a, "tail"));
+                    return Ok(cut.map_or(text.clone(), |c| format!("{c}\n{text}")));
+                }
+                let shown = u(a, "tail").map(|t| format::tailed(&n, t));
+                let note = format::note_compact(shown.as_ref().unwrap_or(&n), b(a, "full"));
+                Ok(format!("{note}{}{}", format::inbound_text(&n, &v.load_notes()), question::notice(&n)))
             }
             "add" => {
                 let project = self.target_project(&v, a)?;
@@ -659,8 +665,8 @@ pub fn tool_defs() -> Vec<Value> {
             "where": {"type": ["object", "array"], "description": "{field: value} or k=v, ref=commit:sha"},
             "sort": {"type": "string", "enum": ["updated", "created", "title"]},
         })), &[])),
-        tool("get", "Read a note, full adds default keys.", obj(with(id(), json!({"full": bl()})), &["id"])),
-        tool("add", "Save one durable fact, decision, gotcha, preference, handoff, idea or env fact.", obj(with(target(), json!({
+        tool("get", "Read a note: full keys, body alone or last tail lines.", obj(with(id(), json!({"full": bl(), "body": bl(), "tail": int()})), &["id"])),
+        tool("add", "Save one fact, decision, gotcha, preference, handoff, idea or env fact.", obj(with(target(), json!({
             "title": st(),
             "kind": {"type": "string", "description": "default note"},
             "body": st(),
@@ -690,7 +696,7 @@ pub fn tool_defs() -> Vec<Value> {
             "verify": {"type": "boolean", "description": "alone: mark accurate"},
         })), &["id"])),
         tool("append", "Append a paragraph to a note.", obj(with(id(), json!({"text": st()})), &["id", "text"])),
-        tool("link", "Add or remove a typed link between notes.", obj(json!({
+        tool("link", "Add or remove a link between notes.", obj(json!({
             "from": st(),
             "to": st(),
             "rel": {"type": "string", "description": "relates (default), blocks, depends-on, supersedes"},
@@ -708,9 +714,9 @@ pub fn tool_defs() -> Vec<Value> {
             "refs": refs(),
             "by": st(),
         })), &["id", "state"])),
-        tool("next", "Top unblocked queued item nobody holds, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
-        tool("claim", "Claim an item for this session, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": bl()})), &["id"])),
-        tool("question", "Ask the user about an item (locks it), list, answer, ack, withdraw.", obj(json!({
+        tool("next", "Top free queued item, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
+        tool("claim", "Claim an item, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": bl()})), &["id"])),
+        tool("question", "Ask the user about an item (locks it), or act on an answer.", obj(json!({
             "action": {"type": "string", "enum": ["ask", "list", "answer", "ack", "withdraw"]},
             "id": {"type": "string", "description": "item id, abc123.1 to answer"},
             "text": st(),
@@ -757,6 +763,6 @@ pub fn tool_defs() -> Vec<Value> {
             "budget": int(),
         })), &[])),
         tool("sync", "Commit, pull and push the vault.", obj(json!({"message": st()}), &[])),
-        tool("doctor", "Validate notes, fix: repair stale paths, mark expired notes.", obj(json!({"fix": bl(), "apply": bl()}), &[])),
+        tool("doctor", "Validate notes, fix repairs what it can.", obj(json!({"fix": bl(), "apply": bl()}), &[])),
     ]
 }

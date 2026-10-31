@@ -107,6 +107,15 @@ pub enum Cmd {
     Get {
         /// Note id or slug
         id: String,
+        /// Show the keys an import left too, as stored
+        #[arg(long)]
+        full: bool,
+        /// Print the text alone, no frontmatter, History or links, for piping
+        #[arg(long, conflicts_with = "full")]
+        body: bool,
+        /// Keep only the last N lines of the text, History stays whole
+        #[arg(long, value_name = "N")]
+        tail: Option<usize>,
     },
     /// Change a note
     Update(UpdateArgs),
@@ -1192,12 +1201,29 @@ pub fn run(cli: Cli) -> Result<i32> {
             let name = n.slug().map(|s| format!("  [{s}]")).unwrap_or_default();
             out.emit(format!("added {}  {}  {}  {}{name}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
         }
-        Cmd::Get { id } => {
-            let n = open()?.get(&id)?;
-            let notice = question::notice(&n);
-            let written = crate::session::written_line(&n).map(|w| format!("\n{w}\n")).unwrap_or_default();
-            out.emit(format!("{}{written}{}{notice}", format::note_full(&n), if notice.is_empty() { "" } else { "
-" }), n.to_json());
+        Cmd::Get { id, full, body, tail } => {
+            let v = open()?;
+            let n = v.get(&id)?;
+            let all = v.load_notes();
+            let mut data = n.to_json();
+            if let Json::Object(o) = &mut data {
+                o.entry("inbound").or_insert(format::inbound_json(&n, &all));
+            }
+            let text = if body {
+                let (text, cut) = format::body_only(&n, tail);
+                if let Some(c) = cut.filter(|_| !out.json) {
+                    eprintln!("{c}");
+                }
+                text
+            } else {
+                let shown = tail.map(|t| format::tailed(&n, t));
+                let shown = shown.as_ref().unwrap_or(&n);
+                let notice = question::notice(&n);
+                let written = crate::session::written_line(&n).map(|w| format!("\n{w}\n")).unwrap_or_default();
+                let note = if full { format::note_full(shown) } else { format::note_reading(shown) };
+                format!("{note}{written}{}{}{notice}", format::inbound_text(&n, &all), if notice.is_empty() { "" } else { "\n" })
+            };
+            out.emit(text, data);
         }
         Cmd::Update(u) => {
             let v = open()?;

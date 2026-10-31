@@ -32,6 +32,89 @@ pub fn note_full(n: &Note) -> String {
     n.to_markdown()
 }
 
+/// What an import leaves behind: nothing a reader acts on, `--full` and `--json` keep it. `source` only counts
+/// next to a hash, `add --source` sets it by hand too.
+fn hide_import_keys(m: &mut serde_yaml::Mapping) {
+    use serde_yaml::Value as Y;
+    let imported = m.contains_key(Y::String("source_hash".into()));
+    for k in ["source_hash", "memory_name", "metadata"].into_iter().chain(imported.then_some("source")) {
+        m.remove(Y::String(k.into()));
+    }
+}
+
+/// The note as `get` shows it by default: as stored, without the import keys.
+pub fn note_reading(n: &Note) -> String {
+    let mut m = n.frontmatter();
+    hide_import_keys(&mut m);
+    let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(m)).unwrap_or_default();
+    let body = n.body.trim_end();
+    if body.is_empty() { format!("---\n{yaml}---\n") } else { format!("---\n{yaml}---\n\n{body}\n") }
+}
+
+/// The last `lines` of `body`, and the line saying how many were cut when any were.
+fn last_lines(body: &str, lines: usize) -> (String, Option<String>) {
+    let all: Vec<&str> = body.trim_end().lines().collect();
+    let cut = all.len().saturating_sub(lines);
+    (all[cut..].join("\n"), (cut > 0).then(|| format!("({cut} earlier body lines cut, read without tail for them)")))
+}
+
+/// A copy to print with only the end of its log. Appends land above History, so History stays whole and is not
+/// counted, or a tail of a long running item would show state changes and none of the log.
+pub fn tailed(n: &Note, lines: usize) -> Note {
+    let (log, history) = crate::backlog::split_history(&n.body);
+    let (kept, cut) = last_lines(&log, lines);
+    let mut out = n.clone();
+    out.body = [cut.unwrap_or_default(), kept, history.unwrap_or_default()].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n");
+    out
+}
+
+/// The body alone for piping, no History, and the cut line apart so a pipe stays clean.
+pub fn body_only(n: &Note, tail: Option<usize>) -> (String, Option<String>) {
+    let (log, _) = crate::backlog::split_history(&n.body);
+    match tail {
+        Some(lines) => last_lines(&log, lines),
+        None => (log.trim().to_string(), None),
+    }
+}
+
+const INBOUND_MAX: usize = 20;
+
+/// The notes that link to this one, `(rel, note)`, superseding ones first. An archived note supersedes nothing,
+/// as in `Lapsed`, so it reads as a plain link.
+pub fn inbound<'a>(n: &Note, all: &'a [Note]) -> Vec<(String, &'a Note)> {
+    let mut out: Vec<(String, &Note)> = vec![];
+    for o in all.iter().filter(|o| o.id != n.id) {
+        out.extend(o.links.iter().filter(|l| l.to == n.id).map(|l| (l.rel.clone(), o)));
+    }
+    let live_super = |(rel, o): &(String, &Note)| rel == crate::lifecycle::SUPERSEDES && !o.is_archived();
+    out.sort_by_key(|x| (!live_super(x), x.0.clone(), x.1.id.clone()));
+    out
+}
+
+/// `superseded by ...` and `linked from:` lines, empty when nothing links here.
+pub fn inbound_text(n: &Note, all: &[Note]) -> String {
+    let links = inbound(n, all);
+    let mut s = String::new();
+    let (by, rest): (Vec<_>, Vec<_>) = links.iter().partition(|(rel, o)| rel == crate::lifecycle::SUPERSEDES && !o.is_archived());
+    for (_, o) in &by {
+        let _ = writeln!(s, "\nsuperseded by {} \"{}\"", o.handle(), short_title(&o.title));
+    }
+    if !rest.is_empty() {
+        s.push_str("\nlinked from:\n");
+    }
+    for (rel, o) in rest.iter().take(INBOUND_MAX) {
+        let _ = writeln!(s, "  {rel} {} \"{}\"", o.handle(), short_title(&o.title));
+    }
+    if rest.len() > INBOUND_MAX {
+        let _ = writeln!(s, "  and {} more, --json lists all", rest.len() - INBOUND_MAX);
+    }
+    s
+}
+
+pub fn inbound_json(n: &Note, all: &[Note]) -> serde_json::Value {
+    inbound(n, all).iter().map(|(rel, o)| serde_json::json!({"rel": rel, "id": o.id, "slug": o.slug(), "title": o.title})).collect()
+}
+
 pub fn search_text(r: &SearchResult, scope_label: &str) -> String {
     let mut s = String::new();
     if r.hits.is_empty() {
@@ -178,6 +261,7 @@ pub fn note_compact(n: &Note, full: bool) -> String {
     drop(&mut m, "status", &|v: &Y| v.as_str() == Some("active"));
     drop(&mut m, "pinned", &|v: &Y| v.as_bool() == Some(false));
     drop(&mut m, "created", &|_: &Y| true);
+    hide_import_keys(&mut m);
     drop(&mut m, crate::session::SESSION_KEY, &|_: &Y| true);
     drop(&mut m, crate::session::LAST_SESSION_KEY, &|_: &Y| true);
     if let Some(w) = crate::session::written_line(n) {

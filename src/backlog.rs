@@ -299,6 +299,17 @@ fn section_end(lines: &[&str], start: usize) -> usize {
     lines.iter().enumerate().skip(start + 1).find(|(_, l)| l.starts_with("# ") || l.starts_with("## ")).map(|(i, _)| i).unwrap_or(lines.len())
 }
 
+/// The body without its History section, and that section.
+pub fn split_history(body: &str) -> (String, Option<String>) {
+    let lines: Vec<&str> = body.lines().collect();
+    let Some(start) = lines.iter().position(|l| history_heading(l)) else {
+        return (body.to_string(), None);
+    };
+    let end = section_end(&lines, start);
+    let rest = [lines[..start].join("\n").trim_end().to_string(), lines[end..].join("\n")];
+    (rest.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n"), Some(lines[start..end].join("\n").trim_end().to_string()))
+}
+
 /// Adds a line to the "## History" section, creating it at the end of the body when missing.
 pub fn append_history(body: &str, line: &str) -> String {
     let lines: Vec<&str> = body.lines().collect();

@@ -42,6 +42,8 @@ Search ranks a note the query names by id or slug first, then a note holding the
 
 ## Who wrote what
 
+`breadcrumb get <id>` hides what an import left (`source`, `metadata`, `source_hash`, `memory_name`), nothing leaves the file, `--full` and `--json` show it. It ends with what links to the note, `superseded by` first. `--tail N` keeps the last N lines of the text with a line saying how many were cut, History stays whole and does not count, since appends land above it. `--body` prints the text alone for piping, a cut line goes to stderr. The MCP `get` takes `full`, `body` and `tail`. `--json` always holds every key and the whole body, plus `inbound`.
+
 Every `add` stamps the session id in the `session` frontmatter key, every later `append`, `update`, `move`, `claim` or `release` stamps `last_session` when it was another session. Both come from `CLAUDE_CODE_SESSION_ID`, which Bash children, hooks and the MCP server all have. Old notes and notes old binaries write have no stamp and behave as before. An append starts with a line like `2026-10-31 neocad-4b a03e0d0a:`, a history line ends in `(by neocad-4b a03e0d0a)` or `(by lead a03e0d0a)` with `--by lead`, so never type dates or session ids by hand. The id stays because a name changes across a restart. `get` ends with `written by ...` in today's names, from `~/.claude/sessions`. `breadcrumb::session` has what other features need: `current()` for who this process is, `is_alive(id, 8 character prefix or name)`, `label(id)` for the name or the short id, `signature(id)` for both, `last_writer(note)`.
 
 ## Slugs
