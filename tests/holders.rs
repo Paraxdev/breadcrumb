@@ -68,8 +68,12 @@ fn context(e: &Env) -> String {
 }
 
 fn go_quiet(v: &Vault, id: &str) {
+    last_write_ago(v, id, chrono::Duration::days(2));
+}
+
+fn last_write_ago(v: &Vault, id: &str, ago: chrono::Duration) {
     let mut n = v.get(id).unwrap();
-    let old = breadcrumb::util::now() - chrono::Duration::days(2);
+    let old = breadcrumb::util::now() - ago;
     n.updated = old;
     if n.field("claimed").is_some() {
         n.set_field("claimed", Value::String(breadcrumb::util::fmt_time(&old)));
@@ -215,6 +219,10 @@ fn an_unreadable_session_file_says_nothing_about_who_is_dead() {
     assert!(!crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1.contains("(stale"), "a file with no session id may be that session");
     std::fs::remove_file(sessions.join("noid.json")).unwrap();
 
+    last_write_ago(&e.v, &id, chrono::Duration::minutes(61));
+    std::fs::write(sessions.join("torn.json"), r#"{"pid":"#).unwrap();
+    assert!(!crumb(&e, ME, "pc-a", &["claim", &id]).0, "past the grace an unreadable file still says nothing");
+    std::fs::remove_file(sessions.join("torn.json")).unwrap();
     assert!(crumb(&e, ME, "pc-a", &["claim", &id]).0, "a whole list again");
 }
 
@@ -331,7 +339,8 @@ fn a_dead_sessions_claim_is_stale_on_its_own_machine_only() {
     let (head, pid) = rec.rsplit_once(' ').unwrap_or_default();
     assert!(head == "pc-a dead0000" && pid.parse::<u32>().is_ok(), "{rec}");
     assert!(context(&e).contains("@dead0000 (stale)"), "{}", context(&e));
-    assert!(next_id(&e).contains(&dead_here), "no longer keeps others away");
+    last_write_ago(&e.v, &dead_here, chrono::Duration::minutes(61));
+    assert!(next_id(&e).contains(&dead_here), "an hour on it no longer keeps others away");
     let (ok, out) = crumb(&e, ME, "pc-a", &["claim", &dead_here, "--by", "taker"]);
     assert!(ok, "no force needed: {out}");
     assert!(e.v.get(&dead_here).unwrap().body.contains("claim taken over from dead0000"));
@@ -375,6 +384,34 @@ fn a_session_of_another_machine_or_free_text_only_goes_stale_after_a_day() {
     go_quiet(&e.v, &elsewhere);
     assert!(context(&e).contains("(stale)"), "the day rule still covers them");
     assert!(next_id(&e).contains(&elsewhere));
+}
+
+#[test]
+fn a_dead_sessions_claim_shows_stale_but_holds_for_an_hour_after_its_last_write() {
+    let e = setup();
+    let a = queued(&e, "Restarting");
+    claim_then_die(&e, &a, "pc-a");
+    let built = queued(&e, "Restarting lane");
+    claim_then_die(&e, &built, "pc-a");
+    crumb(&e, DEAD, "pc-a", &["update", &built, "--ref", "branch:x"]);
+
+    for ago in [0, 59] {
+        last_write_ago(&e.v, &a, chrono::Duration::minutes(ago));
+        last_write_ago(&e.v, &built, chrono::Duration::minutes(ago));
+        assert!(context(&e).contains("@dead0000 (stale)"), "{}", context(&e));
+        assert!(next_id(&e).contains("no unblocked"), "{}", next_id(&e));
+        let (ok, out) = crumb(&e, ME, "pc-a", &["claim", &a]);
+        assert!(!ok && out.contains("claimed by dead0000") && out.contains("force"), "{out}");
+        assert!(context(&e).contains("Being built"), "{}", context(&e));
+    }
+    assert!(crumb(&e, ME, "pc-a", &["claim", &a, "--force"]).0, "force still takes it");
+    assert!(crumb(&e, ME, "pc-a", &["release", &a]).0);
+
+    let (ok, out) = crumb(&e, DEAD, "pc-a", &["claim", &built]);
+    assert!(ok, "the same id back keeps it with no force: {out}");
+    claim_then_die(&e, &built, "pc-a");
+    last_write_ago(&e.v, &built, chrono::Duration::minutes(61));
+    assert!(!context(&e).contains("Being built"), "a lost lane comes back after the hour: {}", context(&e));
 }
 
 #[test]

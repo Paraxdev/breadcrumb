@@ -124,6 +124,8 @@ pub const CLAIM_MACHINE_KEY: &str = "claim_machine";
 pub const SESSION_ENV: &str = "BREADCRUMB_SESSION";
 /// A claim with no write to its item for this long no longer keeps other sessions away.
 pub const CLAIM_STALE_HOURS: i64 = 24;
+/// Seconds a dead session's claim still keeps others away after its last write, a restart must not cost a session its work.
+const DEAD_GRACE: i64 = 3600;
 
 /// Who this process works as: `by`, else BREADCRUMB_SESSION, else the start of the Claude Code session id.
 pub fn session_name(by: Option<&str>) -> Option<String> {
@@ -171,8 +173,14 @@ fn claim_dead_here(n: &Note) -> bool {
     }
 }
 
+/// What the board shows, a dead session's claim reads as stale at once.
 pub fn claim_stale(n: &Note) -> bool {
     claim_dead_here(n) || quiet_for_a_day(n)
+}
+
+/// Whether the claim stopped keeping others away.
+fn claim_lapsed(n: &Note) -> bool {
+    quiet_for_a_day(n) || ((now() - last_activity(n)).num_seconds() >= DEAD_GRACE && claim_dead_here(n))
 }
 
 fn set_claim(n: &mut Note, by: &str) {
@@ -201,10 +209,9 @@ fn is_build_ref(r: &str) -> bool {
 }
 
 /// The ref showing work runs for a queued item. Leads start lanes with workflows, so the stored state stays queued.
-/// A ref has no time of its own, so a day without a write or a dead session's claim ends it, or a lost lane would
-/// hide its item from `next` forever.
+/// A ref has no time of its own, so a lapsed claim ends it, or a lost lane would hide its item from `next` forever.
 pub fn being_built(n: &Note) -> Option<String> {
-    if state(n) != "queued" || quiet_for_a_day(n) || claim_dead_here(n) {
+    if state(n) != "queued" || claim_lapsed(n) {
         return None;
     }
     n.refs().into_iter().find(|r| is_build_ref(r))
@@ -227,10 +234,10 @@ fn is_holder(n: &Note, who: &str) -> bool {
     assignee(n).is_some_and(|a| crate::session::same_holder(&a, who) || claim_here(n).flatten().is_some_and(|pid| crate::session::is_process(who, pid)))
 }
 
-/// The assignee while the claim is fresh, unless that is `who`.
+/// The assignee while the claim keeps others away, unless that is `who`.
 pub fn held_by_other(n: &Note, who: Option<&str>) -> Option<String> {
     let a = assignee(n)?;
-    if who.is_some_and(|w| is_holder(n, w)) || claim_stale(n) {
+    if who.is_some_and(|w| is_holder(n, w)) || claim_lapsed(n) {
         return None;
     }
     Some(a)
