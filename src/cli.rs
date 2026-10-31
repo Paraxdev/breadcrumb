@@ -346,12 +346,19 @@ pub enum Cmd {
         shipped_in: Option<String>,
         #[arg(long)]
         by: Option<String>,
-        /// Also mark acceptance criteria met: all, or positions like 2,3
-        #[arg(long, value_name = "WHICH")]
-        check: Option<String>,
+        /// Also mark acceptance criteria met: all, or positions like 2,3. Moving to review, any other text is a step for the user to try (repeatable)
+        #[arg(long, value_name = "WHICH or STEP")]
+        check: Vec<String>,
         /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, -type:value removes (repeatable)
         #[arg(long = "ref", value_name = "REF", allow_hyphen_values = true)]
         refs: Vec<String>,
+    },
+    /// What waits for your check, and the verdict: pass moves to done, fail back to queued
+    Review {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[command(subcommand)]
+        verdict: Option<ReviewCmd>,
     },
     /// Mark acceptance criteria of an item met ([x])
     Check {
@@ -415,6 +422,24 @@ pub enum Cmd {
         /// breadcrumb source directory (default: the one this binary was built from)
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReviewCmd {
+    /// It works: move to done and mark its steps met
+    Pass {
+        id: String,
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// It does not: back to queued with the reason, keeping its priority
+    Fail {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        by: Option<String>,
     },
 }
 
@@ -1262,9 +1287,23 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
         }
         Cmd::Move { id, state, resolution, shipped_in, by, check, refs } => {
-            let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs })?;
-            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "note": r.note.to_json()}));
+            let (check, steps) = backlog::split_checks(&check, &state)?;
+            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None })?;
+            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "note": r.note.to_json()}));
+        }
+        Cmd::Review { scope, verdict } => {
+            let v = open()?;
+            let r = match verdict {
+                None => {
+                    let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
+                    let items = backlog::review_items(&v, &sc)?;
+                    out.emit(backlog::review_text(&items, &sc.label()), json!({"scope": sc.label(), "items": items}));
+                    return Ok(0);
+                }
+                Some(ReviewCmd::Pass { id, by }) => backlog::review_pass(&v, &id, by)?,
+                Some(ReviewCmd::Fail { id, reason, by }) => backlog::review_fail(&v, &id, &reason, by)?,
+            };
+            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "note": r.note.to_json()}));
         }
         Cmd::Check { id, which } => {
             let (n, changed) = backlog::check(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?)?;

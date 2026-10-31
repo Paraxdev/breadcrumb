@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>breadcrumb review</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --panel2: #eef0f4; --text: #1d2330; --muted: #667085;
+  --border: #d9dde5; --accent: #3a63d8; --on-solid: #ffffff; --danger: #c43d3d; --ok: #2f855a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1a1e26; --panel2: #232833; --text: #e6e9ef; --muted: #98a2b3;
+    --border: #2e3440; --accent: #7aa2ff; --on-solid: #0d1117; --danger: #f87171; --ok: #4ade80;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow-wrap: anywhere; }
+header { display: flex; gap: 8px; align-items: center; padding: 10px 12px; background: var(--panel); border-bottom: 1px solid var(--border); }
+header h1 { font-size: 18px; margin: 0; flex: 1; }
+main { max-width: 720px; margin: 0 auto; padding: 12px; }
+button, textarea { font: inherit; color: inherit; }
+button, .btn { min-height: 48px; padding: 8px 14px; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; color: var(--text); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, textarea:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+.meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.pill { border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; white-space: nowrap; }
+.item { font-weight: 600; }
+ol { margin: 8px 0; padding-left: 24px; }
+li { margin: 4px 0; }
+.hint { color: var(--muted); font-size: 14px; margin: 8px 0; }
+.acts { display: flex; gap: 8px; margin-top: 8px; }
+.acts button { flex: 1; }
+.pass { background: var(--ok); border-color: var(--ok); color: var(--on-solid); font-weight: 600; }
+.fail { border-color: var(--danger); color: var(--danger); font-weight: 600; }
+textarea { width: 100%; min-height: 72px; padding: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin: 8px 0 0; resize: vertical; }
+.err { color: var(--danger); margin: 6px 0 0; min-height: 1.2em; }
+.empty { color: var(--muted); padding: 8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Review</h1>
+  <button id="reload" type="button">Refresh</button>
+  <a class="btn" href="/questions">Questions</a>
+  <a class="btn" href="/board">Board</a>
+</header>
+<main id="items"></main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else el.setAttribute(k, v);
+  }
+  el.append(...kids.flat().filter(Boolean));
+  return el;
+}
+
+async function api(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const r = await fetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+
+let dirty = false;
+
+function card(it) {
+  const url = "/api/review/" + encodeURIComponent(it.id) + "/";
+  const err = h("div", { class: "err", role: "alert" });
+  const pass = h("button", { class: "pass", type: "button", text: "Pass" });
+  const fail = h("button", { class: "fail", type: "button", text: "Fail" });
+  const acts = h("div", { class: "acts" }, pass, fail);
+  let reason = null;
+  const send = async (verdict, body) => {
+    pass.disabled = fail.disabled = true; err.textContent = "";
+    try { await api("POST", url + verdict, body); dirty = false; load(); }
+    catch (e) { err.textContent = e.message; pass.disabled = false; fail.disabled = reason !== null && !reason.value.trim(); }
+  };
+  pass.onclick = () => send("pass", {});
+  fail.onclick = () => {
+    if (reason) return send("fail", { reason: reason.value.trim() });
+    reason = h("textarea", { placeholder: "What went wrong?", "aria-label": "Why it failed" });
+    reason.oninput = () => { dirty = reason.value.trim() !== ""; fail.disabled = !dirty; };
+    fail.textContent = "Send fail"; fail.disabled = true;
+    acts.before(reason); reason.focus();
+  };
+  const steps = it.steps.length
+    ? h("ol", {}, it.steps.map((s) => h("li", { text: s })))
+    : h("div", { class: "hint", text: "No steps recorded, ask the agent that built it what to try." });
+  return h("div", { class: "card" },
+    h("div", { class: "meta" },
+      h("span", { class: "pill", text: it.project || "global" }),
+      h("span", { class: "pill", text: it.priority }),
+      h("span", { text: (it.slug ? it.slug + " " : "") + it.id })),
+    h("div", { class: "item", text: it.title }), steps, acts, err);
+}
+
+async function load() {
+  try {
+    const d = await api("GET", "/api/review");
+    $("title").textContent = "Review (" + d.items.length + ")";
+    $("items").replaceChildren(...(d.items.length ? d.items.map(card) : [h("div", { class: "empty", text: "Nothing waits for your check." })]));
+  } catch (e) {
+    $("items").replaceChildren(h("div", { class: "err", text: e.message }));
+  }
+}
+
+$("reload").onclick = () => { dirty = false; load(); };
+setInterval(() => { if (!dirty && !document.hidden) load(); }, 30000);
+load();
+</script>
+</body>
+</html>

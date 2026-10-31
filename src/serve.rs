@@ -18,6 +18,7 @@ use std::time::Duration;
 
 const INDEX_HTML: &str = include_str!("web/index.html");
 const QUESTIONS_HTML: &str = include_str!("web/questions.html");
+const REVIEW_HTML: &str = include_str!("web/review.html");
 const LOGIN_HTML: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>breadcrumb</title><body style=\"font:16px system-ui;margin:2em auto;max-width:30em;padding:0 16px\"><h1>breadcrumb</h1><p>Sign in with the login link that <code>breadcrumb serve --remote</code> printed when it started.</p>";
 pub const COOKIE: &str = "crumb_token";
 const MAX_BODY: usize = 4 * 1024 * 1024;
@@ -283,7 +284,7 @@ impl App {
         }
         let allowed = matches!(
             (req.method.as_str(), segs),
-            ("GET", [] | ["questions"] | ["board"] | ["api", "questions" | "board" | "projects" | "kinds"]) | ("POST", ["api", "question", _, "answer"])
+            ("GET", [] | ["questions"] | ["review"] | ["board"] | ["api", "questions" | "review" | "board" | "projects" | "kinds"]) | ("POST", ["api", "question", _, "answer"] | ["api", "review", _, "pass" | "fail"])
         );
         if allowed { None } else { Some(Response::error(403, "not available in remote mode")) }
     }
@@ -310,6 +311,9 @@ impl App {
             ("GET", ["questions"]) => return Response::html(200, QUESTIONS_HTML),
             ("GET", ["api", "questions"]) => self.questions(),
             ("POST", ["api", "question", qid, "answer"]) => self.answer(qid, req),
+            ("GET", ["review"]) => return Response::html(200, REVIEW_HTML),
+            ("GET", ["api", "review"]) => self.review(req),
+            ("POST", ["api", "review", id, verdict @ ("pass" | "fail")]) => self.verdict(id, verdict, req),
             ("GET", ["api", "projects"]) => self.projects(),
             ("GET", ["api", "kinds"]) => self.kinds(),
             ("GET", ["api", "board"]) => self.board(req),
@@ -370,6 +374,24 @@ impl App {
         let by = str_of(&b, "by").unwrap_or_else(|| "web".to_string());
         let (n, q) = question::answer(&v, qid, &choices, b.get("text").and_then(Value::as_str), &by)?;
         Ok(Response::json(200, &json!({"qid": question::qid(&n, &q), "answer": q.answer_text(), "question": q})))
+    }
+
+    fn review(&self, req: &Request) -> Result<Response> {
+        let v = self.vault()?;
+        let sc = self.scope(&v, req)?;
+        Ok(Response::json(200, &json!({"scope": sc.label(), "items": backlog::review_items(&v, &sc)?})))
+    }
+
+    fn verdict(&self, id: &str, verdict: &str, req: &Request) -> Result<Response> {
+        let v = self.vault()?;
+        let b = body_obj(req)?;
+        let by = Some(str_of(&b, "by").unwrap_or_else(|| "web".to_string()));
+        let r = if verdict == "pass" {
+            backlog::review_pass(&v, id, by)?
+        } else {
+            backlog::review_fail(&v, id, &str_of(&b, "reason").unwrap_or_default(), by)?
+        };
+        Ok(Response::json(200, &json!({"id": r.note.id, "key": backlog::key(&r.note), "from": r.from, "to": r.to})))
     }
 
     fn vault(&self) -> Result<Vault> {
@@ -535,6 +557,7 @@ impl App {
         payload["from"] = r.from.clone().into();
         payload["to"] = r.to.clone().into();
         payload["unmet_acceptance"] = json!(r.unmet);
+        payload["warnings"] = json!(r.warnings);
         Ok(Response::json(200, &payload))
     }
 }

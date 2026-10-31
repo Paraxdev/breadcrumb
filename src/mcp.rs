@@ -337,11 +337,14 @@ impl Server {
                     return Ok(format::ack("queued", &n));
                 }
                 let check = s(a, "check").map(|c| backlog::Check::parse(&c)).transpose()?;
-                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs") })?;
+                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict: None })?;
                 let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.handle(), r.to) };
                 if !r.unmet.is_empty() {
                     let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
                     out.push_str(&format!("\nwarning, acceptance criteria not marked [x], tick with move check \"all\" or \"2,3\": {}", unmet.join("; ")));
+                }
+                for w in &r.warnings {
+                    out.push_str(&format!("\nwarning: {w}"));
                 }
                 Ok(out)
             }
@@ -374,13 +377,17 @@ impl Server {
                     let cols = backlog::board(&v, &sc, &BoardFilter { kind: s(a, "kind"), assignee: s(a, "assignee"), include_closed: b(a, "include_closed") })?;
                     Ok(backlog::board_compact(&cols))
                 }
+                "review" => {
+                    let sc = self.scope(&v, a)?;
+                    Ok(backlog::review_text(&backlog::review_items(&v, &sc)?, &sc.label()))
+                }
                 "tree" => backlog::tree(&v, &req_s(a, "id")?),
                 "deps" => {
                     let d = backlog::deps(&v, &req_s(a, "id")?)?;
                     let title = v.get(&d.id)?.title;
                     Ok(backlog::deps_text(&d, &title))
                 }
-                other => bail!("view must be board, tree or deps, got '{other}'"),
+                other => bail!("view must be board, review, tree or deps, got '{other}'"),
             },
             "project" => match s(a, "action").as_deref().unwrap_or("list") {
                 "list" => {
@@ -698,6 +705,7 @@ pub fn tool_defs() -> Vec<Value> {
             "resolution": {"type": "string", "description": "required for rejected"},
             "shipped_in": st(),
             "check": {"type": "string", "description": "tick acceptance: all or 2,3"},
+            "steps": {"type": "array", "items": st(), "description": "moving to review: what the user should try"},
             "refs": refs(),
             "by": st(),
         })), &["id", "state"])),
@@ -714,8 +722,8 @@ pub fn tool_defs() -> Vec<Value> {
             "answer": st(),
             "by": by(),
         }), &[])),
-        tool("backlog", "Board, or tree or deps of one item.", obj(with(json!({"project": st()}), json!({
-            "view": {"type": "string", "enum": ["board", "tree", "deps"]},
+        tool("backlog", "Board, what waits for the user's review, or tree or deps of one item.", obj(with(json!({"project": st()}), json!({
+            "view": {"type": "string", "enum": ["board", "review", "tree", "deps"]},
             "id": st(),
             "include_closed": bl(),
         })), &[])),
