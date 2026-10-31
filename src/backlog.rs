@@ -104,8 +104,7 @@ pub fn is_parent_rel(rel: &str) -> bool {
     matches!(rel.trim(), "parent" | "part-of")
 }
 
-/// Where `tree` places a note: the parent field, else an item's first `parent` link, else its first `part-of` link.
-/// Board progress, `next` and the digest read only the field.
+/// Where every view places a note: the parent field, else an item's first `parent` link, else its first `part-of` link.
 pub fn tree_parent(n: &Note) -> Option<String> {
     let link = |rel: &str| n.links.iter().find(|l| l.rel == rel).map(|l| l.to.clone());
     parent(n).or_else(|| if is_item(n) { link("parent").or_else(|| link("part-of")) } else { None })
@@ -396,11 +395,7 @@ impl<'a> Index<'a> {
     }
 
     pub fn children(&self, id: &str) -> Vec<&'a Note> {
-        self.children_by(id, parent)
-    }
-
-    fn children_by(&self, id: &str, parent_of: fn(&Note) -> Option<String>) -> Vec<&'a Note> {
-        let mut c: Vec<&Note> = self.notes.iter().filter(|n| parent_of(n).as_deref() == Some(id) && n.id != id && !n.is_archived()).collect();
+        let mut c: Vec<&Note> = self.notes.iter().filter(|n| tree_parent(n).as_deref() == Some(id) && n.id != id && !n.is_archived()).collect();
         sort_items(&mut c);
         c
     }
@@ -488,7 +483,7 @@ impl BoardItem {
             claimed: str_field(n, CLAIMED_KEY),
             claim_stale: assignee(n).is_some() && claimed_at(n).is_some() && !is_closed(&state(n)) && claim_stale(n),
             project: n.project.clone(),
-            parent: parent(n),
+            parent: tree_parent(n),
             blocked: idx.is_blocked(n),
             blocked_by: idx.open_blockers(n),
             progress: idx.progress(&n.id),
@@ -1246,7 +1241,7 @@ fn tree_lines(idx: &Index, n: &Note, depth: usize, seen: &mut HashSet<String>, o
         let _ = writeln!(out, "{}  (cycle)", "  ".repeat(depth));
         return;
     }
-    for c in idx.children_by(&n.id, tree_parent) {
+    for c in idx.children(&n.id) {
         if seen.contains(&c.id) {
             let _ = writeln!(out, "{}- {} (cycle)", "  ".repeat(depth + 1), c.id);
             continue;

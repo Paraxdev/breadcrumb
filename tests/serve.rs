@@ -142,3 +142,14 @@ fn request_parsing() {
     assert_eq!(r.param("project"), Some("web"));
     assert_eq!(r.body, b"{}");
 }
+
+#[test]
+fn the_children_list_counts_linked_children() {
+    let (_d, v) = common::vault();
+    let epic = common::add(&v, "Epic", "epic", Some("web"), &[]).id;
+    let child = common::add(&v, "Linked", "task", Some("web"), &[]).id;
+    breadcrumb::ops::link(&v, &child, &epic, Some("part-of"), false).unwrap();
+    let app = App::new(&v.root, 0);
+    let note = app.handle(&req("GET", &format!("/api/note/{epic}"), None)).body_json();
+    assert_eq!(note["children"][0]["id"], child.as_str(), "{note}");
+}

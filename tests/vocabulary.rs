@@ -182,12 +182,25 @@ fn other_rels_print_only_the_links() {
 }
 
 #[test]
-fn progress_and_next_still_read_only_the_field() {
+fn every_view_counts_linked_children_like_tree() {
     let (_d, v) = common::vault();
     let epic = common::add(&v, "The epic", "epic", Some("app"), &[]).id;
-    let linked = common::add(&v, "Linked", "task", Some("app"), &[]).id;
-    ok(&v, &["link", &linked, &epic, "--rel", "parent"]);
-    assert!(!ok(&v, &["board", "-p", "app"]).contains("/1 done"), "{}", ok(&v, &["board", "-p", "app"]));
-    let idx_notes = v.load_notes();
-    assert!(breadcrumb::backlog::Index::new(&idx_notes).children(&epic).is_empty());
+    let by_field = common::add(&v, "By field", "task", Some("app"), &[("parent", &epic)]).id;
+    let by_parent = common::add(&v, "By link", "task", Some("app"), &[]).id;
+    let by_part = common::add(&v, "By part-of", "task", Some("app"), &[]).id;
+    ok(&v, &["link", &by_parent, &epic, "--rel", "parent"]);
+    ok(&v, &["link", &by_part, &epic, "--rel", "part-of"]);
+    ok(&v, &["move", &by_part, "shipped", "--shipped-in", "1.0"]);
+
+    let notes = v.load_notes();
+    let idx = breadcrumb::backlog::Index::new(&notes);
+    let kids: Vec<&str> = idx.children(&epic).iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(kids.len(), 3, "{kids:?}");
+    for k in [&by_field, &by_parent, &by_part] {
+        assert!(kids.contains(&k.as_str()), "{k} {kids:?}");
+        assert!(tree(&v, &epic).contains(k.as_str()));
+    }
+    assert_eq!(idx.progress(&epic), Some((1, 3)));
+    assert!(ok(&v, &["board", "-p", "app"]).contains("(1/3 done)"));
+    assert!(v.get(&by_parent).unwrap().field("parent").is_none(), "a view never writes the link into the field");
 }
