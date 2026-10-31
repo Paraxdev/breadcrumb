@@ -23,7 +23,7 @@ pub fn reads_finished(body: &str) -> Option<String> {
 }
 
 pub fn age_days(n: &Note) -> i64 {
-    (crate::util::now() - n.fresh_at()).num_days()
+    (crate::util::now() - n.pin_checked_at()).num_days()
 }
 
 /// Why a pin deserves a look, empty when it does not. `review_days` 0 turns the age check off.

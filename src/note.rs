@@ -17,6 +17,8 @@ pub const DEFAULT_REL: &str = "relates";
 /// Optional fields breadcrumb itself maintains: file globs a note applies to, and the date it was last confirmed.
 pub const PATHS_KEY: &str = "paths";
 pub const VERIFIED_KEY: &str = "verified";
+/// The date only `verify` sets, `verified` moves on every write so it says nothing about a pin's age.
+pub const PIN_VERIFIED_KEY: &str = "pin_verified";
 /// Typed pointers to things outside the vault, `type:value` like commit:abc123, run:wf_1, branch:fix/x, pr:12.
 pub const REFS_KEY: &str = "refs";
 /// When the note stops holding: a date, a time or `until:<id>`. See lifecycle.
@@ -446,6 +448,11 @@ impl Note {
 
     pub fn mark_verified(&mut self) {
         self.set_field(VERIFIED_KEY, Value::String(crate::util::fmt_date(&now())));
+    }
+
+    /// When someone last checked this pin on purpose, a note never verified counts from its creation.
+    pub fn pin_checked_at(&self) -> DateTime<Utc> {
+        self.field(PIN_VERIFIED_KEY).and_then(yaml_scalar_string).and_then(|s| parse_time(&s)).unwrap_or(self.created)
     }
 
     /// The short name, None for notes without one and for a value that could be mistaken for an id.

@@ -159,8 +159,8 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
             }
             continue;
         }
-        if key == crate::note::VERIFIED_KEY {
-            bail!("'verified' is set by breadcrumb, use verify to mark a note as still accurate");
+        if key == crate::note::VERIFIED_KEY || key == crate::note::PIN_VERIFIED_KEY {
+            bail!("'{key}' is set by breadcrumb, use verify to mark a note as still accurate");
         }
         if key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY {
             bail!("'{key}' is set by breadcrumb from the session that writes");
@@ -511,7 +511,7 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         if key == "source" {
             note.source = None;
             note.clear_kept("source");
-        } else if RESERVED_KEYS.contains(&key.as_str()) || key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY || key == crate::slug::SLUG_KEY {
+        } else if RESERVED_KEYS.contains(&key.as_str()) || key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY || key == crate::slug::SLUG_KEY || key == crate::note::PIN_VERIFIED_KEY {
             bail!("cannot unset note metadata '{key}'");
         } else {
             note.unset_field(key);
@@ -627,6 +627,7 @@ pub fn verify(v: &Vault, ids: &[String]) -> Result<Vec<Note>> {
     let mut touched = vec![];
     for n in &mut notes {
         n.mark_verified();
+        n.set_field(crate::note::PIN_VERIFIED_KEY, Value::String(crate::util::fmt_date(&crate::util::now())));
         touched.push(v.write_note(n)?);
     }
     let msg = match notes.as_slice() {
@@ -999,7 +1000,7 @@ pub fn define_kind(v: &Vault, def: KindDef, replace: bool, remove_fields: &[Stri
         bail!("invalid kind name '{}', use lowercase letters, digits, '-' or '_'", def.name);
     }
     for f in &def.fields {
-        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY, crate::note::REFS_KEY, crate::note::EXPIRES_KEY].contains(&f.name.as_str()) {
+        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY, crate::note::PIN_VERIFIED_KEY, crate::note::REFS_KEY, crate::note::EXPIRES_KEY].contains(&f.name.as_str()) {
             bail!("field name '{}' is reserved for note metadata", f.name);
         }
         if f.ty == kind::FieldType::Enum && f.values.is_empty() {

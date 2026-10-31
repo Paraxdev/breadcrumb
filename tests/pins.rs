@@ -27,6 +27,8 @@ fn backdate(v: &Vault, id: &str, day: &str) {
                 format!("verified: {day}")
             } else if l.starts_with("updated:") {
                 format!("updated: {day}T00:00:00Z")
+            } else if l.starts_with("created:") {
+                format!("created: {day}T00:00:00Z")
             } else {
                 l.to_string()
             }
@@ -156,7 +158,7 @@ fn pins_lists_every_pin_flagged_first_with_the_commands_and_changes_nothing() {
 }
 
 #[test]
-fn a_note_with_no_verified_field_ages_from_its_update() {
+fn a_pin_never_verified_ages_from_its_creation() {
     let (_d, v) = common::vault();
     let id = pin(&v, "Hand written", "decision", "Keep doing this.");
     backdate(&v, &id, &days_ago(35));
@@ -175,4 +177,41 @@ fn verifying_clears_the_age_flag() {
     assert!(crumb(&v, &["pins", "--project", "app"]).1.contains("1 flagged"));
     crumb(&v, &["verify", &id]);
     assert!(crumb(&v, &["pins", "--project", "app"]).1.contains("0 flagged"));
+}
+
+#[test]
+fn an_append_or_update_does_not_reset_the_age() {
+    let (_d, v) = common::vault();
+    let id = pin(&v, "Old rule", "decision", "Keep doing this.");
+    backdate(&v, &id, &days_ago(40));
+    assert!(crumb(&v, &["append", &id, "Another line."]).0);
+    assert!(crumb(&v, &["update", &id, "--title", "Old rule still"]).0);
+    assert!(crumb(&v, &["pins", "--project", "app"]).1.contains("not verified for 40 days"));
+    assert!(v.get(&id).unwrap().field("pin_verified").is_none());
+}
+
+#[test]
+fn only_verify_sets_the_date_and_an_append_keeps_it() {
+    let (_d, v) = common::vault();
+    let id = pin(&v, "Old rule", "decision", "Keep doing this.");
+    backdate(&v, &id, &days_ago(40));
+    crumb(&v, &["verify", &id]);
+    let today = days_ago(0);
+    assert_eq!(v.get(&id).unwrap().field("pin_verified").and_then(|d| d.as_str()), Some(today.as_str()));
+    crumb(&v, &["append", &id, "Another line."]);
+    assert_eq!(v.get(&id).unwrap().field("pin_verified").and_then(|d| d.as_str()), Some(today.as_str()));
+
+    let (ok, _, err) = crumb(&v, &["update", &id, "--field", "pin_verified=2020-01-01"]);
+    assert!(!ok && err.contains("verify"), "{err}");
+    assert!(!crumb(&v, &["update", &id, "--unset", "pin_verified"]).0);
+}
+
+#[test]
+fn verified_still_moves_with_every_write_for_the_stale_check() {
+    let (_d, v) = common::vault();
+    let id = common::add(&v, "Plain note", "note", Some("app"), &[]).id;
+    backdate(&v, &id, "2020-01-01");
+    assert!(crumb(&v, &["doctor"]).1.contains(&id));
+    crumb(&v, &["append", &id, "Touched."]);
+    assert!(!crumb(&v, &["doctor"]).1.contains(&id));
 }
