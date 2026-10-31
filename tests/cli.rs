@@ -76,7 +76,7 @@ fn cli_end_to_end() {
     assert!(json(&v, &["list", "--global", "--ref", "wf_9"]).as_array().unwrap().is_empty());
     assert!(ok(&v, &["delete", &id, "--yes"]).contains("deleted"));
     let guide = ok(&v, &["guide"]);
-    assert!(guide.contains("context") && guide.chars().count() < 1300);
+    assert!(guide.contains("context") && guide.chars().count() < 1450);
     let st = json(&v, &["stats"]);
     for k in ["tools/list", "instructions", "hook", "context"] {
         assert!(st[k]["chars"].as_u64().unwrap() > 0 && st[k]["tokens"].as_u64().unwrap() > 0, "{st}");

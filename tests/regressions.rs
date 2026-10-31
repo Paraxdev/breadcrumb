@@ -91,7 +91,8 @@ fn append_goes_to_the_end_of_ordinary_notes_and_before_history_of_items() {
     let (_d, v) = common::vault();
     let n = ops::add(&v, ops::AddReq { title: "hist".into(), body: Some("Intro\n\n## History\n\nold\n\n## Notes\n\nlast".into()), ..Default::default() }).unwrap();
     let n = ops::append(&v, &n.id, "APPENDED").unwrap();
-    assert!(n.body.ends_with("last\n\nAPPENDED"), "{}", n.body);
+    let date = breadcrumb::util::fmt_date(&breadcrumb::util::now());
+    assert!(n.body.ends_with(&format!("last\n\n{date}:\nAPPENDED")), "{}", n.body);
     let t = common::add(&v, "item", "task", None, &[]);
     backlog::queue(&v, &t.id, QueuePos::End, None).unwrap();
     let t = ops::append(&v, &t.id, "detail").unwrap();

@@ -899,7 +899,8 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Get { id } => {
             let n = open()?.get(&id)?;
             let notice = question::notice(&n);
-            out.emit(format!("{}{}{notice}", format::note_full(&n), if notice.is_empty() { "" } else { "
+            let written = crate::session::written_line(&n).map(|w| format!("\n{w}\n")).unwrap_or_default();
+            out.emit(format!("{}{written}{}{notice}", format::note_full(&n), if notice.is_empty() { "" } else { "
 " }), n.to_json());
         }
         Cmd::Update(u) => {

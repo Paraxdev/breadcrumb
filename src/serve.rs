@@ -719,6 +719,7 @@ pub fn load_or_create_token(dir: &Path) -> Result<String> {
 }
 
 pub fn run(vault_root: &Path, port: u16, open: bool, remote_hosts: Option<Vec<String>>) -> Result<()> {
+    crate::session::disable();
     let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("binding 127.0.0.1:{port}, is it already in use? try --port"))?;
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}/");

@@ -121,8 +121,9 @@ fn compact_body(n: &Note, max: usize) -> String {
 
 fn handoff_section(h: &Note, stale_days: u64, max: usize) -> String {
     let prev = h.links.iter().find(|l| l.rel == SUPERSEDES).map(|l| format!(", previous {}", l.to)).unwrap_or_default();
+    let by = crate::session::created_by(h).map(|id| format!(", {}", crate::session::label(&id))).unwrap_or_default();
     let head = format!(
-        "Latest handoff {} ({}{prev}): {}{}\n",
+        "Latest handoff {} ({}{by}{prev}): {}{}\n",
         h.id,
         crate::util::fmt_date(&h.created),
         short_title(&h.title),

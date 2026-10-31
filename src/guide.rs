@@ -10,6 +10,7 @@ Git-backed memory and backlog shared by agent sessions. Use the breadcrumb MCP t
 - Backlog items (idea, epic, feature, task, bug) have a state and priority p0 to p3. `next` picks work, `claim` marks what this session works on, `move` changes state.
 - Need the user's call on an item? `ask` locks it until answered. Items with an unseen answer come first: built means adjust, not built means build with it. `claim` or `ack` clears it.
 - Machine facts (where files and tools live on this PC) go in kind `env`, `env` lists them.
+- Writes record the session, appends their date too, do not type them.
 - End of session: add a `handoff` note, it supersedes the previous one.
 - Notes belong to the project detected from cwd, or global. Never store secrets.
 "#;

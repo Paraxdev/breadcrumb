@@ -165,6 +165,11 @@ pub fn note_compact(n: &Note, full: bool) -> String {
     drop(&mut m, "status", &|v: &Y| v.as_str() == Some("active"));
     drop(&mut m, "pinned", &|v: &Y| v.as_bool() == Some(false));
     drop(&mut m, "created", &|_: &Y| true);
+    drop(&mut m, crate::session::SESSION_KEY, &|_: &Y| true);
+    drop(&mut m, crate::session::LAST_SESSION_KEY, &|_: &Y| true);
+    if let Some(w) = crate::session::written_line(n) {
+        m.insert(Y::String(crate::session::SESSION_KEY.into()), Y::String(w));
+    }
     let updated = fmt_date(&n.updated);
     drop(&mut m, crate::note::VERIFIED_KEY, &|v: &Y| v.as_str() == Some(updated.as_str()));
     let refs = Y::String(crate::note::REFS_KEY.into());

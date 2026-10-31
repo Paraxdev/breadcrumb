@@ -160,6 +160,9 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
         if key == crate::note::VERIFIED_KEY {
             bail!("'verified' is set by breadcrumb, use verify to mark a note as still accurate");
         }
+        if key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY {
+            bail!("'{key}' is set by breadcrumb from the session that writes");
+        }
         if RESERVED_KEYS.contains(&key.as_str()) {
             bail!("'{key}' is note metadata, not a field, use the dedicated option (title, kind, tags, links, status, pin)");
         }
@@ -297,6 +300,7 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
         note.set_field("machine", Value::String(crate::util::machine_name()));
     }
     note.mark_verified();
+    crate::session::stamp_new(&mut note);
     k.validate(&mut note.extra)?;
     if note.kind == crate::map::MAP {
         crate::map::check_new(v, &note)?;
@@ -464,7 +468,7 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         if key == "source" {
             note.source = None;
             note.clear_kept("source");
-        } else if RESERVED_KEYS.contains(&key.as_str()) {
+        } else if RESERVED_KEYS.contains(&key.as_str()) || key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY {
             bail!("cannot unset note metadata '{key}'");
         } else {
             note.unset_field(key);
@@ -528,6 +532,7 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         crate::backlog::record_state_change(&mut note, &from, &new_state, req.by.as_deref());
     }
     note.mark_verified();
+    crate::session::stamp_write(&mut note);
     note.updated = now();
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
     touched.push(v.write_note(&mut note)?);
@@ -541,16 +546,18 @@ pub fn append(v: &Vault, id: &str, text: &str) -> Result<Note> {
     if text.is_empty() {
         bail!("nothing to append");
     }
+    let text = format!("{}\n{text}", crate::session::append_head());
     let _g = v.lock()?;
     let mut note = v.get(id)?;
     note.body = if crate::backlog::is_item(&note) {
-        crate::backlog::insert_before_history(&note.body, text)
+        crate::backlog::insert_before_history(&note.body, &text)
     } else if note.body.trim().is_empty() {
-        text.to_string()
+        text
     } else {
         format!("{}\n\n{text}", note.body.trim_end())
     };
     note.mark_verified();
+    crate::session::stamp_write(&mut note);
     note.updated = now();
     let p = v.write_note(&mut note)?;
     v.commit(&[p], &commit_msg("append", &note))?;

@@ -140,7 +140,7 @@ fn age(n: &Note) -> String {
 }
 
 pub(crate) fn event_line(what: &str, by: &str) -> String {
-    format!("- {}: {what} (by {by})", now().format("%Y-%m-%dT%H:%MZ"))
+    format!("- {}: {what} (by {})", now().format("%Y-%m-%dT%H:%MZ"), crate::session::attribute(Some(by)))
 }
 
 /// Sets the assignee to `by` with a timestamp, so `next` in other sessions skips the item until the claim goes stale.
@@ -209,7 +209,7 @@ fn actor(by: Option<&str>) -> String {
 }
 
 pub fn history_line(what: &str, from: &str, to: &str, by: &str) -> String {
-    format!("- {}: {what} {from} -> {to} (by {by})", now().format("%Y-%m-%dT%H:%MZ"))
+    format!("- {}: {what} {from} -> {to} (by {})", now().format("%Y-%m-%dT%H:%MZ"), crate::session::attribute(Some(by)))
 }
 
 fn history_heading(line: &str) -> bool {
@@ -262,7 +262,7 @@ pub fn insert_before_history(body: &str, text: &str) -> String {
 /// Records a state transition in the body. Called by every path that changes state.
 pub fn record_state_change(n: &mut Note, from: &str, to: &str, by: Option<&str>) {
     if from != to {
-        n.body = append_history(&n.body, &history_line("state", from, to, &actor(by)));
+        n.body = append_history(&n.body, &history_line("state", from, to, &crate::session::attribute(by)));
     }
 }
 
@@ -589,6 +589,7 @@ pub(crate) fn save(v: &Vault, n: &mut Note, op: &str) -> Result<()> {
 fn save_with(v: &Vault, n: &mut Note, op: &str, mut also: Vec<Note>) -> Result<()> {
     let k = v.require_kind(&n.kind)?;
     k.validate(&mut n.extra)?;
+    crate::session::stamp_write(n);
     n.updated = now();
     let mut paths = vec![v.write_note(n)?];
     for o in &mut also {

@@ -30,6 +30,10 @@ A permission or rule meant for one night or one batch gets `--expires` (`expires
 
 `add` names up to two existing notes that look like the same fact, by shared title words with shared tags helping, so an agent can update one of them instead. `search` lists notes matching more of the query first, then by score weighted by kind and recency, drops notes that only share a word or two with a long query, shows 5 by default and marks partial matches like `(2/3 terms)`.
 
+## Who wrote what
+
+Every `add` stamps the session id in the `session` frontmatter key, every later `append`, `update`, `move`, `claim` or `release` stamps `last_session` when it was another session. Both come from `CLAUDE_CODE_SESSION_ID`, which Bash children, hooks and the MCP server all have. Old notes and notes old binaries write have no stamp and behave as before. An append starts with a line like `2026-10-31 neocad-4b a03e0d0a:`, a history line ends in `(by neocad-4b a03e0d0a)` or `(by lead a03e0d0a)` with `--by lead`, so never type dates or session ids by hand. The id stays because a name changes across a restart. `get` ends with `written by ...` in today's names, from `~/.claude/sessions`. `breadcrumb::session` has what other features need: `current()` for who this process is, `is_alive(id, 8 character prefix or name)`, `label(id)` for the name or the short id, `signature(id)` for both, `last_writer(note)`.
+
 ## Claims
 
 Sessions that share a project claim what they work on: `breadcrumb claim <id>` (the `claim` tool) sets the item's `assignee` to the session name and records when, `breadcrumb release <id>` clears it. The name is `--by`, else `BREADCRUMB_SESSION`, else the start of the Claude Code session id. `next` skips items another session holds, the board and the digest show the holder, and a claim with no write to its item for a day is stale: it shows as such and no longer keeps anyone away. Taking over or releasing someone else's fresh claim needs `--force`.

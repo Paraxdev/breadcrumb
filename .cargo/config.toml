@@ -1,0 +1,4 @@
+# Note: tests run inside Claude Code sessions too, the session stamp must not leak into their history lines.
+[env]
+CLAUDE_CODE_SESSION_ID = { value = "", force = true }
+BREADCRUMB_SESSION = { value = "", force = true }
