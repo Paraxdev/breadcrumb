@@ -243,7 +243,7 @@ fn stop_reminds_once_about_a_missing_handoff() {
     assert!(new.links.iter().any(|l| l.to == old.id && l.rel == "supersedes"), "links the previous handoff");
     assert_eq!(stop("s2", false), None, "a handoff was written");
     let ctx = breadcrumb::ops::context(&v, Some("demo-app"), 15).unwrap();
-    assert!(ctx.contains(&format!("Latest handoff {} (", new.id)), "{ctx}");
+    assert!(ctx.contains(&format!("Latest handoff {} (", new.handle())), "{ctx}");
     assert_eq!(ctx.matches(&old.id).count(), 1, "the previous handoff is only named: {ctx}");
     assert!(ctx.contains(&format!("previous {}", old.id)), "{ctx}");
 }

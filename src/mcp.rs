@@ -253,6 +253,7 @@ impl Server {
                         source: s(a, "source"),
                         links: links(a)?,
                         paths: strs(a, "paths"),
+                        slug: s(a, "slug"),
                         require_existing_project: true,
                     },
                 )?;
@@ -289,6 +290,7 @@ impl Server {
                         by: s(a, "by"),
                         set_paths: if a.contains_key("paths") { Some(strs(a, "paths")) } else { None },
                         refs: strs(a, "refs"),
+                        slug: s(a, "slug"),
                         ..Default::default()
                     },
                 )?;
@@ -325,7 +327,7 @@ impl Server {
                 }
                 let check = s(a, "check").map(|c| backlog::Check::parse(&c)).transpose()?;
                 let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs") })?;
-                let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.id, r.to) };
+                let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.handle(), r.to) };
                 if !r.unmet.is_empty() {
                     let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
                     out.push_str(&format!("\nwarning, acceptance criteria not marked [x], tick with move check \"all\" or \"2,3\": {}", unmet.join("; ")));
@@ -652,9 +654,11 @@ pub fn tool_defs() -> Vec<Value> {
             "links": links(),
             "pinned": bl(),
             "paths": paths(),
+            "slug": st(),
         })), &["title"])),
         tool("update", "Change a note.", obj(with(id(), json!({
             "title": st(),
+            "slug": st(),
             "kind": st(),
             "body": {"type": "string", "description": "replaces the body"},
             "tags": {"type": "array", "items": {"type": "string"}, "description": "tags to add, -tag removes"},

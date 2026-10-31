@@ -82,9 +82,9 @@ fn pins_are_one_line_each_rules_first_and_lapsed_notes_never_show() {
     assert_eq!(
         pins,
         vec![
-            format!("{} feedback New rule", new_rule.id).as_str(),
-            format!("{} decision Short own summary", old_rule.id).as_str(),
-            format!("{} gotcha Pinned gotcha", gotcha.id).as_str()
+            format!("{} feedback New rule", new_rule.handle()).as_str(),
+            format!("{} decision Short own summary", old_rule.handle()).as_str(),
+            format!("{} gotcha Pinned gotcha", gotcha.handle()).as_str()
         ],
         "{ctx}"
     );
@@ -117,7 +117,7 @@ fn a_new_handoff_supersedes_the_live_one_and_unpins_older_ones() {
     assert!(!v.get(&second.id).unwrap().pinned);
 
     let ctx = ops::context(&v, Some("app"), 15).unwrap();
-    assert!(ctx.contains(&format!("Latest handoff {} (", third.id)) && ctx.contains(&format!("previous {}): Handoff three\nDone:\nParser.\nNext:\nLexer.\n", second.id)), "{ctx}");
+    assert!(ctx.contains(&format!("Latest handoff {} (", third.handle())) && ctx.contains(&format!("previous {}): Handoff three\nDone:\nParser.\nNext:\nLexer.\n", second.id)), "{ctx}");
     assert!(!ctx.contains(&first.id) && !ctx.contains(&other.id) && !ctx.contains('#'), "{ctx}");
 }
 

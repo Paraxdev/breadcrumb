@@ -191,6 +191,16 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
     Ok(())
 }
 
+/// `slug` is accepted as a field too, since the MCP `fields` argument is where an agent may put it.
+fn split_slug(fields: Vec<(String, FieldInput)>) -> (Vec<(String, FieldInput)>, Option<String>) {
+    let (mine, rest): (Vec<_>, Vec<_>) = fields.into_iter().partition(|(k, _)| k.trim() == crate::slug::SLUG_KEY);
+    let given = mine.into_iter().next_back().and_then(|(_, f)| match f {
+        FieldInput::Raw(s) => Some(s),
+        FieldInput::Value(x) => yaml_scalar_string(&x),
+    });
+    (rest, given)
+}
+
 pub fn parse_field_args(args: &[String]) -> Result<Vec<(String, FieldInput)>> {
     args.iter()
         .map(|a| match a.split_once('=') {
@@ -259,6 +269,8 @@ pub struct AddReq {
     pub links: Vec<Link>,
     /// File globs relative to the project root.
     pub paths: Vec<String>,
+    /// A better name than the one generated from the title.
+    pub slug: Option<String>,
     /// Refuse a project that does not exist yet instead of creating it, so a typo cannot start an orphan project.
     pub require_existing_project: bool,
 }
@@ -292,7 +304,9 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     if note.body.trim().is_empty() {
         note.body = k.template.clone().unwrap_or_default().trim_end().to_string();
     }
-    apply_fields(v, &mut note, &k, req.fields)?;
+    let (fields, field_slug) = split_slug(req.fields);
+    crate::slug::assign(v, &mut note, req.slug.or(field_slug).as_deref())?;
+    apply_fields(v, &mut note, &k, fields)?;
     if !req.paths.is_empty() {
         set_paths(&mut note, crate::recall::normalize_globs(&req.paths)?);
     }
@@ -411,6 +425,8 @@ pub struct UpdateReq {
     pub set_paths: Option<Vec<String>>,
     /// `type:value` or `+type:value` adds a ref, `-type:value` removes it.
     pub refs: Vec<String>,
+    /// Renames the note. A retitle never does.
+    pub slug: Option<String>,
     /// Actor recorded in the backlog history when the state changes.
     pub by: Option<String>,
     /// `version` of the note the caller edited. A mismatch means someone else changed it meanwhile.
@@ -468,13 +484,17 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         if key == "source" {
             note.source = None;
             note.clear_kept("source");
-        } else if RESERVED_KEYS.contains(&key.as_str()) || key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY {
+        } else if RESERVED_KEYS.contains(&key.as_str()) || key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY || key == crate::slug::SLUG_KEY {
             bail!("cannot unset note metadata '{key}'");
         } else {
             note.unset_field(key);
         }
     }
-    apply_fields(v, &mut note, &k, req.fields)?;
+    let (fields, field_slug) = split_slug(req.fields);
+    if let Some(s) = req.slug.or(field_slug) {
+        crate::slug::rename(v, &mut note, &s)?;
+    }
+    apply_fields(v, &mut note, &k, fields)?;
     if req.set_paths.is_some() || !req.paths.is_empty() {
         let mut globs = match &req.set_paths {
             Some(xs) => crate::recall::normalize_globs(xs)?,

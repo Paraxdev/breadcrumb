@@ -504,6 +504,19 @@ impl Vault {
     /// File name ids first. When nothing matches, parses every note so ids that list and search print
     /// (frontmatter ids that differ from the file name, derived ids of files without one) resolve too.
     pub fn resolve_path(&self, prefix: &str) -> Result<PathBuf> {
+        let needle = prefix.trim().to_ascii_lowercase();
+        if needle.contains('-') {
+            let notes = self.load_notes();
+            let hits: Vec<&Note> = notes.iter().filter(|n| n.slug().as_deref() == Some(needle.as_str())).collect();
+            match hits.as_slice() {
+                [] => {}
+                [n] => return n.path.clone().context("note without a path"),
+                _ => {
+                    let list: Vec<String> = hits.iter().map(|n| format!("  {}  {}", n.id, n.title)).collect();
+                    bail!("slug '{needle}' is used by several notes, use an id or rename one:\n{}", list.join("\n"));
+                }
+            }
+        }
         let by_name: Vec<(String, PathBuf)> = self.id_index().into_iter().map(|(i, _, p)| (i, p)).collect();
         if let Some(p) = self.pick_path(prefix, &by_name)? {
             return Ok(p);
@@ -512,6 +525,7 @@ impl Vault {
         all.extend(by_name);
         match self.pick_path(prefix, &all)? {
             Some(p) => Ok(p),
+            None if needle.contains('-') => bail!("no note with id or slug '{prefix}'"),
             None => bail!("no note with id '{prefix}'"),
         }
     }

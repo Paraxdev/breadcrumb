@@ -12,5 +12,6 @@ Git-backed memory and backlog shared by agent sessions. Use the breadcrumb MCP t
 - Machine facts (where files and tools live on this PC) go in kind `env`, `env` lists them.
 - Writes record the session, appends their date too, do not type them.
 - End of session: add a `handoff` note, it supersedes the previous one.
+- Notes have a short `slug` beside the id, commands take either. Tell the user the slug, with plain words beside it when it matters.
 - Notes belong to the project detected from cwd, or global. Never store secrets.
 "#;

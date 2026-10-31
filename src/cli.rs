@@ -111,6 +111,18 @@ pub enum Cmd {
         #[arg(required = true, num_args = 1..)]
         ids: Vec<String>,
     },
+    /// List short names, --backfill names the notes without one (dry unless --yes)
+    Slugs {
+        #[arg(long)]
+        backfill: bool,
+        /// Only backlog items that are not closed
+        #[arg(long)]
+        open_only: bool,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Link two notes
     Link {
         from: String,
@@ -681,6 +693,9 @@ pub struct AddArgs {
     /// When it stops holding: a date (the last day), an RFC3339 time, 3d or 12h from now, or until:<id> is closed
     #[arg(long, value_name = "WHEN")]
     pub expires: Option<String>,
+    /// Short name, two to four words with hyphens, generated from the title when left out
+    #[arg(long)]
+    pub slug: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -688,6 +703,9 @@ pub struct UpdateArgs {
     pub id: String,
     #[arg(long)]
     pub title: Option<String>,
+    /// Rename the short name, a retitle never does and messages that used the old one stop resolving
+    #[arg(long)]
+    pub slug: Option<String>,
     #[arg(long)]
     pub kind: Option<String>,
     /// +tag adds, -tag removes (repeatable)
@@ -884,6 +902,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     source: a.source,
                     links: vec![],
                     paths: a.paths,
+                    slug: a.slug,
                     require_existing_project: false,
                 },
             )?;
@@ -894,7 +913,8 @@ pub fn run(cli: Cli) -> Result<i32> {
             if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                 created.push_str(&format!("\n{h}"));
             }
-            out.emit(format!("added {}  {}  {}  {}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
+            let name = n.slug().map(|s| format!("  [{s}]")).unwrap_or_default();
+            out.emit(format!("added {}  {}  {}  {}{name}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
         }
         Cmd::Get { id } => {
             let n = open()?.get(&id)?;
@@ -922,6 +942,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     by: u.by,
                     paths: u.paths,
                     refs: u.refs,
+                    slug: u.slug,
                     ..Default::default()
                 },
             )?;
@@ -931,6 +952,17 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text = read_body_arg(Some(text), None)?.unwrap_or_default();
             let n = ops::append(&open()?, &id, &text)?;
             out.emit(format!("appended to {}  {}", n.id, n.title), n.to_json());
+        }
+        Cmd::Slugs { backfill, open_only, project, yes } => {
+            let v = open()?;
+            if backfill {
+                let named = crate::slug::backfill(&v, &crate::slug::Backfill { open_only, project, write: yes })?;
+                out.emit(crate::slug::backfill_text(&named, yes), Json::Array(named.iter().map(|n| json!({"slug": n.slug(), "id": n.id, "title": n.title})).collect()));
+            } else {
+                let named: Vec<_> = v.load_notes().into_iter().filter(|n| n.slug().is_some() && project.as_ref().is_none_or(|p| n.project.as_ref() == Some(p))).collect();
+                let text: Vec<String> = named.iter().map(|n| format!("{}  {}", n.handle(), crate::format::short_title(&n.title))).collect();
+                out.emit(text.join("\n"), Json::Array(named.iter().map(|n| json!({"slug": n.slug(), "id": n.id, "title": n.title})).collect()));
+            }
         }
         Cmd::Verify { ids } => {
             let ns = ops::verify(&open()?, &ids)?;

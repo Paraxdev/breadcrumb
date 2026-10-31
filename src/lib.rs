@@ -24,6 +24,7 @@ pub mod recall;
 pub mod search;
 pub mod serve;
 pub mod session;
+pub mod slug;
 pub mod stats;
 pub mod upgrade;
 pub mod util;

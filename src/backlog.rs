@@ -198,6 +198,14 @@ pub fn key(n: &Note) -> String {
     }
 }
 
+/// `slug KEY-id`, or the key alone for a note without a slug.
+pub fn named_key(n: &Note) -> String {
+    match n.slug() {
+        Some(s) => format!("{s} {}", key(n)),
+        None => key(n),
+    }
+}
+
 pub fn check_state(s: &str) -> Result<String> {
     let s = s.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     let s = if s == "inprogress" || s == "wip" { "in-progress".to_string() } else { s };
@@ -357,6 +365,7 @@ pub fn sort_items(items: &mut [&Note]) {
 #[derive(Debug, Clone, Serialize)]
 pub struct BoardItem {
     pub id: String,
+    pub slug: Option<String>,
     pub key: String,
     pub kind: String,
     pub title: String,
@@ -383,6 +392,7 @@ impl BoardItem {
     pub fn from_note(n: &Note, idx: &Index) -> BoardItem {
         BoardItem {
             id: n.id.clone(),
+            slug: n.slug(),
             key: key(n),
             kind: n.kind.clone(),
             title: n.title.clone(),
@@ -404,7 +414,8 @@ impl BoardItem {
 
     /// `id kind priority title` plus assignee, blockers and progress, single spaced.
     pub fn short(&self) -> String {
-        let mut s = format!("{} {} {} {}", self.id, self.kind, self.priority, crate::format::short_title(&self.title));
+        let name = self.slug.as_ref().map(|x| format!("{x} ")).unwrap_or_default();
+        let mut s = format!("{name}{} {} {} {}", self.id, self.kind, self.priority, crate::format::fit_title(&self.title, self.slug.as_deref()));
         if let Some(a) = &self.assignee {
             let _ = write!(s, " @{a}{}", if self.claim_stale { " (stale)" } else { "" });
         }
@@ -419,7 +430,8 @@ impl BoardItem {
     }
 
     pub fn line(&self) -> String {
-        let mut s = format!("{}  {:<7} {}  {}", self.key, self.kind, self.priority, self.title);
+        let name = self.slug.as_ref().map(|x| format!("{x}  ")).unwrap_or_default();
+        let mut s = format!("{name}{}  {:<7} {}  {}", self.key, self.kind, self.priority, self.title);
         if let Some(a) = &self.assignee {
             let _ = write!(s, "  @{a}{}", if self.claim_stale { " (stale claim)" } else { "" });
         }
@@ -845,10 +857,11 @@ fn is_sha(s: &str) -> bool {
 }
 
 pub fn move_text(r: &MoveResult) -> String {
+    let name = named_key(&r.note);
     let mut s = if r.changed {
-        format!("{} {}: {} -> {}\n", key(&r.note), r.note.title, r.from, r.to)
+        format!("{name} {}: {} -> {}\n", r.note.title, r.from, r.to)
     } else {
-        format!("{} {}: already in {}\n", key(&r.note), r.note.title, r.to)
+        format!("{name} {}: already in {}\n", r.note.title, r.to)
     };
     if !r.unmet.is_empty() {
         let _ = writeln!(s, "warning: {} acceptance criteria not marked met ([x]), {}:", r.unmet.len(), check_hint(&r.note.id));
@@ -1050,7 +1063,7 @@ pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
 }
 
 pub fn item_summary(n: &Note) -> String {
-    let mut s = format!("{} {} [{}] {} {}", key(n), n.kind, state(n), priority(n), n.title);
+    let mut s = format!("{} {} [{}] {} {}", named_key(n), n.kind, state(n), priority(n), n.title);
     if let Some(a) = assignee(n) {
         let _ = write!(s, " @{a}");
     }

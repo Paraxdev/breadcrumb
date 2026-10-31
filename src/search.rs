@@ -67,6 +67,7 @@ pub fn parse_query(q: &str) -> Query {
 
 struct Prepared {
     title: Vec<String>,
+    slug: Vec<String>,
     tags: Vec<String>,
     refs: Vec<String>,
     fields: Vec<String>,
@@ -78,7 +79,7 @@ struct Prepared {
 fn prepare(n: &Note) -> Prepared {
     let mut fields = vec![];
     for (k, v) in &n.extra {
-        if k.as_str().is_some_and(|k| k == crate::session::SESSION_KEY || k == crate::session::LAST_SESSION_KEY) {
+        if k.as_str().is_some_and(|k| k == crate::session::SESSION_KEY || k == crate::session::LAST_SESSION_KEY || k == crate::slug::SLUG_KEY) {
             continue;
         }
         fields.extend(tokenize(&yaml_display(v)));
@@ -89,6 +90,7 @@ fn prepare(n: &Note) -> Prepared {
     }
     Prepared {
         title: tokenize(&n.title),
+        slug: n.slug().map(|s| tokenize(&s)).unwrap_or_default(),
         tags,
         refs: n.refs().iter().flat_map(|r| tokenize(r)).collect(),
         fields,
@@ -112,6 +114,7 @@ fn token_weight(tokens: &[String], term: &str) -> f64 {
 fn term_score(n: &Note, p: &Prepared, term: &str) -> f64 {
     let mut s = 0.0;
     s += 6.0 * token_weight(&p.title, term);
+    s += 6.0 * token_weight(&p.slug, term);
     s += 4.0 * token_weight(&p.tags, term);
     s += 4.0 * token_weight(&p.refs, term);
     if term.len() >= crate::id::MIN_PREFIX && n.id.starts_with(term) {

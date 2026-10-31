@@ -70,6 +70,6 @@ fn cli_add_names_possible_duplicates_and_search_is_a_short_list() {
     assert!(breadcrumb::format::search_rows(&r, Some("app")).ends_with("5 more, refine the query or narrow with filters\n"));
     let r = ops::search(&v, "cargo target drive windows", &Scope::All, &ops::Filter::default()).unwrap();
     let rows = breadcrumb::format::search_rows(&r, Some("app"));
-    assert!(rows.starts_with(&format!("{} note Shared cargo target on drive D (3/4 terms)", r.hits[0].note.id)), "{rows}");
-    assert!(rows.contains(&format!("{} note Shared cargo target lives on D (2/4 terms)", first.id)) && !rows.contains("Cargo note"), "{rows}");
+    assert!(rows.starts_with(&format!("{} note Shared cargo target on drive D (3/4 terms)", r.hits[0].note.handle())), "{rows}");
+    assert!(rows.contains(&format!("{} note Shared cargo target lives on D (2/4 terms)", first.handle())) && !rows.contains("Cargo note"), "{rows}");
 }

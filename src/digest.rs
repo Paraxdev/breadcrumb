@@ -79,7 +79,8 @@ fn pins_section(notes: &[Note], project: Option<&str>, stale_days: u64, max: usi
     let mut s = PINS_HEAD.to_string();
     let mut rest: Vec<&str> = vec![];
     for n in &pins {
-        let line = format!("{} {} {}{}{}\n", n.id, n.kind, summary(n), scope_suffix(n, project), crate::recall::stale_mark(n, stale_days));
+        let room = SUMMARY_MAX.saturating_sub(n.slug().map_or(0, |s| s.len() + 1));
+        let line = format!("{} {} {}{}{}\n", n.handle(), n.kind, truncate_chars(&summary(n), room), scope_suffix(n, project), crate::recall::stale_mark(n, stale_days));
         if rest.is_empty() && s.chars().count() + line.chars().count() <= max {
             s.push_str(&line);
         } else {
@@ -124,7 +125,7 @@ fn handoff_section(h: &Note, stale_days: u64, max: usize) -> String {
     let by = crate::session::created_by(h).map(|id| format!(", {}", crate::session::label(&id))).unwrap_or_default();
     let head = format!(
         "Latest handoff {} ({}{by}{prev}): {}{}\n",
-        h.id,
+        h.handle(),
         crate::util::fmt_date(&h.created),
         short_title(&h.title),
         crate::recall::stale_mark(h, stale_days)
@@ -199,7 +200,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
             todos.push_str("Todos:\n");
         }
         let prio = n.field("priority").map(yaml_display).map(|p| format!(" {p}")).unwrap_or_default();
-        writeln!(todos, "{} {}{prio}{}", n.id, short_title(&n.title), scope_suffix(n, project))?;
+        writeln!(todos, "{} {}{prio}{}", n.handle(), crate::format::fit_title(&n.title, n.slug().as_deref()), scope_suffix(n, project))?;
     }
     let backlog = crate::backlog::context_section(&notes, &all);
 

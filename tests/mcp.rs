@@ -64,7 +64,7 @@ fn handshake_list_add_search() {
         names,
         ["add", "append", "backlog", "claim", "context", "delete", "doctor", "get", "kinds", "link", "list", "map", "move", "next", "project", "question", "search", "sync", "update", "workflow"]
     );
-    assert!(serde_json::to_string(&out[1]["result"]).unwrap().len() < 7800);
+    assert!(serde_json::to_string(&out[1]["result"]).unwrap().len() < 7900);
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
         assert!(t["inputSchema"]["properties"].is_object(), "{}", t["name"]);
@@ -80,7 +80,7 @@ fn handshake_list_add_search() {
     assert_eq!(note.field("severity"), Some(&serde_yaml::Value::Number(3.into())));
 
     let found = text(&out[3]);
-    assert!(found.starts_with(&format!("{id} gotcha Release checklist for breadcrumb\n")), "{found}");
+    assert!(found.starts_with(&format!("{} gotcha Release checklist for breadcrumb\n", note.handle())), "{found}");
     assert_eq!(out[4]["result"], json!({}));
     assert_eq!(out[5]["error"]["code"], -32601);
     assert_eq!(out[6]["result"]["isError"], true);
@@ -117,7 +117,7 @@ fn version_negotiation_and_get_omits_defaults() {
     let full = text(&out[3]);
     assert!(full.contains("links: []") && full.contains("pinned: false") && full.contains("created:"), "{full}");
     assert_eq!(out[4]["result"]["isError"], true);
-    assert_eq!(text(&out[5]), format!("deleted {} \"Has fields\"", n.id));
+    assert_eq!(text(&out[5]), format!("deleted {} \"Has fields\"", n.handle()));
     assert!(v.get(&n.id).is_err());
 }
 
@@ -170,7 +170,7 @@ fn backlog_tools_and_kinds_define() {
         &[],
     );
     assert!(text(&out[0]).ends_with("idea -> queued"), "{}", text(&out[0]));
-    assert!(text(&out[1]).starts_with(&format!("queued {}", other.id)));
+    assert!(text(&out[1]).starts_with(&format!("queued {}", other.handle())));
     assert!(text(&out[2]).starts_with("claimed\n---\n") && text(&out[2]).contains("assignee: agent-7") && text(&out[2]).contains("Second"), "{}", text(&out[2]));
     assert_eq!(out[3]["result"]["isError"], true, "rejected without resolution must fail");
     assert_eq!(out[4]["result"]["isError"], true, "position only applies to queued");
@@ -214,13 +214,13 @@ fn compact_rows_and_write_acks() {
     assert!(lines.iter().all(|l| !l.contains("  ")), "{list}");
     assert!(!list.contains("(app)"));
     let fb = text(&out[7]);
-    assert!(fb.starts_with(&format!("{} feedback Global preference (global) 20", b.id)), "{fb}");
+    assert!(fb.starts_with(&format!("{} feedback Global preference (global) 20", b.handle())), "{fb}");
     let hit = text(&out[1]);
     let snippet = hit.lines().nth(1).unwrap();
     assert!(snippet.starts_with("  lorem") && snippet.trim().chars().count() <= 100, "{hit}");
     let title = breadcrumb::format::short_title(&a.title);
     assert!(title.chars().count() == 80);
-    assert_eq!(text(&out[2]), format!("appended {} \"{title}\"", a.id));
+    assert_eq!(text(&out[2]), format!("appended {} \"{title}\"", a.handle()));
     assert_eq!(text(&out[3]), format!("linked {} depends-on {}", a.id, b.id));
     assert!(text(&out[4]).starts_with("updated "));
     assert_eq!(v.get(&a.id).unwrap().tags, vec!["y".to_string()]);

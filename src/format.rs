@@ -13,7 +13,7 @@ pub fn note_line(n: &Note) -> String {
     if n.is_archived() {
         flags.push_str(" [archived]");
     }
-    format!("{}  {:<12} {:<14} {}{}  ({})", n.id, n.kind, n.scope_label(), n.title, flags, fmt_date(&n.updated))
+    format!("{}  {:<12} {:<14} {}{}  ({})", n.handle(), n.kind, n.scope_label(), n.title, flags, fmt_date(&n.updated))
 }
 
 pub fn notes_text(notes: &[Note]) -> String {
@@ -39,7 +39,7 @@ pub fn search_text(r: &SearchResult, scope_label: &str) -> String {
         return s;
     }
     for h in &r.hits {
-        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}", h.note.id, h.note.kind, h.note.scope_label(), h.note.title, hit_flags(r, h));
+        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}", h.note.handle(), h.note.kind, h.note.scope_label(), h.note.title, hit_flags(r, h));
         if !h.snippet.is_empty() {
             let _ = writeln!(s, "    {}", h.snippet);
         }
@@ -56,9 +56,15 @@ pub fn short_title(t: &str) -> String {
     crate::util::truncate_chars(&crate::util::one_line(t), TITLE_MAX)
 }
 
+/// Compact lines keep their width with a slug in front, its words already say what the end of the title would.
+pub fn fit_title(t: &str, slug: Option<&str>) -> String {
+    let room = TITLE_MAX.saturating_sub(slug.map_or(0, |s| s.len() + 1)).max(40);
+    crate::util::truncate_chars(&crate::util::one_line(t), room)
+}
+
 /// `id kind title`, plus the project when it is not `current`, plus flags and optionally the date.
 pub fn row(n: &Note, current: Option<&str>, date: bool) -> String {
-    let mut s = format!("{} {} {}", n.id, n.kind, short_title(&n.title));
+    let mut s = format!("{} {} {}", n.handle(), n.kind, fit_title(&n.title, n.slug().as_deref()));
     if let Some(p) = env_path(n) {
         let _ = write!(s, ": {p}");
     }
@@ -181,9 +187,9 @@ pub fn note_compact(n: &Note, full: bool) -> String {
     if body.is_empty() { format!("---\n{yaml}---\n") } else { format!("---\n{yaml}---\n{body}\n") }
 }
 
-/// One line write acknowledgement: `verb id "title"`.
+/// One line write acknowledgement: `verb slug id "title"`.
 pub fn ack(verb: &str, n: &Note) -> String {
-    format!("{verb} {} \"{}\"", n.id, short_title(&n.title))
+    format!("{verb} {} \"{}\"", n.handle(), short_title(&n.title))
 }
 
 pub fn kinds_compact(kinds: &[KindDef]) -> String {

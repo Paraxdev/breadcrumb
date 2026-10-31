@@ -53,7 +53,7 @@ fn cli_end_to_end() {
     assert_eq!(list.as_array().unwrap().len(), 1);
     let hits = json(&v, &["search", "--all", "stdin"]);
     assert_eq!(hits["hits"][0]["id"], id.as_str());
-    assert!(ok(&v, &["context", "--global"]).contains(&format!("Pinned (get an id for its body):\n{id} gotcha From stdin\n")));
+    assert!(ok(&v, &["context", "--global"]).contains(&format!("Pinned (get an id for its body):\n{} {id} gotcha From stdin\n", got["slug"].as_str().unwrap())));
 
     let o = breadcrumb(&v, &["delete", &id], None);
     assert!(!o.status.success());
@@ -76,7 +76,7 @@ fn cli_end_to_end() {
     assert!(json(&v, &["list", "--global", "--ref", "wf_9"]).as_array().unwrap().is_empty());
     assert!(ok(&v, &["delete", &id, "--yes"]).contains("deleted"));
     let guide = ok(&v, &["guide"]);
-    assert!(guide.contains("context") && guide.chars().count() < 1450);
+    assert!(guide.contains("context") && guide.chars().count() < 1500);
     let st = json(&v, &["stats"]);
     for k in ["tools/list", "instructions", "hook", "context"] {
         assert!(st[k]["chars"].as_u64().unwrap() > 0 && st[k]["tokens"].as_u64().unwrap() > 0, "{st}");

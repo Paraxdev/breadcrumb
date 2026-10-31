@@ -20,7 +20,7 @@ Notes are plain markdown files with YAML frontmatter, every write is a git commi
 
 ## Digest
 
-The digest (`breadcrumb context`, the `context` tool and the SessionStart hook) fits in about 6000 chars, so nothing important is cut off at the end. Every pinned note gets one line, `id kind summary`, from its `summary` field (`breadcrumb add --summary ...`) or else its title's first sentence, decisions and preferences first and newest first, and agents `get` the body when they need it. Then the project's latest handoff in full, the unpinned preferences on one line, the backlog and recent notes. One handoff per project is live: a new one supersedes the current one (a `supersedes` link) and unpins older ones. Superseded notes, by a `supersedes` link, a `superseded` tag or `decision_status: superseded`, never show in the digest.
+The digest (`breadcrumb context`, the `context` tool and the SessionStart hook) fits in about 6000 chars, so nothing important is cut off at the end. Every pinned note gets one line, `slug id kind summary`, from its `summary` field (`breadcrumb add --summary ...`) or else its title's first sentence, decisions and preferences first and newest first, and agents `get` the body when they need it. Then the project's latest handoff in full, the unpinned preferences on one line, the backlog and recent notes. One handoff per project is live: a new one supersedes the current one (a `supersedes` link) and unpins older ones. Superseded notes, by a `supersedes` link, a `superseded` tag or `decision_status: superseded`, never show in the digest.
 
 ## Expiring notes
 
@@ -33,6 +33,10 @@ A permission or rule meant for one night or one batch gets `--expires` (`expires
 ## Who wrote what
 
 Every `add` stamps the session id in the `session` frontmatter key, every later `append`, `update`, `move`, `claim` or `release` stamps `last_session` when it was another session. Both come from `CLAUDE_CODE_SESSION_ID`, which Bash children, hooks and the MCP server all have. Old notes and notes old binaries write have no stamp and behave as before. An append starts with a line like `2026-10-31 neocad-4b a03e0d0a:`, a history line ends in `(by neocad-4b a03e0d0a)` or `(by lead a03e0d0a)` with `--by lead`, so never type dates or session ids by hand. The id stays because a name changes across a restart. `get` ends with `written by ...` in today's names, from `~/.claude/sessions`. `breadcrumb::session` has what other features need: `current()` for who this process is, `is_alive(id, 8 character prefix or name)`, `label(id)` for the name or the short id, `signature(id)` for both, `last_writer(note)`.
+
+## Slugs
+
+Every new note gets a short readable name beside its id, in the `slug` frontmatter key: two to four words from its title like `stress-auto-mesh`, filler words skipped, always with a hyphen so it can never be read as an id, unique across the vault with a number on a clash. `add --slug` or the MCP `slug` argument sets a better one, a retitle never changes it, `update --slug` renames on purpose and old messages then stop resolving. Every command and MCP tool that takes an id takes a slug too, links store the id. Digest, board, search, list and move print `slug id` and always keep the id, since an old MCP server cannot resolve a slug. Notes without a slug work as before and show the id alone. `crumb add` keeps the id right after `added` for scripts. `breadcrumb slugs --backfill [--open-only] [--project p] [--yes]` names notes that lack one, dry unless `--yes`, open items first, without touching `updated`, and is safe to repeat. Maps, workflows and imported notes get theirs from the backfill. In messages to the user write the slug, with plain words beside it when it matters.
 
 ## Claims
 

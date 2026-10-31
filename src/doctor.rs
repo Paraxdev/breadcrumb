@@ -126,6 +126,10 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
         if !crate::id::is_valid_id(&n.id) {
             err(path.clone(), id.clone(), "warning", format!("id '{}' is not an 8 character base32 id", n.id));
         }
+        if let Some(s) = n.slug()
+            && notes.iter().any(|o| o.id != n.id && o.slug().as_deref() == Some(s.as_str())) {
+                err(path.clone(), id.clone(), "warning", format!("slug '{s}' is used by several notes, rename one with `breadcrumb update --slug`"));
+            }
         if let Some(paths) = ids.get(&n.id)
             && paths.len() > 1 && paths.first() == Some(&path) {
                 err(path.clone(), id.clone(), "error", format!("duplicate id {} in: {}", n.id, paths.join(", ")));

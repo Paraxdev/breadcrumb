@@ -254,7 +254,7 @@ impl FieldDef {
                 };
             }
             FieldType::List => matches!(v, Value::Sequence(s) if s.iter().all(|x| yaml_scalar_string(x).is_some())),
-            FieldType::Ref => matches!(v, Value::String(s) if s.len() >= crate::id::MIN_PREFIX && s.chars().all(crate::id::is_id_char)),
+            FieldType::Ref => matches!(v, Value::String(s) if (s.len() >= crate::id::MIN_PREFIX && s.chars().all(crate::id::is_id_char)) || crate::slug::is_valid(s)),
             FieldType::Url => matches!(v, Value::String(s) if is_url(s)),
         };
         if ok {

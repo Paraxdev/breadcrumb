@@ -441,6 +441,19 @@ impl Note {
         self.set_field(VERIFIED_KEY, Value::String(crate::util::fmt_date(&now())));
     }
 
+    /// The short name, None for notes without one and for a value that could be mistaken for an id.
+    pub fn slug(&self) -> Option<String> {
+        self.field(crate::slug::SLUG_KEY).and_then(yaml_scalar_string).filter(|s| crate::slug::is_valid(s))
+    }
+
+    /// `slug id`, or the id alone. The id always stays since old MCP servers cannot resolve a slug.
+    pub fn handle(&self) -> String {
+        match self.slug() {
+            Some(s) => format!("{s} {}", self.id),
+            None => self.id.clone(),
+        }
+    }
+
     pub fn file_name(&self) -> String {
         let slug = crate::util::slugify(&self.title, 60);
         let slug = if slug.is_empty() { "note".to_string() } else { slug };
