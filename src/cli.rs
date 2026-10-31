@@ -485,7 +485,7 @@ pub enum Cmd {
         #[arg(long = "ref", alias = "refs", value_name = "REF", allow_hyphen_values = true)]
         refs: Vec<String>,
     },
-    /// What a range of commits landed: release note lines, items, merges no item points at, --yes moves the items to shipped
+    /// What a range of commits landed: release note lines, items, merges no item points at, --yes moves those in review or done to shipped
     Ship {
         /// A git range like origin/main..dev
         range: String,
@@ -498,7 +498,7 @@ pub enum Cmd {
         /// Set shipped_in on the moved items
         #[arg(long = "in", value_name = "NAME")]
         shipped_in: Option<String>,
-        /// Move the matched open items, without it nothing changes
+        /// Move the matched items in review or done, without it nothing changes
         #[arg(long)]
         yes: bool,
         /// Who did it, for the history (default: this session)
@@ -1655,9 +1655,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             if yes {
                 let ids: Vec<String> = report.open.iter().map(|n| n.id.clone()).collect();
                 let moved = backlog::ship_items(&v, &ids, shipped_in.as_deref(), by.as_deref())?;
+                text.push_str(&crate::ship::unchecked_text(&report));
                 text.push_str(&format!("\nMoved {} items to shipped in one vault commit\n", moved.len()));
                 data["moved"] = json!(moved.len());
             } else {
+                text.push_str(&crate::ship::unchecked_text(&report));
                 text.push_str(&crate::ship::unrecorded_text(&report));
                 text.push_str(&format!("\nDry run, --yes moves {} items to shipped\n", report.open.len()));
                 data["moved"] = json!(0);

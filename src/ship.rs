@@ -50,8 +50,10 @@ fn records_landing(n: &Note) -> bool {
 
 #[derive(Debug, Default)]
 pub struct Report {
-    /// Matched items still open, they move on --yes.
+    /// Matched items in review or done, they move on --yes.
     pub open: Vec<Note>,
+    /// Matched items that stay where they are, with the reason.
+    pub not_landed: Vec<(Note, String)>,
     pub closed: Vec<Note>,
     pub unmatched_merges: Vec<Commit>,
     /// Done items of the project with nothing that says where they landed, no range can ever match them.
@@ -62,7 +64,9 @@ pub struct Report {
 
 pub fn report(v: &Vault, project: &str, commits: &[Commit]) -> Result<Report> {
     let scope = Scope::Project { slug: project.to_string(), with_global: false };
-    let notes = crate::ops::filter_notes(v.load_notes(), &scope, &Filter::default())?;
+    let all = v.load_notes();
+    let idx = backlog::Index::new(&all);
+    let notes = crate::ops::filter_notes(all.clone(), &scope, &Filter::default())?;
     let mut hit: HashSet<&str> = HashSet::new();
     let mut r = Report { commits: commits.len(), merges: commits.iter().filter(|c| c.merge).count(), ..Default::default() };
     for n in notes.iter().filter(|n| backlog::is_item(n)) {
@@ -76,12 +80,15 @@ pub fn report(v: &Vault, project: &str, commits: &[Commit]) -> Result<Report> {
         hit.extend(found);
         if matches!(backlog::state(n).as_str(), "shipped" | "rejected") {
             r.closed.push(n.clone());
+        } else if let Some(why) = backlog::ship_blocker(n, &idx) {
+            r.not_landed.push((n.clone(), why));
         } else {
             r.open.push(n.clone());
         }
     }
     let order = |n: &Note| (state_order(&backlog::state(n)), n.created);
     r.open.sort_by_key(order);
+    r.not_landed.sort_by_key(|(n, _)| order(n));
     r.closed.sort_by_key(order);
     r.unrecorded.sort_by_key(|n| n.created);
     r.unmatched_merges = commits.iter().filter(|c| c.merge && !hit.contains(c.sha.as_str())).cloned().collect();
@@ -100,7 +107,11 @@ pub fn release_note(n: &Note) -> Option<String> {
 fn state_label(n: &Note) -> String {
     let st = backlog::state(n);
     let open = backlog::review_steps(n).len();
-    if st == "review" && open > 0 { format!("{st}, {open} steps unchecked") } else { st }
+    match open {
+        1 if st == "review" => format!("{st}, 1 step unchecked"),
+        2.. if st == "review" => format!("{st}, {open} steps unchecked"),
+        _ => st,
+    }
 }
 
 fn item_line(n: &Note) -> String {
@@ -115,13 +126,22 @@ fn section(s: &mut String, head: &str, lines: Vec<String>) {
 }
 
 pub fn text(r: &Report, range: &str, repo: &Path) -> String {
-    let mut s = format!("{range} in {}: {} commits, {} merges, {} open items match\n", repo.display(), r.commits, r.merges, r.open.len());
+    let mut s = format!("{range} in {}: {} commits, {} merges, {} items landed, {} matched but not landed\n", repo.display(), r.commits, r.merges, r.open.len(), r.not_landed.len());
     let (noted, plain): (Vec<&Note>, Vec<&Note>) = r.open.iter().partition(|n| release_note(n).is_some());
     section(&mut s, "Release notes", noted.iter().map(|n| format!("- {} [{}, {}]", release_note(n).unwrap_or_default(), n.id, state_label(n))).collect());
     section(&mut s, "No release note", plain.iter().map(|n| item_line(n)).collect());
+    section(&mut s, "Matched but not landed, not moved", r.not_landed.iter().map(|(n, why)| format!("{}: {why}", item_line(n))).collect());
     section(&mut s, "Already shipped or rejected, skipped", r.closed.iter().map(item_line).collect());
     section(&mut s, "Merges no item points at", r.unmatched_merges.iter().map(|c| format!("{} {}", &c.sha[..c.sha.len().min(9)], c.subject)).collect());
     s
+}
+
+/// Empty when no moving item has steps left, the code ships whether or not the user got to them.
+pub fn unchecked_text(r: &Report) -> String {
+    match r.open.iter().filter(|n| backlog::state(n) == "review" && !backlog::review_steps(n).is_empty()).count() {
+        0 => String::new(),
+        c => format!("\n{c} of these in review still have unchecked steps, they ship anyway\n"),
+    }
 }
 
 /// Empty when every done item says where it landed.
@@ -141,6 +161,7 @@ pub fn json(r: &Report, range: &str, repo: &Path) -> Json {
         "commits": r.commits,
         "merges": r.merges,
         "open": r.open.iter().map(item).collect::<Vec<_>>(),
+        "not_moved": r.not_landed.iter().map(|(n, why)| { let mut j = item(n); j["reason"] = json!(why); j }).collect::<Vec<_>>(),
         "skipped": r.closed.iter().map(item).collect::<Vec<_>>(),
         "unmatched_merges": r.unmatched_merges.iter().map(|c| json!({"sha": c.sha, "subject": c.subject})).collect::<Vec<_>>(),
         "unrecorded_done": r.unrecorded.iter().map(item).collect::<Vec<_>>(),

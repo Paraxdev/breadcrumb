@@ -208,6 +208,11 @@ pub fn held_by_other(n: &Note, who: Option<&str>) -> Option<String> {
     Some(a)
 }
 
+/// The name to show for the holder of a claim.
+pub fn holder_name(n: &Note) -> Option<String> {
+    assignee(n).map(|a| crate::session::holder(&a))
+}
+
 fn age(n: &Note) -> String {
     let mins = (now() - n.updated).num_minutes().max(0);
     if mins < 120 { format!("{mins} min") } else { format!("{} h", mins / 60) }
@@ -481,7 +486,7 @@ impl BoardItem {
             priority: priority(n),
             rank: rank(n),
             assignee: assignee(n),
-            holder: assignee(n).map(|a| crate::session::holder(&a)),
+            holder: holder_name(n),
             age: crate::util::short_age(&last_activity(n)),
             building: being_built(n),
             claimed: str_field(n, CLAIMED_KEY),
@@ -1148,15 +1153,35 @@ pub fn move_items(v: &Vault, ids: &[String], req: &MoveReq) -> Result<Vec<(Strin
     Ok(out)
 }
 
-/// Moves items to shipped in one vault commit and returns the ones it moved. One already closed by now stays as it is.
+/// Why `ship` leaves a matched item where it is. A commit ref alone says nothing: a failed review goes back to queued
+/// with its ref, an idea's text can name a commit and another session can hold the item.
+pub fn ship_blocker(n: &Note, idx: &Index) -> Option<String> {
+    let st = state(n);
+    if !matches!(st.as_str(), "review" | "done") {
+        return Some(match assignee(n) {
+            Some(_) if !claim_stale(n) => format!("not in review or done, held by {}", holder_name(n).unwrap_or_default()),
+            _ => "not in review or done".to_string(),
+        });
+    }
+    if crate::question::locked(n) {
+        return Some("has an open question".to_string());
+    }
+    let open = idx.children(&n.id).iter().filter(|c| !is_closed(&state(c))).count();
+    (n.kind == "epic" && open > 0).then(|| format!("epic with {open} open children"))
+}
+
+/// Moves items to shipped in one vault commit and returns the ones it moved. One that stopped qualifying by now stays
+/// as it is.
 pub fn ship_items(v: &Vault, ids: &[String], shipped_in: Option<&str>, by: Option<&str>) -> Result<Vec<Note>> {
     let shipped_in = shipped_in.map(str::trim).filter(|s| !s.is_empty());
     let _g = v.lock()?;
+    let all = v.load_notes();
+    let idx = Index::new(&all);
     let mut items = vec![];
     for id in ids {
         let mut n = get_item(v, id)?;
         let from = state(&n);
-        if matches!(from.as_str(), "shipped" | "rejected") {
+        if ship_blocker(&n, &idx).is_some() {
             continue;
         }
         n.set_field("state", Value::String("shipped".into()));
@@ -1174,7 +1199,6 @@ pub fn ship_items(v: &Vault, ids: &[String], shipped_in: Option<&str>, by: Optio
         return Ok(items);
     }
     // Notes with `expires: until:<item>` stop holding now, one may wait for several items or be shipped itself.
-    let all = v.load_notes();
     let mut waiting: HashMap<String, Note> = HashMap::new();
     for n in &items {
         waiting.extend(crate::lifecycle::waiting_for(&all, &n.id).into_iter().map(|w| (w.id.clone(), w)));

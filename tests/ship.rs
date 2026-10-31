@@ -175,13 +175,12 @@ fn every_hex_word_of_shipped_in_counts() {
 }
 
 #[test]
-fn yes_moves_every_open_state_in_one_vault_commit_and_records_who() {
+fn yes_moves_review_and_done_in_one_vault_commit_and_records_who() {
     let (_d, v) = common::vault();
     let r = repo();
     let sha = commit_ref(&r.merge, 9);
     let rev = item(&v, "In review", "review", &sha, None);
     let done = item(&v, "Done", "done", &sha, None);
-    let queued = item(&v, "Queued", "queued", &sha, None);
     let gone = item(&v, "Already shipped", "shipped", &sha, Some("beta 1"));
     let no = item(&v, "Rejected", "rejected", &sha, None);
     let rule = common::add(&v, "Holds until review ships", "note", Some("app"), &[]).id;
@@ -190,9 +189,9 @@ fn yes_moves_every_open_state_in_one_vault_commit_and_records_who() {
     let before = vault_commits(&v);
     let (ok, out, err) = ship(&v, &r, &["--yes", "--in", "beta 1.0.400", "--by", "lead"]);
     assert!(ok, "{err}");
-    assert!(out.contains("Moved 3 items"), "{out}");
+    assert!(out.contains("Moved 2 items"), "{out}");
     assert_eq!(vault_commits(&v), before + 1, "one vault commit");
-    for id in [&rev, &done, &queued] {
+    for id in [&rev, &done] {
         let n = v.get(id).unwrap();
         assert_eq!(backlog::state(&n), "shipped");
         assert_eq!(n.field("shipped_in").and_then(|x| x.as_str()), Some("beta 1.0.400"));
@@ -272,4 +271,45 @@ fn the_done_section_stays_away_when_nothing_is_unrecorded() {
     item(&v, "Done and recorded", "done", &commit_ref(&r.merge, 9), None);
     let (_, out, _) = ship(&v, &r, &[]);
     assert!(!out.contains("Done with no commit ref"), "{out}");
+}
+
+#[test]
+fn only_landed_items_move_and_the_rest_say_why() {
+    let (_d, v) = common::vault();
+    let r = repo();
+    let sha = commit_ref(&r.merge, 9);
+    let landed = item(&v, "Landed", "review", &sha, None);
+    crumb(&v, &["move", &landed, "review", "--step", "Look at it"]);
+    let failed = item(&v, "Failed review", "review", &sha, None);
+    let (ok, _, err) = crumb(&v, &["review", "fail", &failed, "--reason", "broken"]);
+    assert!(ok, "{err}");
+    let held = item(&v, "Held elsewhere", "in-progress", &sha, None);
+    crumb(&v, &["claim", &held, "--by", "lead-b"]);
+    let idea = item(&v, "An idea", "idea", &sha, None);
+    let asks = item(&v, "Asks the user", "review", &sha, None);
+    crumb(&v, &["ask", &asks, "Which?", "-o", "a: one", "-o", "b: two"]);
+    let epic = common::add(&v, "Parent epic", "epic", Some("app"), &[]).id;
+    backlog::move_item(&v, &epic, MoveReq { state: "done".into(), refs: sha.clone(), ..Default::default() }).unwrap();
+    let child = common::add(&v, "Open child", "task", Some("app"), &[]).id;
+    crumb(&v, &["update", &child, "--field", &format!("parent={epic}")]);
+
+    let (ok, out, err) = ship(&v, &r, &["--yes"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("Moved 1 items"), "{out}");
+    assert!(out.contains("1 of these in review still have unchecked steps, they ship anyway"), "{out}");
+    assert!(out.contains("[review, 1 step unchecked]"), "{out}");
+    assert_eq!(state_of(&v, &landed), "shipped");
+    let head = out.find("Matched but not landed, not moved (5)").unwrap_or_else(|| panic!("{out}"));
+    for (id, state, why) in [(&failed, "queued", "not in review or done"), (&held, "in-progress", "held by lead-b"), (&idea, "idea", "not in review or done"), (&asks, "review", "open question"), (&epic, "done", "epic with 1 open children")] {
+        assert_eq!(state_of(&v, id), state);
+        let line = out[head..].lines().find(|l| l.contains(id.as_str())).unwrap_or_else(|| panic!("{id}: {out}"));
+        assert!(line.contains(&format!("[{state}")) && line.contains(why), "{line}");
+    }
+    let (ok, json, _) = ship(&v, &r, &["--json"]);
+    assert!(ok && json.contains("not_moved") && json.contains("reason"), "{json}");
+
+    crumb(&v, &["move", &child, "rejected", "--resolution", "no"]);
+    let (_, out, _) = ship(&v, &r, &["--yes"]);
+    assert!(out.contains("Moved 1 items"), "an epic moves once its children closed: {out}");
+    assert_eq!(state_of(&v, &epic), "shipped");
 }
