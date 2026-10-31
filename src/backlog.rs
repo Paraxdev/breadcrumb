@@ -199,10 +199,15 @@ fn end_build_refs(n: &mut Note, from: &str, keep: &[String], by: Option<&str>) {
     }
 }
 
+/// Whether `who` holds the item's claim, however it names itself.
+fn is_holder(n: &Note, who: &str) -> bool {
+    assignee(n).is_some_and(|a| crate::session::same_holder(&a, who))
+}
+
 /// The assignee while the claim is fresh, unless that is `who`.
 pub fn held_by_other(n: &Note, who: Option<&str>) -> Option<String> {
     let a = assignee(n)?;
-    if who.is_some_and(|w| w.eq_ignore_ascii_case(&a)) || claim_stale(n) {
+    if who.is_some_and(|w| is_holder(n, w)) || claim_stale(n) {
         return None;
     }
     Some(a)
@@ -233,13 +238,12 @@ pub fn claim(v: &Vault, id: &str, by: &str, force: bool) -> Result<Note> {
     if let Some(q) = crate::question::open_questions(&n).first() {
         bail!("{} is waiting on the user, question {}: {}. Work on something else, the user answers with `breadcrumb answer {}`", n.id, crate::question::qid(&n, q), q.text, crate::question::qid(&n, q));
     }
-    if let Some(h) = held_by_other(&n, Some(&by))
-        && !force
-    {
-        bail!("{} is claimed by {}, last written {} ago, pass force to take it over", n.id, crate::session::holder(&h), age(&n));
+    if held_by_other(&n, Some(&by)).is_some() && !force {
+        bail!("{} is claimed by {}, last written {} ago, pass force to take it over", n.id, holder_name(&n).unwrap_or_default(), age(&n));
     }
+    let mine = is_holder(&n, &by);
     let (what, by) = match assignee(&n) {
-        Some(p) if !p.eq_ignore_ascii_case(&by) => (format!("claim taken over from {p}"), by),
+        Some(p) if !mine => (format!("claim taken over from {p}"), by),
         Some(p) => ("claim renewed".to_string(), p),
         None => ("claimed".to_string(), by),
     };
@@ -256,13 +260,11 @@ pub fn release(v: &Vault, id: &str, by: &str, force: bool) -> Result<Option<Note
     let _g = v.lock()?;
     let mut n = get_item(v, id)?;
     let Some(holder) = assignee(&n) else { return Ok(None) };
-    if let Some(h) = held_by_other(&n, Some(&by))
-        && !force
-    {
-        bail!("{} is claimed by {h}, not {by}, pass force to release it anyway", n.id);
+    if held_by_other(&n, Some(&by)).is_some() && !force {
+        bail!("{} is claimed by {}, not {by}, pass force to release it anyway", n.id, holder_name(&n).unwrap_or_default());
     }
+    let what = if is_holder(&n, &by) { "released".to_string() } else { format!("released the claim of {holder}") };
     clear_claim(&mut n);
-    let what = if holder.eq_ignore_ascii_case(&by) { "released".to_string() } else { format!("released the claim of {holder}") };
     n.body = append_history(&n.body, &event_line(&what, &by));
     save(v, &mut n, "release")?;
     Ok(Some(n))
@@ -585,7 +587,7 @@ fn waiting_items(all: &[Note], ids: &HashSet<&str>, f: &BoardFilter, idx: &Index
         .iter()
         .filter(|n| ids.contains(n.id.as_str()) && crate::question::locked(n))
         .filter(|n| f.kind.as_ref().is_none_or(|k| n.kind.eq_ignore_ascii_case(k)))
-        .filter(|n| f.assignee.as_ref().is_none_or(|a| assignee(n).is_some_and(|x| x.eq_ignore_ascii_case(a))))
+        .filter(|n| f.assignee.as_ref().is_none_or(|a| is_holder(n, a)))
         .collect();
     sort_items(&mut items);
     items.iter().map(|n| BoardItem::from_note(n, idx)).collect()
@@ -604,7 +606,7 @@ pub fn board(v: &Vault, scope: &Scope, f: &BoardFilter) -> Result<Vec<Column>> {
             .iter()
             .filter(|n| ids.contains(n.id.as_str()) && state(n) == st && !crate::question::locked(n) && being_built(n).is_none())
             .filter(|n| f.kind.as_ref().is_none_or(|k| n.kind.eq_ignore_ascii_case(k)))
-            .filter(|n| f.assignee.as_ref().is_none_or(|a| assignee(n).is_some_and(|x| x.eq_ignore_ascii_case(a))))
+            .filter(|n| f.assignee.as_ref().is_none_or(|a| is_holder(n, a)))
             .collect();
         sort_items(&mut items);
         cols.push(Column { state: st.to_string(), items: items.iter().map(|n| BoardItem::from_note(n, &idx)).collect() });
@@ -613,7 +615,7 @@ pub fn board(v: &Vault, scope: &Scope, f: &BoardFilter) -> Result<Vec<Column>> {
                 .iter()
                 .filter(|n| ids.contains(n.id.as_str()) && being_built(n).is_some() && !crate::question::locked(n))
                 .filter(|n| f.kind.as_ref().is_none_or(|k| n.kind.eq_ignore_ascii_case(k)))
-                .filter(|n| f.assignee.as_ref().is_none_or(|a| assignee(n).is_some_and(|x| x.eq_ignore_ascii_case(a))))
+                .filter(|n| f.assignee.as_ref().is_none_or(|a| is_holder(n, a)))
                 .collect();
             sort_items(&mut built);
             if !built.is_empty() {
@@ -775,11 +777,11 @@ pub fn next_notice(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, clai
         .filter(|n| ids.contains(n.id.as_str()) && !crate::question::locked(n))
         .filter(|n| crate::question::answered_unseen(n) && state(n) != "rejected" || state(n) == "queued" && !idx.is_blocked(n))
         .filter(|n| match (assignee_filter, assignee(n)) {
-            (Some(want), Some(have)) => have.eq_ignore_ascii_case(want),
+            (Some(want), Some(_)) => is_holder(n, want),
             _ => true,
         })
         .filter(|n| held_by_other(n, who).is_none())
-        .filter(|n| being_built(n).is_none() || who.is_some_and(|w| assignee(n).is_some_and(|a| a.eq_ignore_ascii_case(w))))
+        .filter(|n| being_built(n).is_none() || who.is_some_and(|w| is_holder(n, w)))
         .collect();
     sort_items(&mut cands);
     cands.sort_by_key(|n| !crate::question::answered_unseen(n));

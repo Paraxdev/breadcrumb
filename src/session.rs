@@ -118,6 +118,17 @@ fn matches(s: &Live, who: &str) -> bool {
     s.id == who || (who.chars().count() >= SHORT_LEN && s.id.starts_with(who)) || s.name.as_deref() == Some(who)
 }
 
+/// Whether two ways to name a holder, an id, an id prefix or a live name, are one holder.
+pub fn same_holder(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    let live = live_sessions();
+    let find = |who: &str| live.iter().find(|s| matches(s, who)).map(|s| s.id.as_str());
+    find(a).is_some_and(|id| find(b) == Some(id))
+}
+
 /// The 8 character id claims store or a whole session id. Anything else is free text no session file can match.
 fn looks_like_id(who: &str) -> bool {
     let hex = |s: &str| s.chars().all(|c| c.is_ascii_hexdigit());

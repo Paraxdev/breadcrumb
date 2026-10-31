@@ -77,6 +77,31 @@ fn go_quiet(v: &Vault, id: &str) {
 }
 
 #[test]
+fn a_live_name_and_its_id_are_one_holder() {
+    let e = setup();
+    let id = queued(&e, "Held under two names");
+    assert!(crumb(&e, LIVE, "pc-a", &["claim", &id]).0);
+
+    let (ok, out) = crumb(&e, LIVE, "pc-a", &["claim", &id, "--by", "neocad-live"]);
+    assert!(ok, "the name it shows works as the holder: {out}");
+    assert_eq!(backlog::assignee(&e.v.get(&id).unwrap()).as_deref(), Some(&LIVE[..8]), "a renewal keeps what was stored");
+    assert!(e.v.get(&id).unwrap().body.contains("claim renewed"));
+    let (ok, out) = crumb(&e, ME, "pc-a", &["board", "--project", "app", "--assignee", "neocad-live"]);
+    assert!(ok && out.contains(&id), "{out}");
+
+    let (ok, out) = crumb(&e, ME, "pc-a", &["release", &id]);
+    assert!(!ok && out.contains("claimed by neocad-live, not "), "the refusal names the holder as the board does: {out}");
+    let (ok, out) = crumb(&e, LIVE, "pc-a", &["release", &id, "--by", "neocad-live"]);
+    assert!(ok, "{out}");
+    let n = e.v.get(&id).unwrap();
+    assert!(backlog::assignee(&n).is_none() && !n.body.contains("released the claim of"), "{}", n.body);
+
+    assert!(crumb(&e, LIVE, "pc-a", &["claim", &id, "--by", "neocad-live"]).0);
+    let (ok, out) = crumb(&e, LIVE, "pc-a", &["claim", &id, "--by", LIVE]);
+    assert!(ok, "a stored name and the whole id too: {out}");
+}
+
+#[test]
 fn an_unreadable_session_file_says_nothing_about_who_is_dead() {
     let e = setup();
     let id = queued(&e, "Claimed by a dead session");
