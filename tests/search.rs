@@ -181,3 +181,12 @@ fn hits_name_the_terms_they_matched() {
     let r = search(vec![note("tttt0001", "Other", &[], "the parser")], "parser");
     assert!(!breadcrumb::format::search_text(&r, "x").contains("(exact)"), "one word needs no label");
 }
+
+#[test]
+fn the_display_form_of_an_id_finds_the_note_itself() {
+    let target = note("wc579n42", "Session stamps", &[], "");
+    let mention = note("uuuu0001", "Epic", &["breadcrumb"], "see BREADCRUMB-wc579n42");
+    let r = search(vec![mention, target], "BREADCRUMB-wc579n42");
+    assert_eq!(r.hits[0].note.id, "wc579n42");
+    assert_eq!(r.hits.len(), 2);
+}

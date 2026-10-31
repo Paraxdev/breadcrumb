@@ -264,7 +264,7 @@ pub fn search(notes: Vec<Note>, q: &str) -> SearchResult {
     let terms = query.terms.len();
     let best = hits.iter().map(|h| h.matched).max().unwrap_or(0);
     let floor = best.saturating_sub(terms / 4).max(1.min(terms));
-    hits.retain(|h| h.matched >= floor || h.exact_identifier);
+    hits.retain(|h| h.matched >= floor || h.exact_identifier || h.own);
     let rank = |h: &Hit| h.score * kind_weight(&h.note.kind) * recency(&h.note);
     hits.sort_by(|a, b| {
         (b.own, b.exact_whole, b.exact, b.matched)
