@@ -109,3 +109,33 @@ fn the_stamps_cannot_be_set_or_unset_by_hand() {
     assert!(!run(&["update", &n.id, "--field", "session=x"]).status.success());
     assert!(!run(&["update", &n.id, "--unset", "last_session"]).status.success());
 }
+
+#[test]
+fn a_session_id_given_as_by_reads_as_the_signature_once() {
+    let d = tempfile::tempdir().unwrap();
+    let (v, _) = breadcrumb::vault::Vault::init(&d.path().join("vault"), None).unwrap();
+    let claude = d.path().join("claude");
+    const ID: &str = "aaaaaaaa-1111-2222-3333-444444444444";
+    session_file(&claude, std::process::id(), ID, "lead-a");
+    let id = added_id(&crumb(&v.root, &claude, ID, &["add", "-k", "task", "-t", "Signed", "--project", "app"]));
+    crumb(&v.root, &claude, ID, &["claim", &id, "--by", ID]);
+    let n = v.get(&id).unwrap();
+    assert!(n.body.contains("(by lead-a aaaaaaaa)") && !n.body.contains("aaaaaaaa-1111"), "{}", n.body);
+    crumb(&v.root, &claude, ID, &["move", &id, "in-progress", "--by", &ID[..8]]);
+    let n = v.get(&id).unwrap();
+    assert!(n.body.contains("-> in-progress (by lead-a aaaaaaaa)"), "{}", n.body);
+}
+
+#[test]
+fn ending_a_build_ref_is_signed_by_the_session_only() {
+    let d = tempfile::tempdir().unwrap();
+    let (v, _) = breadcrumb::vault::Vault::init(&d.path().join("vault"), None).unwrap();
+    let claude = d.path().join("claude");
+    const ID: &str = "aaaaaaaa-1111-2222-3333-444444444444";
+    session_file(&claude, std::process::id(), ID, "lead-a");
+    let id = added_id(&crumb(&v.root, &claude, ID, &["add", "-k", "task", "-t", "Built", "--project", "app"]));
+    crumb(&v.root, &claude, ID, &["move", &id, "in-progress", "--ref", "branch:x"]);
+    crumb(&v.root, &claude, ID, &["move", &id, "queued"]);
+    let n = v.get(&id).unwrap();
+    assert!(n.body.contains("build refs ended: branch:x (by lead-a aaaaaaaa)"), "{}", n.body);
+}

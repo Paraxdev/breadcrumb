@@ -193,8 +193,9 @@ pub fn attribute(by: Option<&str>) -> String {
         let env = std::env::var(crate::backlog::SESSION_ENV).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         return by.map(str::to_string).or(env).unwrap_or_else(|| crate::backlog::DEFAULT_ACTOR.to_string());
     };
-    let (sig, id) = (signature(&id), short(&id));
+    let (sig, full, id) = (signature(&id), id.clone(), short(&id));
     match by {
+        Some(b) if b.len() >= SHORT_LEN && full.starts_with(b) => sig,
         Some(b) if b == sig || b.ends_with(&id) => b.to_string(),
         Some(b) if sig.split(' ').next() != Some(b) => format!("{b} {id}"),
         _ => sig,

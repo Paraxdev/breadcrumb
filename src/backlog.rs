@@ -225,7 +225,7 @@ fn end_build_refs(n: &mut Note, from: &str, keep: &[String], by: Option<&str>) {
     let (ended, kept): (Vec<String>, Vec<String>) = n.refs().into_iter().partition(|r| is_build_ref(r) && !keep.contains(r));
     if !ended.is_empty() {
         n.set_refs(kept);
-        n.body = append_history(&n.body, &event_line(&format!("build refs ended: {}", ended.join(" ")), &actor(by)));
+        n.body = append_history(&n.body, &event_line(&format!("build refs ended: {}", ended.join(" ")), &crate::session::attribute(by)));
     }
 }
 

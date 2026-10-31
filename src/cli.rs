@@ -1268,10 +1268,12 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Update(u) => {
             let v = open()?;
             let pinned = if u.pin { Some(true) } else if u.unpin { Some(false) } else { None };
-            let from_stdin = u.body.as_deref() == Some("-");
+            let source = if u.body_file.is_some() { Some("the body file") } else if u.body.as_deref() == Some("-") { Some("stdin") } else { None };
             let body = read_body_arg(u.body, u.body_file)?;
-            if from_stdin && body.as_deref().is_some_and(|b| b.trim().is_empty()) {
-                bail!("stdin was empty, the body stays as it is, --body \"\" empties it");
+            if let Some(src) = source
+                && body.as_deref().is_some_and(|b| b.trim().is_empty())
+            {
+                bail!("{src} was empty, the body stays as it is, --body \"\" empties it");
             }
             let n = ops::update(
                 &v,

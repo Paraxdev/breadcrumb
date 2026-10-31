@@ -174,3 +174,20 @@ fn search_lines_show_the_state_of_items_only() {
     let rows = srv.call_tool("search", a.as_object().unwrap()).unwrap();
     assert!(rows.contains("[shipped] Zebra task"), "{rows}");
 }
+
+#[test]
+fn an_empty_body_file_is_refused_like_empty_stdin() {
+    let (d, v) = common::vault();
+    let id = common::add(&v, "Keeps its body", "task", Some("app"), &[]).id;
+    let run = |args: &[&str]| {
+        let o = std::process::Command::new(env!("CARGO_BIN_EXE_crumb")).args(args).env("BREADCRUMB_HOME", &v.root).env_remove("CLAUDE_CODE_SESSION_ID").output().unwrap();
+        (o.status.success(), String::from_utf8_lossy(&o.stderr).to_string())
+    };
+    assert!(run(&["update", &id, "--body", "kept text"]).0);
+    let empty = d.path().join("empty.txt");
+    std::fs::write(&empty, "  \n").unwrap();
+    let (ok, err) = run(&["update", &id, "--body-file", empty.to_str().unwrap()]);
+    assert!(!ok && err.contains("the body file was empty"), "{err}");
+    assert!(v.get(&id).unwrap().body.contains("kept text"));
+    assert!(run(&["update", &id, "--body", ""]).0, "--body \"\" still empties it");
+}
