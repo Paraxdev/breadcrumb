@@ -1325,14 +1325,10 @@ pub fn run(cli: Cli) -> Result<i32> {
             let v = open()?;
             let slug = workflow::resolve_project(&v, project.as_deref(), &cwd)?;
             let repo = crate::map::repo_for(&v, &slug, repo.as_deref(), &cwd)?;
-            let commits = match crate::ship::commits(&repo, &range) {
-                Ok(c) => c,
-                Err(e) => {
-                    let line = e.lines().next().unwrap_or_default().to_string();
-                    out.emit(format!("could not read {range} in {}, nothing moved: {line}", repo.display()), json!({"range": range, "error": line, "moved": 0}));
-                    return Ok(0);
-                }
-            };
+            let commits = crate::ship::commits(&repo, &range).map_err(|e| {
+                let line = e.lines().next().unwrap_or_default().to_string();
+                anyhow::anyhow!("could not read {range} in {}, nothing moved: {line}", repo.display())
+            })?;
             let report = crate::ship::report(&v, &slug, &commits)?;
             let mut text = crate::ship::text(&report, &range, &repo);
             let mut data = crate::ship::json(&report, &range, &repo);
@@ -1342,6 +1338,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 text.push_str(&format!("\nMoved {} items to shipped in one vault commit\n", moved.len()));
                 data["moved"] = json!(moved.len());
             } else {
+                text.push_str(&crate::ship::unrecorded_text(&report));
                 text.push_str(&format!("\nDry run, --yes moves {} items to shipped\n", report.open.len()));
                 data["moved"] = json!(0);
             }

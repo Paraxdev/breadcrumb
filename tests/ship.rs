@@ -218,15 +218,58 @@ fn a_review_item_with_open_steps_says_so() {
 }
 
 #[test]
-fn an_unknown_range_is_reported_and_one_ref_is_refused() {
+fn an_unknown_range_fails_and_one_ref_is_refused() {
     let (_d, v) = common::vault();
     let r = repo();
     let repo = r.root.to_str().unwrap();
     let id = item(&v, "Stays", "review", &commit_ref(&r.merge, 9), None);
-    let (ok, out, _) = crumb(&v, &["ship", "nosuch..main", "--repo", repo, "--project", "app", "--yes"]);
-    assert!(ok && out.contains("could not read nosuch..main") && out.contains("nothing moved"), "{out}");
+    let (ok, _, err) = crumb(&v, &["ship", "nosuch..main", "--repo", repo, "--project", "app", "--yes"]);
+    assert!(!ok && err.contains("could not read nosuch..main") && err.contains("nothing moved"), "{err}");
     assert_eq!(state_of(&v, &id), "review");
     let (ok, _, err) = crumb(&v, &["ship", "main", "--repo", repo, "--project", "app", "--yes"]);
     assert!(!ok && err.contains("origin/main..dev"), "{err}");
     assert_eq!(state_of(&v, &id), "review");
+}
+
+#[test]
+fn an_unknown_ref_on_an_item_never_fails_the_range() {
+    let (_d, v) = common::vault();
+    let r = repo();
+    let id = item(&v, "Points nowhere", "review", &["commit:deadbeef".to_string()], None);
+    let (ok, _, err) = ship(&v, &r, &["--yes"]);
+    assert!(ok, "{err}");
+    assert_eq!(state_of(&v, &id), "review");
+}
+
+#[test]
+fn a_dry_run_names_done_items_no_range_can_find_and_leaves_them() {
+    let (_d, v) = common::vault();
+    let r = repo();
+    let lost = item(&v, "Done with no pointer", "done", &[], None);
+    let refd = item(&v, "Done with a commit elsewhere", "done", &["commit:deadbeef".to_string()], None);
+    let named = item(&v, "Done with a shipped_in word", "done", &[], Some("beta"));
+    let open = item(&v, "Still in review", "review", &[], None);
+    let (ok, out, err) = ship(&v, &r, &[]);
+    assert!(ok, "{err}");
+    let (head, tail) = out.split_once("Done with no commit ref or shipped_in").expect(&out);
+    assert!(head.contains("Merges no item points at") && tail.contains(&lost) && tail.contains("Dry run"), "{out}");
+    for other in [&refd, &named, &open] {
+        assert!(!tail.contains(other.as_str()), "{out}");
+    }
+    assert_eq!(state_of(&v, &lost), "done");
+    let (_, json, _) = crumb(&v, &["--json", "ship", "base..main", "--repo", r.root.to_str().unwrap(), "--project", "app"]);
+    let j: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(j["unrecorded_done"][0]["id"], lost.as_str());
+    let (_, wet, _) = ship(&v, &r, &["--yes"]);
+    assert!(!wet.contains("Done with no commit ref"), "{wet}");
+    assert_eq!(state_of(&v, &lost), "done");
+}
+
+#[test]
+fn the_done_section_stays_away_when_nothing_is_unrecorded() {
+    let (_d, v) = common::vault();
+    let r = repo();
+    item(&v, "Done and recorded", "done", &commit_ref(&r.merge, 9), None);
+    let (_, out, _) = ship(&v, &r, &[]);
+    assert!(!out.contains("Done with no commit ref"), "{out}");
 }

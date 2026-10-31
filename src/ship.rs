@@ -19,7 +19,7 @@ pub struct Commit {
     pub subject: String,
 }
 
-/// Git's own message when it cannot read the range, a range naming an unknown ref is reported and not an error.
+/// Git's own message when it cannot read the range.
 pub fn commits(repo: &Path, range: &str) -> std::result::Result<Vec<Commit>, String> {
     let log = crate::git::ok(repo, &["log", "--format=%H%x09%P%x09%s", range, "--"]).map_err(|e| e.to_string())?;
     Ok(log
@@ -50,12 +50,18 @@ pub fn has_commit_pointer(n: &Note) -> bool {
     !pointers(n).is_empty()
 }
 
+fn records_landing(n: &Note) -> bool {
+    n.refs().iter().any(|r| r.starts_with("commit:")) || n.field("shipped_in").and_then(yaml_scalar_string).is_some_and(|s| !s.trim().is_empty())
+}
+
 #[derive(Debug, Default)]
 pub struct Report {
     /// Matched items still open, they move on --yes.
     pub open: Vec<Note>,
     pub closed: Vec<Note>,
     pub unmatched_merges: Vec<Commit>,
+    /// Done items of the project with nothing that says where they landed, no range can ever match them.
+    pub unrecorded: Vec<Note>,
     pub commits: usize,
     pub merges: usize,
 }
@@ -68,6 +74,9 @@ pub fn report(v: &Vault, project: &str, commits: &[Commit]) -> Result<Report> {
     for n in notes.iter().filter(|n| backlog::is_item(n)) {
         let found: Vec<&str> = pointers(n).iter().filter_map(|p| commits.iter().find(|c| c.sha.starts_with(p.as_str())).map(|c| c.sha.as_str())).collect();
         if found.is_empty() {
+            if backlog::state(n) == "done" && !records_landing(n) {
+                r.unrecorded.push(n.clone());
+            }
             continue;
         }
         hit.extend(found);
@@ -80,6 +89,7 @@ pub fn report(v: &Vault, project: &str, commits: &[Commit]) -> Result<Report> {
     let order = |n: &Note| (state_order(&backlog::state(n)), n.created);
     r.open.sort_by_key(order);
     r.closed.sort_by_key(order);
+    r.unrecorded.sort_by_key(|n| n.created);
     r.unmatched_merges = commits.iter().filter(|c| c.merge && !hit.contains(c.sha.as_str())).cloned().collect();
     Ok(r)
 }
@@ -120,6 +130,15 @@ pub fn text(r: &Report, range: &str, repo: &Path) -> String {
     s
 }
 
+/// Empty when every done item says where it landed.
+pub fn unrecorded_text(r: &Report) -> String {
+    let mut s = String::new();
+    if !r.unrecorded.is_empty() {
+        section(&mut s, "Done with no commit ref or shipped_in, no range finds these", r.unrecorded.iter().map(item_line).collect());
+    }
+    s
+}
+
 pub fn json(r: &Report, range: &str, repo: &Path) -> Json {
     let item = |n: &Note| json!({"id": n.id, "slug": n.slug(), "title": n.title, "state": backlog::state(n), "release_note": release_note(n), "unchecked_steps": backlog::review_steps(n)});
     json!({
@@ -130,5 +149,6 @@ pub fn json(r: &Report, range: &str, repo: &Path) -> Json {
         "open": r.open.iter().map(item).collect::<Vec<_>>(),
         "skipped": r.closed.iter().map(item).collect::<Vec<_>>(),
         "unmatched_merges": r.unmatched_merges.iter().map(|c| json!({"sha": c.sha, "subject": c.subject})).collect::<Vec<_>>(),
+        "unrecorded_done": r.unrecorded.iter().map(item).collect::<Vec<_>>(),
     })
 }
