@@ -664,6 +664,12 @@ pub enum RemoteCmd {
 pub struct AddArgs {
     #[arg(long, short = 't')]
     pub title: String,
+    /// A handoff's line of work, a new handoff replaces the live one of its track, or without one its own session's
+    #[arg(long, value_name = "WORD")]
+    pub track: Option<String>,
+    /// Id or slug this note replaces (repeatable), needed for another session's handoff
+    #[arg(long, value_name = "ID")]
+    pub supersedes: Vec<String>,
     #[arg(long, short = 'k')]
     pub kind: Option<String>,
     #[arg(long, short = 'p')]
@@ -889,6 +895,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 Some(p) => v.load_project(p)?.is_none(),
                 None => false,
             };
+            let links = a.supersedes.into_iter().map(|to| crate::note::Link { to, rel: ops::SUPERSEDES.into() }).collect();
             let n = ops::add(
                 &v,
                 AddReq {
@@ -900,9 +907,10 @@ pub fn run(cli: Cli) -> Result<i32> {
                     pinned: a.pin,
                     body: read_body_arg(a.body, a.body_file)?,
                     source: a.source,
-                    links: vec![],
+                    links,
                     paths: a.paths,
                     slug: a.slug,
+                    track: a.track,
                     require_existing_project: false,
                 },
             )?;
@@ -912,6 +920,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
             if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                 created.push_str(&format!("\n{h}"));
+            }
+            if n.kind == ops::HANDOFF {
+                created.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n)));
             }
             let name = n.slug().map(|s| format!("  [{s}]")).unwrap_or_default();
             out.emit(format!("added {}  {}  {}  {}{name}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());

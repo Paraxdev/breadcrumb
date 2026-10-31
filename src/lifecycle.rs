@@ -16,8 +16,12 @@ pub const EXPIRED: &str = "expired";
 pub const HANDOFF: &str = "handoff";
 pub const DECISION_STATUS: &str = "decision_status";
 pub const UNTIL: &str = "until:";
+pub const TRACK_KEY: &str = "track";
+/// Past this age a live handoff that is not the newest leaves the digest unless pinned.
+pub const HANDOFF_DIGEST_DAYS: i64 = 7;
 /// Doctor keeps naming an expired note for this long after it expired.
 pub const RECENTLY_DAYS: i64 = 14;
+const REPORT_MAX: usize = 3;
 
 pub fn decision_superseded(n: &Note) -> bool {
     n.kind == "decision" && n.field(DECISION_STATUS).and_then(yaml_scalar_string).is_some_and(|s| s.trim().eq_ignore_ascii_case(SUPERSEDED))
@@ -143,13 +147,58 @@ impl Lapsed {
     }
 }
 
-/// The one live handoff of a project (None is global): the newest created active handoff that nothing supersedes.
+/// The live handoffs of a project (None is global), newest created first.
 /// Created, not updated, so tagging or appending to an old handoff never makes it current again.
-pub fn latest_handoff<'a>(notes: &'a [Note], project: Option<&str>, lapsed: &Lapsed) -> Option<&'a Note> {
-    notes
-        .iter()
-        .filter(|n| n.kind == HANDOFF && n.project.as_deref() == project && !n.is_archived() && !lapsed.hides(n))
-        .max_by(|a, b| a.created.cmp(&b.created).then(a.id.cmp(&b.id)))
+pub fn live_handoffs<'a>(notes: &'a [Note], project: Option<&str>, lapsed: &Lapsed) -> Vec<&'a Note> {
+    let mut live: Vec<&Note> = notes.iter().filter(|n| n.kind == HANDOFF && n.project.as_deref() == project && !n.is_archived() && !lapsed.hides(n)).collect();
+    live.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+    live
+}
+
+pub fn track(n: &Note) -> Option<String> {
+    n.field(TRACK_KEY).and_then(yaml_scalar_string).map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty())
+}
+
+/// Whether a new handoff replaces `old` without being asked: the same track, or with no track on either the same session.
+/// A handoff with neither a track nor a session stamp belongs to nobody, so it is never replaced by itself.
+pub fn same_track(new: &Note, old: &Note) -> bool {
+    match (track(new), track(old)) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => crate::session::created_by(new).is_some_and(|s| crate::session::created_by(old).as_deref() == Some(s.as_str())),
+        _ => false,
+    }
+}
+
+/// `slug id who track age: title`, the one line form of a handoff.
+pub fn handoff_line(n: &Note) -> String {
+    let who = crate::session::created_by(n).map(|id| format!(" {}", crate::session::label(&id))).unwrap_or_default();
+    let track = track(n).map(|t| format!(" track {t}")).unwrap_or_default();
+    format!("{}{who}{track} {}: {}", n.handle(), crate::util::short_age(&n.created), crate::format::fit_title(&n.title, n.slug().as_deref()))
+}
+
+/// What `add` tells the writer about a new handoff: what it superseded, or that it left the others alone and which they are.
+pub fn handoff_report(v: &Vault, h: &Note) -> String {
+    use std::fmt::Write;
+    let all = v.load_notes();
+    let by_id: HashMap<&str, &Note> = all.iter().map(|n| (n.id.as_str(), n)).collect();
+    let replaced: Vec<String> = h.links.iter().filter(|l| l.rel == SUPERSEDES).map(|l| by_id.get(l.to.as_str()).map_or_else(|| l.to.clone(), |n| handoff_line(n))).collect();
+    if !replaced.is_empty() {
+        return replaced.iter().map(|r| format!("superseded {r}")).collect::<Vec<_>>().join("\n");
+    }
+    let lapsed = Lapsed::of(&all);
+    let live = live_handoffs(&all, h.project.as_deref(), &lapsed);
+    let others: Vec<&&Note> = live.iter().filter(|n| n.id != h.id).collect();
+    if others.is_empty() {
+        return "superseded nothing, no other live handoff".into();
+    }
+    let mut s = "superseded nothing, other live handoffs (--supersedes <id> replaces one):".to_string();
+    for n in others.iter().take(REPORT_MAX) {
+        let _ = write!(s, "\n  {}", handoff_line(n));
+    }
+    if others.len() > REPORT_MAX {
+        let _ = write!(s, "\n  +{} more", others.len() - REPORT_MAX);
+    }
+    s
 }
 
 /// An expired note that still reads as current: pinned, or a decision not marked superseded.

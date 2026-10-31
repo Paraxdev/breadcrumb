@@ -201,3 +201,13 @@ pub fn hidden(c: &mut std::process::Command) -> &mut std::process::Command {
     }
     c
 }
+
+/// `12m`, `3h` or `5d` since then.
+pub fn short_age(t: &chrono::DateTime<chrono::Utc>) -> String {
+    let mins = (now() - *t).num_minutes().max(0);
+    match mins {
+        0..120 => format!("{mins}m"),
+        120..2880 => format!("{}h", mins / 60),
+        _ => format!("{}d", mins / 1440),
+    }
+}

@@ -271,6 +271,8 @@ pub struct AddReq {
     pub paths: Vec<String>,
     /// A better name than the one generated from the title.
     pub slug: Option<String>,
+    /// A handoff's track, see lifecycle::same_track.
+    pub track: Option<String>,
     /// Refuse a project that does not exist yet instead of creating it, so a typo cannot start an orphan project.
     pub require_existing_project: bool,
 }
@@ -307,6 +309,12 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     let (fields, field_slug) = split_slug(req.fields);
     crate::slug::assign(v, &mut note, req.slug.or(field_slug).as_deref())?;
     apply_fields(v, &mut note, &k, fields)?;
+    if let Some(t) = req.track.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if t.split_whitespace().count() > 1 {
+            bail!("track '{t}' must be one word");
+        }
+        note.set_field(crate::lifecycle::TRACK_KEY, Value::String(t.to_lowercase()));
+    }
     if !req.paths.is_empty() {
         set_paths(&mut note, crate::recall::normalize_globs(&req.paths)?);
     }
@@ -325,16 +333,17 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
             note.links.push(Link { to, rel: l.rel });
         }
     }
-    // One living handoff per project: the new one supersedes the current one and older pinned ones stop being pinned.
+    // A new handoff replaces only its own track's, parallel sessions keep theirs. What it replaces stops being pinned.
     let mut unpin: Vec<Note> = vec![];
     if note.kind == HANDOFF {
         let all = v.load_notes();
-        if !note.links.iter().any(|l| l.rel == SUPERSEDES)
-            && let Some(p) = crate::lifecycle::latest_handoff(&all, note.project.as_deref(), &crate::lifecycle::Lapsed::of(&all))
-        {
-            note.links.push(Link { to: p.id.clone(), rel: SUPERSEDES.into() });
+        let lapsed = crate::lifecycle::Lapsed::of(&all);
+        for p in crate::lifecycle::live_handoffs(&all, note.project.as_deref(), &lapsed) {
+            if crate::lifecycle::same_track(&note, p) && !note.links.iter().any(|l| l.to == p.id && l.rel == SUPERSEDES) {
+                note.links.push(Link { to: p.id.clone(), rel: SUPERSEDES.into() });
+            }
         }
-        unpin = all.into_iter().filter(|n| n.kind == HANDOFF && n.project == note.project && n.pinned).collect();
+        unpin = all.into_iter().filter(|n| n.kind == HANDOFF && n.pinned && note.links.iter().any(|l| l.to == n.id && l.rel == SUPERSEDES)).collect();
     }
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
     if let Some(p) = &project

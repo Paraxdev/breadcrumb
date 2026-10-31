@@ -19,6 +19,7 @@ pub const SUMMARY_MAX: usize = 120;
 const HANDOFF_MIN: usize = 800;
 const HANDOFF_MAX: usize = 3500;
 const RECENT_RESERVE: usize = 800;
+const OTHER_HANDOFFS_MAX: usize = 3;
 const PINS_HEAD: &str = "Pinned (get an id for its body):\n";
 
 #[derive(Clone, Copy, Debug)]
@@ -122,6 +123,7 @@ fn compact_body(n: &Note, max: usize) -> String {
 fn handoff_section(h: &Note, stale_days: u64, max: usize) -> String {
     let prev = h.links.iter().find(|l| l.rel == SUPERSEDES).map(|l| format!(", previous {}", l.to)).unwrap_or_default();
     let by = crate::session::created_by(h).map(|id| format!(", {}", crate::session::label(&id))).unwrap_or_default();
+    let by = lifecycle::track(h).map_or(by.clone(), |t| format!("{by}, track {t}"));
     let head = format!(
         "Latest handoff {} ({}{by}{prev}): {}{}\n",
         h.handle(),
@@ -131,6 +133,25 @@ fn handoff_section(h: &Note, stale_days: u64, max: usize) -> String {
     );
     let body = compact_body(h, max.saturating_sub(head.chars().count()));
     format!("{head}{body}")
+}
+
+/// The live handoffs beside the latest, one line each. Old ones leave unless pinned, or legacy notes would pile up.
+fn other_handoffs(others: &[&Note]) -> String {
+    let cutoff = crate::util::now() - chrono::Duration::days(lifecycle::HANDOFF_DIGEST_DAYS);
+    let shown: Vec<&&Note> = others.iter().filter(|n| n.pinned || n.created >= cutoff).collect();
+    if shown.is_empty() {
+        return String::new();
+    }
+    let mut s = "Other live handoffs:\n".to_string();
+    for n in shown.iter().take(OTHER_HANDOFFS_MAX) {
+        s.push_str(&lifecycle::handoff_line(n));
+        s.push('\n');
+    }
+    if shown.len() > OTHER_HANDOFFS_MAX {
+        let rest: Vec<&str> = shown[OTHER_HANDOFFS_MAX..].iter().map(|n| n.id.as_str()).collect();
+        let _ = writeln!(s, "+{} more: {}", rest.len(), rest.join(" "));
+    }
+    s
 }
 
 fn chars(s: &str) -> usize {
@@ -211,9 +232,11 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     let want = opts.recent.saturating_sub(prefs.len().min(opts.recent / 2));
     let recent_rows: Vec<String> = rest.iter().take(want).map(|n| format!("{}{}\n", row(n, project, false), crate::recall::stale_mark(n, days))).collect();
 
-    let fixed = chars(&head) + chars(&pins) + chars(&prefs_text) + chars(&todos) + chars(&backlog);
+    let live = lifecycle::live_handoffs(&notes, project, &lapsed);
+    let others = other_handoffs(live.get(1..).unwrap_or_default());
+    let fixed = chars(&head) + chars(&pins) + chars(&others) + chars(&prefs_text) + chars(&todos) + chars(&backlog);
     let mut left = opts.budget.saturating_sub(fixed);
-    let handoff = match lifecycle::latest_handoff(&notes, project, &lapsed) {
+    let handoff = match live.first() {
         Some(h) => {
             let reserve = RECENT_RESERVE.min(recent_rows.iter().map(|r| chars(r)).sum());
             handoff_section(h, days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX))
@@ -230,7 +253,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         recent.push_str(r);
         shown += 1;
     }
-    let mut out = format!("{head}{pins}{handoff}{prefs_text}{todos}{backlog}");
+    let mut out = format!("{head}{pins}{handoff}{others}{prefs_text}{todos}{backlog}");
     if shown > 0 {
         if rest.len() > shown {
             writeln!(out, "Recent ({shown} of {}):", rest.len())?;

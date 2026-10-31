@@ -98,10 +98,10 @@ fn pins_are_one_line_each_rules_first_and_lapsed_notes_never_show() {
 #[test]
 fn a_new_handoff_supersedes_the_live_one_and_unpins_older_ones() {
     let (_d, v) = common::vault();
-    let first = common::add(&v, "Handoff one", "handoff", Some("app"), &[]);
+    let first = common::add(&v, "Handoff one", "handoff", Some("app"), &[("track", "main")]);
     pin(&v, &first.id);
     tick();
-    let second = common::add(&v, "Handoff two", "handoff", Some("app"), &[]);
+    let second = common::add(&v, "Handoff two", "handoff", Some("app"), &[("track", "main")]);
     assert_eq!(second.links, vec![Link { to: first.id.clone(), rel: "supersedes".into() }]);
     assert!(!v.get(&first.id).unwrap().pinned, "the superseded handoff is unpinned");
     pin(&v, &second.id);
@@ -111,7 +111,7 @@ fn a_new_handoff_supersedes_the_live_one_and_unpins_older_ones() {
     let other = common::add(&v, "Other project handoff", "handoff", Some("web"), &[]);
     assert!(other.links.is_empty(), "handoffs of another project are not linked");
     let commits = breadcrumb::git::commit_count(&v.root);
-    let third = ops::add(&v, AddReq { title: "Handoff three".into(), kind: Some("handoff".into()), project: Some("app".into()), body: Some("## Done\n\nParser.\n\n## Next\n\nLexer.".into()), ..Default::default() }).unwrap();
+    let third = ops::add(&v, AddReq { title: "Handoff three".into(), kind: Some("handoff".into()), project: Some("app".into()), track: Some("main".into()), body: Some("## Done\n\nParser.\n\n## Next\n\nLexer.".into()), ..Default::default() }).unwrap();
     assert_eq!(breadcrumb::git::commit_count(&v.root), commits + 1, "the unpin lands in the same commit");
     assert_eq!(third.links, vec![Link { to: second.id.clone(), rel: "supersedes".into() }]);
     assert!(!v.get(&second.id).unwrap().pinned);

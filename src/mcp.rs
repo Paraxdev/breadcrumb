@@ -251,9 +251,14 @@ impl Server {
                         pinned: b(a, "pinned"),
                         body: s(a, "body").map(|x| crate::util::normalize_newlines(&x)),
                         source: s(a, "source"),
-                        links: links(a)?,
+                        links: {
+                            let mut l = links(a)?;
+                            l.extend(strs(a, "supersedes").into_iter().map(|to| Link { to, rel: ops::SUPERSEDES.into() }));
+                            l
+                        },
                         paths: strs(a, "paths"),
                         slug: s(a, "slug"),
+                        track: s(a, "track"),
                         require_existing_project: true,
                     },
                 )?;
@@ -263,6 +268,9 @@ impl Server {
                 }
                 if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                     out.push_str(&format!("\n{h}"));
+                }
+                if n.kind == ops::HANDOFF {
+                    out.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n)));
                 }
                 Ok(out)
             }
@@ -655,13 +663,15 @@ pub fn tool_defs() -> Vec<Value> {
             "pinned": bl(),
             "paths": paths(),
             "slug": st(),
+            "track": st(),
+            "supersedes": arr(),
         })), &["title"])),
         tool("update", "Change a note.", obj(with(id(), json!({
             "title": st(),
             "slug": st(),
             "kind": st(),
-            "body": {"type": "string", "description": "replaces the body"},
-            "tags": {"type": "array", "items": {"type": "string"}, "description": "tags to add, -tag removes"},
+            "body": {"type": "string", "description": "replaces"},
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "-tag removes"},
             "fields": fields(),
             "unset": {"type": "array", "items": {"type": "string"}, "description": "fields to remove"},
             "links": {"type": "array", "items": {"type": ["string", "object"]}, "description": "replaces all links"},

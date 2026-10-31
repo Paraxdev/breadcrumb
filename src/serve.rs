@@ -484,6 +484,7 @@ impl App {
                 links: links_of(&b)?.unwrap_or_default(),
                 paths: vec![],
                 slug: None,
+                track: None,
                 require_existing_project: false,
             },
         )?;

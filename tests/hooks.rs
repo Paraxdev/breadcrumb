@@ -221,7 +221,7 @@ fn stop_reminds_once_about_a_missing_handoff() {
     std::fs::create_dir_all(&proj).unwrap();
     breadcrumb::ops::project_link(&v, "demo-app", &proj, None).unwrap();
     let task = common::add(&v, "Build the parser", "task", Some("demo-app"), &[]);
-    let old = common::add(&v, "Earlier handoff", "handoff", Some("demo-app"), &[]);
+    let old = common::add(&v, "Earlier handoff", "handoff", Some("demo-app"), &[("track", "main")]);
     std::thread::sleep(Duration::from_millis(1100));
 
     let start = |sid: &str| breadcrumb(&v.root, &["hook", "session-start"], &json!({"cwd": proj, "source": "startup", "session_id": sid}).to_string(), d.path());
@@ -239,7 +239,7 @@ fn stop_reminds_once_about_a_missing_handoff() {
     start("s2");
     std::thread::sleep(Duration::from_millis(1100));
     breadcrumb::ops::append(&v, &task.id, "progress").unwrap();
-    let new = common::add(&v, "Latest handoff", "handoff", Some("demo-app"), &[]);
+    let new = common::add(&v, "Latest handoff", "handoff", Some("demo-app"), &[("track", "main")]);
     assert!(new.links.iter().any(|l| l.to == old.id && l.rel == "supersedes"), "links the previous handoff");
     assert_eq!(stop("s2", false), None, "a handoff was written");
     let ctx = breadcrumb::ops::context(&v, Some("demo-app"), 15).unwrap();
