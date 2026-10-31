@@ -9,6 +9,66 @@ fn add(v: &breadcrumb::vault::Vault, title: &str, kind: &str) -> breadcrumb::not
 }
 
 #[test]
+fn a_title_only_ever_gives_a_valid_name() {
+    let long = "a".repeat(70);
+    let two_long = format!("{long} {} third", "b".repeat(70));
+    for title in ["123 456", "42", "1 2 3", long.as_str(), two_long.as_str(), "---", "???", "日本語のタイトル", "a", "0.56 GB", "2026-10-30"] {
+        for (kind, id) in [("task", "ab12cd34"), ("handoff", "a-b-c-d"), ("x_y", "ÉÉÉÉ"), ("123", "1234")] {
+            let s = slug::from_title(title, kind, id);
+            assert!(slug::is_valid(&s), "{title:?} {kind} {id} gives {s:?}");
+        }
+    }
+    assert_eq!(slug::from_title("123 456", "task", "ab12cd34"), "task-123");
+}
+
+#[test]
+fn accents_map_to_plain_letters() {
+    assert_eq!(slug::from_title("café crème", "task", "ab12cd34"), "cafe-creme");
+    assert_eq!(slug::from_title("CAFÉ CRÈME", "task", "ab12cd34"), "cafe-creme");
+    assert_eq!(slug::from_title("cafe\u{301} cre\u{300}me", "task", "ab12cd34"), "cafe-creme");
+    assert_eq!(slug::from_title("Straße für Œuvre", "task", "ab12cd34"), "strasse-fur-oeuvre");
+    assert_eq!(slug::from_title("Mike's router", "task", "ab12cd34"), "mikes-router");
+}
+
+#[test]
+fn a_clash_number_never_pushes_a_name_past_valid() {
+    let long = format!("{}-{}", "a".repeat(30), "b".repeat(29));
+    assert_eq!(long.len(), 60);
+    let taken: std::collections::HashSet<String> = [long.clone()].into_iter().collect();
+    let got = slug::unique(&long, &taken, &[]);
+    assert!(slug::is_valid(&got) && got != long, "{got}");
+}
+
+#[test]
+fn numeric_and_long_titles_are_protected_from_clashes_and_resolve() {
+    let (_d, v) = common::vault();
+    let a = common::add(&v, "123 456", "task", Some("app"), &[]);
+    let b = common::add(&v, "123 456", "task", Some("app"), &[]);
+    assert_eq!(a.slug().as_deref(), Some("task-123"));
+    assert_eq!(b.slug().as_deref(), Some("task-123-2"));
+    assert_eq!(v.get("task-123-2").unwrap().id, b.id);
+    let long = "a".repeat(70);
+    let c = common::add(&v, &long, "task", Some("app"), &[]);
+    let d = common::add(&v, &long, "task", Some("app"), &[]);
+    assert_ne!(c.slug(), d.slug());
+    assert_eq!(v.get(&d.slug().unwrap()).unwrap().id, d.id);
+}
+
+#[test]
+fn backfill_replaces_an_invalid_stored_slug_once() {
+    let (_d, v) = common::vault();
+    let id = common::add(&v, "Stored bad name", "task", Some("app"), &[]).id;
+    let mut n = v.get(&id).unwrap();
+    n.set_field("slug", serde_yaml::Value::String("123-456".into()));
+    v.write_note(&mut n).unwrap();
+    let opts = slug::Backfill { write: true, ..Default::default() };
+    let first = slug::backfill(&v, &opts).unwrap();
+    assert_eq!(first.iter().map(|n| n.id.clone()).collect::<Vec<_>>(), [id.clone()]);
+    assert!(slug::is_valid(&v.get(&id).unwrap().slug().unwrap()));
+    assert!(slug::backfill(&v, &opts).unwrap().is_empty());
+}
+
+#[test]
 fn names_skip_filler_and_always_hold_a_hyphen() {
     let name = |t: &str, k: &str| slug::from_title(t, k, "k3m9x2qa");
     assert_eq!(name("Items get a short readable name that is unique", "feature"), "items-short-readable-name");

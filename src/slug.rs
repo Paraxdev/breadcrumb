@@ -10,6 +10,10 @@ use std::path::PathBuf;
 pub const SLUG_KEY: &str = "slug";
 const MAX_WORDS: usize = 4;
 const MAX_LEN: usize = 34;
+/// What `is_valid` accepts.
+const MAX_SLUG: usize = 60;
+/// Even two such words and a clash number stay under MAX_SLUG.
+const MAX_WORD: usize = 20;
 /// A full vault backfill names too many files for one git command line on Windows.
 const COMMIT_CHUNK: usize = 100;
 
@@ -23,17 +27,60 @@ const FILLER: &[&str] = &[
 ];
 
 pub fn is_valid(s: &str) -> bool {
-    s.contains('-') && !s.contains("--") && s.len() <= 60 && crate::util::is_valid_slug(s) && s.chars().any(|c| c.is_ascii_lowercase())
+    s.contains('-') && !s.contains("--") && s.len() <= MAX_SLUG && crate::util::is_valid_slug(s) && s.chars().any(|c| c.is_ascii_lowercase())
 }
 
 fn hexish(t: &str) -> bool {
     t.len() >= 7 && t.chars().any(|c| c.is_ascii_digit()) && t.chars().any(|c| c.is_ascii_lowercase())
 }
 
+/// The plain letters of an accented Latin one, itself otherwise. Combining accents drop.
+fn plain_letter(c: char) -> &'static str {
+    match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'æ' => "ae",
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
+        'ď' | 'đ' | 'ð' => "d",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+        'ĥ' | 'ħ' => "h",
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+        'ĵ' => "j",
+        'ķ' => "k",
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+        'ñ' | 'ń' | 'ņ' | 'ň' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
+        'œ' => "oe",
+        'ŕ' | 'ŗ' | 'ř' => "r",
+        'ś' | 'ŝ' | 'ş' | 'š' | 'ș' => "s",
+        'ß' => "ss",
+        'ţ' | 'ť' | 'ŧ' | 'ț' => "t",
+        'þ' => "th",
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+        'ŵ' => "w",
+        'ý' | 'ÿ' | 'ŷ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        '\u{300}'..='\u{36f}' | '\'' | '\u{2019}' => "",
+        _ => " ",
+    }
+}
+
+fn plain_text(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for c in title.to_lowercase().chars() {
+        if c.is_ascii() && c != '\'' {
+            out.push(c);
+        } else {
+            out.push_str(plain_letter(c));
+        }
+    }
+    out
+}
+
 /// `2026-10-30` splits into three number words, session ids and hashes read as noise.
 fn title_words(title: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![];
-    let cleaned = title.to_ascii_lowercase().replace(['\'', '\u{2019}'], "");
+    let cleaned = plain_text(title);
     // 0.56 GB would leave a lone 0 in the name.
     let cleaned = cleaned.split_whitespace().filter(|w| !(w.contains('.') && w.starts_with(|c: char| c.is_ascii_digit()))).collect::<Vec<_>>().join(" ");
     let tokens: Vec<&str> = cleaned.split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty()).collect();
@@ -52,9 +99,17 @@ fn title_words(title: &str) -> Vec<String> {
         if filler || hexish(t) || out.iter().any(|w| w == t) || (t.len() == 1 && !t.chars().all(|c| c.is_ascii_digit())) {
             continue;
         }
-        out.push(t.to_string());
+        out.push(t.chars().take(MAX_WORD).collect());
     }
     out
+}
+
+/// `task-1a2b`, for a title that gives no name of its own. Hand-written ids and kinds can hold anything.
+fn kind_name(kind: &str, tail: &str) -> String {
+    let kind = crate::util::slugify(kind, MAX_WORD);
+    let kind = if kind.chars().any(|c| c.is_ascii_lowercase()) { kind } else { "note".to_string() };
+    let tail: String = tail.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).take(MAX_WORD).collect();
+    format!("{kind}-{}", if tail.is_empty() { "1" } else { &tail })
 }
 
 /// Two to four words of the title, cut before a word that would make the name long.
@@ -72,13 +127,18 @@ pub fn from_title(title: &str, kind: &str, id: &str) -> String {
     if name.len() > 2 && name.last().is_some_and(|w| w.chars().all(|c| c.is_ascii_digit())) {
         name.pop();
     }
-    let kind = crate::util::slugify(kind, 20);
-    match name.as_slice() {
-        [] => format!("{kind}-{}", id.chars().take(4).collect::<String>()),
-        [w] if *w == kind => format!("{kind}-{}", id.chars().take(4).collect::<String>()),
-        [w] => format!("{w}-{kind}"),
-        _ => name.join("-"),
+    let id4: String = id.chars().filter(char::is_ascii_alphanumeric).take(4).collect();
+    if !name.is_empty() && !name.iter().any(|w| w.chars().any(|c| c.is_ascii_lowercase())) {
+        return kind_name(kind, name[0]);
     }
+    let word = crate::util::slugify(kind, MAX_WORD);
+    let made = match name.as_slice() {
+        [] => kind_name(kind, &id4),
+        [w] if *w == word => kind_name(kind, &id4),
+        [w] => format!("{w}-{word}"),
+        _ => name.join("-"),
+    };
+    if is_valid(&made) { made } else { kind_name(kind, &id4) }
 }
 
 /// The board shows `PROJECT-id`, a slug must not read like that.
@@ -112,7 +172,14 @@ pub fn unique(base: &str, taken: &HashSet<String>, projects: &[String]) -> Strin
     if free(base) {
         return base.to_string();
     }
-    (2..).map(|i| format!("{base}-{i}")).find(|s| free(s)).unwrap_or_default()
+    (2..)
+        .map(|i| {
+            let tail = format!("-{i}");
+            let room = MAX_SLUG.saturating_sub(tail.len()).min(base.len());
+            format!("{}{tail}", base[..room].trim_end_matches('-'))
+        })
+        .find(|s| free(s))
+        .unwrap_or_default()
 }
 
 /// The slug for a new note, from the given name or its title. Call while holding the lock.
@@ -144,8 +211,9 @@ pub struct Backfill {
     pub write: bool,
 }
 
-/// Names notes that have no slug, oldest open item first so that open items get the shortest names. Never touches
-/// `updated`, a new name is not news. Files without frontmatter stay as they are, an id keeps working for them.
+/// Names notes that have no slug or a stored one that is not valid, oldest open item first so that open items get the
+/// shortest names. Never touches `updated`, a new name is not news. Files without frontmatter stay as they are, an id
+/// keeps working for them.
 pub fn backfill(v: &Vault, opts: &Backfill) -> Result<Vec<Note>> {
     let _g = if opts.write { Some(v.lock()?) } else { None };
     let all = v.load_notes();
