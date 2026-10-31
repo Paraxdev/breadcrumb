@@ -8,7 +8,7 @@ Git-backed memory and backlog shared by agent sessions. Use the MCP tools or CLI
 - A rule for one night or one batch gets `expires`: a date, 3d, or until:<id>.
 - Kinds: note, decision, gotcha, todo, handoff, reference, plan, feedback, user, map (read with `brief`). `kinds` lists them.
 - Backlog items (idea, epic, feature, task, bug) have a state and priority p0 to p3. `next` picks work, `move` changes state. `claim` when work starts, also for a lane or workflow.
-- `move` to review with how to check it: `--check "step"` (MCP `steps`), the user sees them in `review`.
+- `move` to review with how to check it: `--step "text"` (MCP `steps`), the user sees them in `review`.
 - Need the user's call on an item? `ask` locks it until answered. Items with an unseen answer come first: built means adjust, not built means build with it. `claim` or `ack` clears it.
 - Machine facts go in kind `env`.
 - Writes record session and date.

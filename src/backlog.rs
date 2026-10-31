@@ -832,7 +832,7 @@ impl Check {
         for p in s.split([',', ' ']).map(str::trim).filter(|p| !p.is_empty()) {
             match p.parse::<usize>() {
                 Ok(i) if i > 0 => out.push(i),
-                _ => bail!("invalid criterion '{p}', expected all or 1 based numbers like 2,3"),
+                _ => bail!("invalid criterion '{p}', expected all or 1 based numbers like 2,3, a step for the user to try goes in --step (MCP steps)"),
             }
         }
         Ok(Check::Some(out))
@@ -922,25 +922,6 @@ fn add_steps(n: &mut Note, steps: &[String]) -> usize {
     changed
 }
 
-/// Splits `--check` values: `all` and positions tick as before, anything else is a step when moving to review.
-pub fn split_checks(values: &[String], state: &str) -> Result<(Option<Check>, Vec<String>)> {
-    let review = check_state(state).is_ok_and(|s| s == "review");
-    let (mut check, mut steps) = (None, vec![]);
-    for v in values {
-        match Check::parse(v) {
-            Ok(Check::All) => check = Some(Check::All),
-            Ok(Check::Some(ix)) => match &mut check {
-                Some(Check::Some(have)) => have.extend(ix),
-                Some(Check::All) => {}
-                None => check = Some(Check::Some(ix)),
-            },
-            Err(_) if review => steps.push(v.clone()),
-            Err(e) => return Err(e),
-        }
-    }
-    Ok((check, steps))
-}
-
 /// What is left for the user to try: the acceptance criteria not yet marked met.
 pub fn review_steps(n: &Note) -> Vec<String> {
     unmet_acceptance(n).iter().map(|c| criterion_text(c).to_string()).collect()
@@ -952,7 +933,7 @@ fn move_warnings(n: &Note, from: &str, to: &str) -> Vec<String> {
         w.push(format!("{} went from queued to review and was never claimed, `breadcrumb claim {}` when work starts so nobody else picks it up", n.id, n.id));
     }
     if to == "review" && review_steps(n).is_empty() {
-        w.push(format!("{} has no steps for the user to check, add them with `breadcrumb move {} review --check \"step\"` (repeatable, MCP move steps)", n.id, n.id));
+        w.push(format!("{} has no steps for the user to check, add them with `breadcrumb move {} review --step \"text\"` (repeatable, MCP move steps)", n.id, n.id));
     }
     w
 }

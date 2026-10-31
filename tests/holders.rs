@@ -128,7 +128,7 @@ fn the_holder_of_a_being_built_item_still_gets_it_from_next() {
 fn going_back_to_the_queue_ends_the_old_build() {
     let e = setup();
     let a = common::add(&e.v, "Failed in review", "task", Some("app"), &[]).id;
-    crumb(&e, ME, "pc-a", &["move", &a, "review", "--ref", "branch:one", "--ref", "commit:abc1234", "--check", "Try"]);
+    crumb(&e, ME, "pc-a", &["move", &a, "review", "--ref", "branch:one", "--ref", "commit:abc1234", "--step", "Try"]);
     let (ok, _) = crumb(&e, ME, "pc-a", &["review", "fail", &a, "--reason", "no"]);
     assert!(ok);
     let n = e.v.get(&a).unwrap();
@@ -151,14 +151,14 @@ fn going_back_to_the_queue_ends_the_old_build() {
 fn queued_straight_to_review_warns_unless_claimed() {
     let e = setup();
     let a = queued(&e, "Never claimed");
-    let (ok, out) = crumb(&e, ME, "pc-a", &["move", &a, "review", "--check", "Try"]);
+    let (ok, out) = crumb(&e, ME, "pc-a", &["move", &a, "review", "--step", "Try"]);
     assert!(ok && out.contains("never claimed"), "{out}");
     let b = queued(&e, "Claimed");
     crumb(&e, ME, "pc-a", &["claim", &b]);
-    assert!(!crumb(&e, ME, "pc-a", &["move", &b, "review", "--check", "Try"]).1.contains("never claimed"));
+    assert!(!crumb(&e, ME, "pc-a", &["move", &b, "review", "--step", "Try"]).1.contains("never claimed"));
     let c = common::add(&e.v, "Normal way", "task", Some("app"), &[]).id;
     crumb(&e, ME, "pc-a", &["move", &c, "in-progress"]);
-    assert!(!crumb(&e, ME, "pc-a", &["move", &c, "review", "--check", "Try"]).1.contains("never claimed"));
+    assert!(!crumb(&e, ME, "pc-a", &["move", &c, "review", "--step", "Try"]).1.contains("never claimed"));
 }
 
 #[test]

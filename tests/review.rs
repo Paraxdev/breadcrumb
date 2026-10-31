@@ -63,46 +63,38 @@ fn steps_are_acceptance_criteria_and_moving_without_them_only_warns() {
 }
 
 #[test]
-fn check_flag_still_ticks_and_takes_steps_only_for_review() {
-    let (checks, steps) = backlog::split_checks(&["all".into()], "review").unwrap();
-    assert_eq!((checks, steps.len()), (Some(backlog::Check::All), 0));
-    let (checks, steps) = backlog::split_checks(&["2,3".into(), "Try it".into(), "4".into()], "review").unwrap();
-    assert_eq!(checks, Some(backlog::Check::Some(vec![2, 3, 4])));
-    assert_eq!(steps, ["Try it"]);
-    assert!(backlog::split_checks(&["Try it".into()], "done").unwrap_err().to_string().contains("invalid criterion"));
-    assert_eq!(backlog::split_checks(&[], "review").unwrap().0, None);
-}
-
-#[test]
-fn the_list_orders_by_priority_then_age_and_says_when_steps_are_missing() {
+fn check_only_ticks_and_step_only_adds() {
     let (_d, v) = common::vault();
-    let low = common::add(&v, "Low", "task", Some("app"), &[("priority", "p3")]);
-    let older = common::add(&v, "Older p1", "task", Some("app"), &[("priority", "p1")]);
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    let newer = common::add(&v, "Newer p1", "task", Some("app"), &[("priority", "p1")]);
-    let other = common::add(&v, "Other project", "task", Some("web"), &[]);
-    let open = common::add(&v, "Still open", "task", Some("app"), &[]);
-    to_review(&v, &low.id, &["look"]);
-    to_review(&v, &newer.id, &["try"]);
-    to_review(&v, &older.id, &[]);
-    to_review(&v, &other.id, &[]);
+    let a = common::add(&v, "Literal three", "task", Some("app"), &[]);
+    let (ok, out, _) = crumb(&v, &["move", &a.id, "review", "--step", "3", "--step", "Open it", "--step", "Close it"]);
+    assert!(ok, "{out}");
+    assert_eq!(backlog::review_steps(&v.get(&a.id).unwrap()), ["3", "Open it", "Close it"], "a step that reads 3 ticks nothing");
 
-    let scope = Scope::Project { slug: "app".into(), with_global: false };
-    let items = backlog::review_items(&v, &scope).unwrap();
-    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-    assert_eq!(ids, [older.id.as_str(), newer.id.as_str(), low.id.as_str()]);
-    assert!(!ids.contains(&open.id.as_str()));
-    let text = backlog::review_text(&items, &scope.label());
-    assert!(text.contains(&format!("no steps recorded, `breadcrumb get {}`", older.id)), "{text}");
-    assert!(text.contains("  1. try"), "{text}");
-    assert!(text.contains(&older.id) && text.contains("Older p1"));
+    let (ok, _, err) = crumb(&v, &["move", &a.id, "review", "--check", "Try it"]);
+    assert!(!ok && err.contains("invalid criterion 'Try'") && err.contains("--step"), "{err}");
+    assert_eq!(backlog::review_steps(&v.get(&a.id).unwrap()).len(), 3);
+
+    let (ok, out, _) = crumb(&v, &["move", &a.id, "review", "--check", "1,3"]);
+    assert!(ok, "{out}");
+    assert_eq!(backlog::review_steps(&v.get(&a.id).unwrap()), ["Open it"]);
+    let (ok, out, _) = crumb(&v, &["move", &a.id, "review", "--check", "all"]);
+    assert!(ok, "{out}");
+    assert!(backlog::review_steps(&v.get(&a.id).unwrap()).is_empty());
+
+    let b = common::add(&v, "Elsewhere", "task", Some("app"), &[]);
+    let (ok, _, err) = crumb(&v, &["move", &b.id, "done", "--check", "Try it"]);
+    assert!(!ok && err.contains("invalid criterion"), "{err}");
+    let (ok, _, err) = crumb(&v, &["move", &b.id, "done", "--step", "Try it"]);
+    assert!(!ok && err.contains("moving to review"), "{err}");
+    let (ok, _, err) = crumb(&v, &["check", &b.id, "Try"]);
+    assert!(!ok && err.contains("--step"), "{err}");
 }
 
 #[test]
 fn pass_and_fail_through_the_cli() {
     let (_d, v) = common::vault();
     let a = common::add(&v, "Pass me", "task", Some("app"), &[("priority", "p1")]);
-    let (ok, out, _) = crumb(&v, &["move", &a.id, "review", "--check", "Open it", "--check", "Click it"]);
+    let (ok, out, _) = crumb(&v, &["move", &a.id, "review", "--step", "Open it", "--step", "Click it"]);
     assert!(ok && !out.contains("warning"), "{out}");
     let (_, out, _) = crumb(&v, &["review", "--project", "app"]);
     assert!(out.contains("1. Open it") && out.contains("2. Click it"), "{out}");

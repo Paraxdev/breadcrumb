@@ -346,9 +346,12 @@ pub enum Cmd {
         shipped_in: Option<String>,
         #[arg(long)]
         by: Option<String>,
-        /// Also mark acceptance criteria met: all, or positions like 2,3. Moving to review, any other text is a step for the user to try (repeatable)
-        #[arg(long, value_name = "WHICH or STEP")]
-        check: Vec<String>,
+        /// Also mark acceptance criteria met: all, or positions like 2,3
+        #[arg(long, value_name = "WHICH")]
+        check: Option<String>,
+        /// Moving to review, what the user should try (repeatable)
+        #[arg(long = "step", value_name = "TEXT", allow_hyphen_values = true)]
+        steps: Vec<String>,
         /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, -type:value removes (repeatable)
         #[arg(long = "ref", value_name = "REF", allow_hyphen_values = true)]
         refs: Vec<String>,
@@ -1286,8 +1289,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => out.emit(format!("{id} has no claim to release"), Json::Null),
             }
         }
-        Cmd::Move { id, state, resolution, shipped_in, by, check, refs } => {
-            let (check, steps) = backlog::split_checks(&check, &state)?;
+        Cmd::Move { id, state, resolution, shipped_in, by, check, steps, refs } => {
+            let check = check.as_deref().map(backlog::Check::parse).transpose()?;
             let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None })?;
             out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "note": r.note.to_json()}));
         }
