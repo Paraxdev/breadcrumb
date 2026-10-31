@@ -346,6 +346,12 @@ fn only_text(segment: &str) -> bool {
     matches!(exe, "crumb" | "breadcrumb") || (exe == "git" && words.next() == Some("commit"))
 }
 
+/// Whether the command can build or start something that reads the hook's own environment. `git status` cannot.
+fn reads_environment(hay: &str) -> bool {
+    let hay = hay.to_lowercase();
+    hay.contains("cargo") || hay.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | '`')).any(|w| [".sh", ".ps1", ".py", ".bat", ".cmd"].iter().any(|e| w.ends_with(e)))
+}
+
 /// The deny reason when the Bash command would touch a resource another session leases. None lets it through.
 pub fn check_bash(root: &Path, input: &HookInput) -> Option<String> {
     let text = std::fs::read_to_string(file(root)).ok()?;
@@ -363,7 +369,7 @@ pub fn check_bash(root: &Path, input: &HookInput) -> Option<String> {
         return None;
     }
     let hay = norm(&parts.join("\n"));
-    let env = std::env::var("CARGO_TARGET_DIR").ok().map(|p| norm(&p));
+    let env = std::env::var("CARGO_TARGET_DIR").ok().filter(|_| reads_environment(&hay)).map(|p| norm(&p));
     let me = input.session_id.clone().or_else(session::current)?;
     let my_name = || session::find(&me).and_then(|s| s.name);
     leases.into_iter().find_map(|l| {

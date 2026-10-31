@@ -138,6 +138,23 @@ fn a_lease_frees_at_once_when_its_process_ends_whatever_its_file_says() {
 }
 
 #[test]
+fn the_build_dir_in_the_environment_only_binds_what_can_read_it() {
+    let e = setup();
+    lease_a(&e);
+    let run = |cmd: &str| {
+        let mut c = base(&e, None, "here", &[]);
+        c.env("CARGO_TARGET_DIR", DIR);
+        feed(c, &hook_input(B, cmd))
+    };
+    for free in ["git status", "ls src", "git log --oneline -3", "BREADCRUMB_LEASE_OK=1 cargo build"] {
+        assert!(run(free).is_empty(), "{free}: {}", run(free));
+    }
+    for bound in ["cargo build", "CARGO_BUILD_JOBS=4 cargo test", "git status && cargo check", "bash scripts/ci.sh", "./run.sh", "python tools/x.py", "powershell -File x.ps1", "build.bat", "t.cmd", "ls D:/fxt-c4"] {
+        assert!(run(bound).contains("deny"), "{bound}: {}", run(bound));
+    }
+}
+
+#[test]
 fn another_live_holder_refuses_and_force_takes_over() {
     let e = setup();
     assert!(ok(&e, Some(A), &["lease", "runner", "--note", "rerun"]).contains("leased runner held by lead-a aaaa1111"));
