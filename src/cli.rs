@@ -1031,7 +1031,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let hits: Vec<Json> = r
                 .hits
                 .iter()
-                .map(|h| json!({"id": h.note.id, "kind": h.note.kind, "project": h.note.project, "title": h.note.title, "score": h.score, "snippet": h.snippet}))
+                .map(|h| json!({"id": h.note.id, "kind": h.note.kind, "project": h.note.project, "title": h.note.title, "score": h.score, "snippet": h.snippet, "matched_terms": h.matched_terms, "exact": h.exact_whole || (r.terms <= 1 && h.exact > 0)}))
                 .collect();
             out.emit(format::search_text(&r, &scope_label(&sc)), json!({"query": q, "scope": sc.label(), "fell_back_to_or": r.fell_back_to_or, "total": r.total, "hits": hits}));
         }

@@ -32,6 +32,8 @@ A permission or rule meant for one night or one batch gets `--expires` (`expires
 
 ## Duplicates and search
 
+Search ranks a note the query names by id or slug first, then a note holding the whole query literally, then notes by how many of the typed words they hold literally, an identifier like import_loose_faces as a whole, then by matched terms and score. A literal hit says `(exact)` when the other hits are not, a partial match names its terms, `(2/3 terms: import, loose)`.
+
 `add` names up to two existing notes that look like the same fact, by shared title words with shared tags helping, so an agent can update one of them instead. `search` lists notes matching more of the query first, then by score weighted by kind and recency, drops notes that only share a word or two with a long query, shows 5 by default and marks partial matches like `(2/3 terms)`.
 
 ## Who wrote what

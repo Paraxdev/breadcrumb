@@ -111,3 +111,73 @@ fn kind_and_recency_break_ties_between_equal_matches() {
     let ids: Vec<String> = search(vec![log, old, new, rule], "shader cache").hits.into_iter().map(|h| h.note.id).collect();
     assert_eq!(ids, vec!["hhhh0002", "hhhh0004", "hhhh0003", "hhhh0001"]);
 }
+
+#[test]
+fn an_identifier_ranks_whole_above_its_split_terms() {
+    let mut rich = note("kkkk0001", "Import loose faces", &["import", "loose", "faces"], "import loose faces import loose faces");
+    rich.updated = breadcrumb::util::now();
+    let literal = note("kkkk0002", "Some task", &[], "first line\nimport_loose_faces can crash on rerun\nlast");
+    let r = search(vec![rich, literal], "import_loose_faces");
+    assert_eq!(r.hits[0].note.id, "kkkk0002");
+    assert!(r.hits[0].exact_whole && !r.hits[1].exact_whole);
+    assert_eq!(r.hits[1].matched, 3, "it still matches split");
+    assert_eq!(r.hits[0].snippet, "import_loose_faces can crash on rerun", "the snippet shows the literal hit");
+}
+
+#[test]
+fn a_literal_word_needs_its_edges_free() {
+    let r = search(vec![note("llll0001", "import_loose_faces_v2", &[], ""), note("llll0002", "import_loose_faces.", &[], "")], "import_loose_faces");
+    assert_eq!(r.hits[0].note.id, "llll0002");
+}
+
+#[test]
+fn an_exact_token_ranks_above_a_prefix_whatever_the_score() {
+    let mut prefix = note("mmmm0001", "Blending modes", &["blending"], "blending blending blending");
+    prefix.kind = "decision".into();
+    let exact = note("mmmm0002", "Other", &[], "one blend somewhere");
+    let r = search(vec![prefix, exact], "blend");
+    assert_eq!(r.hits[0].note.id, "mmmm0002");
+}
+
+#[test]
+fn an_error_string_ranks_the_note_holding_it_first_across_line_breaks() {
+    let scattered = note("nnnn0001", "Cannot borrow, mutable as", &["borrow", "mutable", "cannot"], "as cannot mutable borrow");
+    let literal = note("nnnn0002", "Other", &[], "the build said\nerror: cannot borrow\nas mutable, twice");
+    let r = search(vec![scattered, literal], "cannot borrow as mutable:");
+    assert_eq!(r.hits[0].note.id, "nnnn0002");
+    assert!(r.hits[0].exact_whole);
+}
+
+#[test]
+fn a_literal_identifier_survives_the_partial_match_floor() {
+    let notes = vec![
+        note("oooo0001", "Crash when sectioning a blend at the fallback", &[], "crash sectioning blend fallback"),
+        note("oooo0002", "Task", &[], "import_loose_faces"),
+    ];
+    let r = search(notes, "import_loose_faces crash sectioning blend fallback");
+    assert!(r.hits.iter().any(|h| h.note.id == "oooo0002"), "{:?}", r.hits.iter().map(|h| &h.note.id).collect::<Vec<_>>());
+    assert_eq!(r.hits[0].note.id, "oooo0001", "four literal words beat one");
+}
+
+#[test]
+fn an_id_search_puts_the_note_itself_first() {
+    let target = note("vb39tsfk", "Round of reviews", &[], "");
+    let mention = note("pppp0001", "From the round vb39tsfk", &["vb39tsfk"], "vb39tsfk vb39tsfk vb39tsfk");
+    let r = search(vec![mention, target], "vb39tsfk");
+    assert_eq!(r.hits[0].note.id, "vb39tsfk");
+}
+
+#[test]
+fn hits_name_the_terms_they_matched() {
+    let notes = vec![note("qqqq0001", "Parser cache", &[], ""), note("qqqq0002", "Parser", &[], "with parser_cache in it"), note("qqqq0003", "Parser only", &[], "")];
+    let r = search(notes, "parser golang");
+    assert_eq!(r.hits[0].matched_terms, vec!["parser"]);
+    let text = breadcrumb::format::search_rows(&r, None);
+    assert!(text.contains("(1/2 terms: parser)"), "{text}");
+    let r = search(vec![note("rrrr0001", "Other", &[], "the parser cache is stale"), note("ssss0001", "Other", &[], "the cache of the parser")], "parser cache");
+    assert_eq!(breadcrumb::format::search_rows(&r, None).matches("(exact)").count(), 1, "only the literal one says so");
+    let r = search(vec![note("rrrr0001", "Other", &[], "the parser cache is stale")], "parser cache");
+    assert!(!breadcrumb::format::search_rows(&r, None).contains("(exact)"), "nothing to tell it from");
+    let r = search(vec![note("tttt0001", "Other", &[], "the parser")], "parser");
+    assert!(!breadcrumb::format::search_text(&r, "x").contains("(exact)"), "one word needs no label");
+}

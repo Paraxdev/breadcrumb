@@ -124,12 +124,19 @@ pub fn rows(notes: &[Note], total: usize, current: Option<&str>) -> String {
 }
 
 pub const SNIPPET_MAX: usize = 100;
+const TERMS_SHOWN: usize = 5;
 
-/// `[expired]` or `[superseded]`, and `(2/3 terms)` for a partial match.
+/// `[expired]` or `[superseded]`, `(exact)` when a query of several terms stands literally in this note and not in all
+/// of them, and `(2/3 terms: a, b)` for a partial match.
 fn hit_flags(r: &SearchResult, h: &crate::search::Hit) -> String {
     let mut s = h.lapsed.map(|l| format!(" [{l}]")).unwrap_or_default();
-    if h.matched < r.terms {
-        let _ = write!(s, " ({}/{} terms)", h.matched, r.terms);
+    if h.exact_whole && r.hits.iter().any(|x| !x.exact_whole) {
+        s.push_str(" (exact)");
+    }
+    if h.matched < r.terms && h.matched > 0 {
+        let shown = h.matched_terms.iter().take(TERMS_SHOWN).map(String::as_str).collect::<Vec<_>>().join(", ");
+        let more = if h.matched > TERMS_SHOWN { ", ..." } else { "" };
+        let _ = write!(s, " ({}/{} terms: {shown}{more})", h.matched, r.terms);
     }
     s
 }
