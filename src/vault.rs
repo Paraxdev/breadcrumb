@@ -523,6 +523,13 @@ impl Vault {
                 }
             }
         }
+        // Older output printed KEY-id and agents copy it, a slug never reads like one.
+        if let Some((project, id)) = needle.rsplit_once('-')
+            && let Ok(p) = self.resolve_path(id)
+            && self.parse_note_file(&p).is_ok_and(|n| n.project.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(project)))
+        {
+            return Ok(p);
+        }
         let by_name: Vec<(String, PathBuf)> = self.id_index().into_iter().map(|(i, _, p)| (i, p)).collect();
         if let Some(p) = self.pick_path(prefix, &by_name)? {
             return Ok(p);

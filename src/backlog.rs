@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_yaml::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
+use std::path::PathBuf;
 
 pub const STATES: [&str; 8] = ["idea", "backlog", "queued", "in-progress", "review", "done", "shipped", "rejected"];
 pub const CLOSED: [&str; 3] = ["done", "shipped", "rejected"];
@@ -269,14 +270,6 @@ pub fn key(n: &Note) -> String {
     }
 }
 
-/// `slug KEY-id`, or the key alone for a note without a slug.
-pub fn named_key(n: &Note) -> String {
-    match n.slug() {
-        Some(s) => format!("{s} {}", key(n)),
-        None => key(n),
-    }
-}
-
 pub fn check_state(s: &str) -> Result<String> {
     let s = s.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     let s = if s == "inprogress" || s == "wip" { "in-progress".to_string() } else { s };
@@ -523,7 +516,7 @@ impl BoardItem {
 
     pub fn line(&self) -> String {
         let name = self.slug.as_ref().map(|x| format!("{x}  ")).unwrap_or_default();
-        let mut s = format!("{name}{}  {:<7} {}  {}", self.key, self.kind, self.priority, self.title);
+        let mut s = format!("{name}{}  {:<7} {}  {}", self.id, self.kind, self.priority, self.title);
         if let Some(a) = &self.holder {
             let _ = write!(s, "  @{a}{}", if self.claim_stale { " (stale claim)" } else { "" });
         }
@@ -837,6 +830,8 @@ pub struct MoveResult {
     pub changed: bool,
     pub warnings: Vec<String>,
     pub hints: Vec<String>,
+    /// Every file the move wrote.
+    pub touched: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1015,7 +1010,7 @@ pub fn review_text(items: &[ReviewItem], scope_label: &str) -> String {
     let mut s = format!("{} in review in {scope_label}, try each, then `breadcrumb review pass <id>` or `breadcrumb review fail <id> --reason \"...\"`\n", items.len());
     for it in items {
         let name = it.slug.as_ref().map(|x| format!("{x} ")).unwrap_or_default();
-        let _ = writeln!(s, "\n{} {name}{} {}", it.priority, it.key, it.title);
+        let _ = writeln!(s, "\n{} {name}{} {}", it.priority, it.id, it.title);
         if it.steps.is_empty() {
             let _ = writeln!(s, "  no steps recorded, `breadcrumb get {}` or ask the agent that built it", it.id);
         }
@@ -1094,7 +1089,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     if same && ticked == 0 && added == 0 && n.refs() == refs_before {
         let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
         let (warnings, hints) = (move_warnings(&n, &from, &to), move_hints(&n, &to));
-        return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings, hints });
+        return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings, hints, touched: vec![] });
     }
     match &req.verdict {
         Some(Verdict::Pass) if n.field("acceptance").is_some() => {
@@ -1131,9 +1126,26 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     // Notes with `expires: until:<this item>` stop holding now.
     let mut waiting = if is_closed(&to) { crate::lifecycle::waiting_for(&v.load_notes(), &n.id) } else { vec![] };
     waiting.iter_mut().for_each(crate::lifecycle::mark);
+    let mut touched: Vec<PathBuf> = waiting.iter().filter_map(|w| w.path.clone()).collect();
     save_with(v, &mut n, "move", waiting)?;
+    touched.extend(n.path.clone());
     let (warnings, hints) = (move_warnings(&n, &from, &to), move_hints(&n, &to));
-    Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings, hints })
+    Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings, hints, touched })
+}
+
+/// Moves each item on its own, a failure does not stop the rest, and commits what moved as one vault commit.
+pub fn move_items(v: &Vault, ids: &[String], req: &MoveReq) -> Result<Vec<(String, Result<MoveResult>)>> {
+    let to = check_state(&req.state)?;
+    let mut quiet = v.clone();
+    quiet.config.auto_commit = false;
+    let out: Vec<(String, Result<MoveResult>)> = ids.iter().map(|id| (id.clone(), move_item(&quiet, id, req.clone()))).collect();
+    let touched: Vec<PathBuf> = out.iter().filter_map(|(_, r)| r.as_ref().ok()).flat_map(|r| r.touched.clone()).collect();
+    let moved = out.iter().filter(|(_, r)| r.as_ref().is_ok_and(|r| r.changed)).count();
+    if moved > 0 {
+        let _g = v.lock()?;
+        v.commit(&touched, &format!("breadcrumb: move {moved} items to {to}"))?;
+    }
+    Ok(out)
 }
 
 /// Moves items to shipped in one vault commit and returns the ones it moved. One already closed by now stays as it is.
@@ -1189,7 +1201,7 @@ fn is_sha(s: &str) -> bool {
 }
 
 pub fn move_text(r: &MoveResult) -> String {
-    let name = named_key(&r.note);
+    let name = r.note.handle();
     let mut s = if r.changed {
         format!("{name} {}: {} -> {}\n", r.note.title, r.from, r.to)
     } else {
@@ -1247,7 +1259,7 @@ pub fn promote(v: &Vault, id: &str, to: &str, by: Option<&str>) -> Result<Note> 
 fn tree_lines(idx: &Index, n: &Note, depth: usize, seen: &mut HashSet<String>, out: &mut String) {
     let item = BoardItem::from_note(n, idx);
     let blocked = if item.blocked { "  [blocked]" } else { "" };
-    let _ = writeln!(out, "{}- {} {} [{}] {}{}", "  ".repeat(depth), item.key, item.kind, state_label(n), item.title, blocked);
+    let _ = writeln!(out, "{}- {} {} [{}] {}{}", "  ".repeat(depth), n.handle(), item.kind, state_label(n), item.title, blocked);
     if !seen.insert(n.id.clone()) {
         let _ = writeln!(out, "{}  (cycle)", "  ".repeat(depth));
         return;
@@ -1287,7 +1299,7 @@ pub fn tree(v: &Vault, id: &str) -> Result<String> {
         }
         match idx.by_id.get(p.as_str()) {
             Some(pn) => {
-                chain.push(format!("{} {} [{}] {}", key(pn), pn.kind, state_label(pn), pn.title));
+                chain.push(format!("{} {} [{}] {}", pn.handle(), pn.kind, state_label(pn), pn.title));
                 cur = tree_parent(pn);
             }
             None => {
@@ -1421,7 +1433,7 @@ pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
 }
 
 pub fn item_summary(n: &Note) -> String {
-    let mut s = format!("{} {} [{}] {} {}", named_key(n), n.kind, state(n), priority(n), n.title);
+    let mut s = format!("{} {} [{}] {} {}", n.handle(), n.kind, state(n), priority(n), n.title);
     if let Some(a) = assignee(n) {
         let _ = write!(s, " @{a}");
     }

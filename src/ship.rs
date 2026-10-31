@@ -104,7 +104,7 @@ fn state_label(n: &Note) -> String {
 }
 
 fn item_line(n: &Note) -> String {
-    format!("{} [{}] {}", backlog::named_key(n), state_label(n), n.title)
+    format!("{} [{}] {}", n.handle(), state_label(n), n.title)
 }
 
 fn section(s: &mut String, head: &str, lines: Vec<String>) {

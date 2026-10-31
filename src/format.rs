@@ -122,7 +122,7 @@ pub fn search_text(r: &SearchResult, scope_label: &str) -> String {
         return s;
     }
     for h in &r.hits {
-        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}", h.note.handle(), h.note.kind, h.note.scope_label(), h.note.title, hit_flags(r, h));
+        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}{}", h.note.handle(), h.note.kind, h.note.scope_label(), state_mark(&h.note), h.note.title, hit_flags(r, h));
         if !h.snippet.is_empty() {
             let _ = writeln!(s, "    {}", h.snippet);
         }
@@ -145,9 +145,18 @@ pub fn fit_title(t: &str, slug: Option<&str>) -> String {
     crate::util::truncate_chars(&crate::util::one_line(t), room)
 }
 
+/// `[queued] ` for a backlog item, nothing for a note.
+fn state_mark(n: &Note) -> String {
+    if crate::backlog::is_item(n) { format!("[{}] ", crate::backlog::state(n)) } else { String::new() }
+}
+
 /// `id kind title`, plus the project when it is not `current`, plus flags and optionally the date.
 pub fn row(n: &Note, current: Option<&str>, date: bool) -> String {
-    let mut s = format!("{} {} {}", n.handle(), n.kind, fit_title(&n.title, n.slug().as_deref()));
+    row_marked(n, "", current, date)
+}
+
+fn row_marked(n: &Note, mark: &str, current: Option<&str>, date: bool) -> String {
+    let mut s = format!("{} {} {mark}{}", n.handle(), n.kind, fit_title(&n.title, n.slug().as_deref()));
     if let Some(p) = env_path(n) {
         let _ = write!(s, ": {p}");
     }
@@ -230,7 +239,7 @@ pub fn search_rows(r: &SearchResult, current: Option<&str>) -> String {
     }
     let mut s = String::new();
     for h in &r.hits {
-        let _ = writeln!(s, "{}{}", row(&h.note, current, false), hit_flags(r, h));
+        let _ = writeln!(s, "{}{}", row_marked(&h.note, &state_mark(&h.note), current, false), hit_flags(r, h));
         let snip = crate::util::one_line(&h.snippet);
         if !snip.is_empty() {
             let _ = writeln!(s, "  {}", crate::util::truncate_chars(&snip, SNIPPET_MAX));

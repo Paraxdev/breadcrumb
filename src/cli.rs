@@ -430,8 +430,9 @@ pub enum Cmd {
     },
     /// Change the state of a backlog item
     Move {
-        /// Item id or slug
-        id: String,
+        /// Item ids or slugs, several move in one vault commit
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<String>,
         /// idea, backlog, queued, in-progress, review, done, shipped or rejected
         state: String,
         /// Why it was rejected, required moving to rejected
@@ -985,6 +986,9 @@ pub struct UpdateArgs {
     /// File holding the new body text
     #[arg(long, conflicts_with = "body")]
     pub body_file: Option<PathBuf>,
+    /// Change one exact string in the body, refused when it occurs zero or several times
+    #[arg(long, num_args = 2, value_names = ["OLD", "NEW"], allow_hyphen_values = true, conflicts_with_all = ["body", "body_file"])]
+    pub replace: Vec<String>,
     /// Show it in the digest of every session
     #[arg(long, alias = "pinned", conflicts_with = "unpin")]
     pub pin: bool,
@@ -1228,6 +1232,11 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Update(u) => {
             let v = open()?;
             let pinned = if u.pin { Some(true) } else if u.unpin { Some(false) } else { None };
+            let from_stdin = u.body.as_deref() == Some("-");
+            let body = read_body_arg(u.body, u.body_file)?;
+            if from_stdin && body.as_deref().is_some_and(|b| b.trim().is_empty()) {
+                bail!("stdin was empty, the body stays as it is, --body \"\" empties it");
+            }
             let n = ops::update(
                 &v,
                 &u.id,
@@ -1237,7 +1246,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                     tags: u.tags,
                     fields: ops::with_field(ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires), u.said, u.said_on), backlog::RELEASE_NOTE_KEY, u.release_note),
                     unset: u.unset,
-                    body: read_body_arg(u.body, u.body_file)?,
+                    body,
+                    replace: u.replace.first().cloned().zip(u.replace.get(1).cloned()),
                     pinned,
                     status: u.status,
                     links: None,
@@ -1428,7 +1438,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let project = ops::target_project(&v, project.as_deref(), global, &cwd)?;
             let body = read_body_arg(body, None)?;
             let n = backlog::capture_idea(&v, &title, body, project, tags, false)?;
-            out.emit(format!("captured idea {}  {}", backlog::key(&n), n.title), n.to_json());
+            out.emit(format!("captured idea {}  {}", n.handle(), n.title), n.to_json());
         }
         Cmd::Env { scope, all_machines } => {
             let v = open()?;
@@ -1529,15 +1539,45 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(format!("withdrew the question on {}", backlog::item_summary(&n)), n.to_json());
         }
         Cmd::Release { id, by, force } => release_cmd(&out, &open()?, &id, by.as_deref(), force)?,
-        Cmd::Move { id, state, position, resolution, shipped_in, by, check, steps, release_note, refs } => {
+        Cmd::Move { ids, state, position, resolution, shipped_in, by, check, steps, release_note, refs } => {
             if let Some(pos) = backlog::queue_position(&state, position.as_deref())? {
-                let n = backlog::queue(&open()?, &id, pos, by.as_deref())?;
+                let [id] = ids.as_slice() else {
+                    bail!("position takes one id, it would put each of them in the same place");
+                };
+                let n = backlog::queue(&open()?, id, pos, by.as_deref())?;
                 out.emit(backlog::item_summary(&n), n.to_json());
                 return Ok(0);
             }
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None, release_note })?;
-            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "hints": r.hints, "note": r.note.to_json()}));
+            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None, release_note };
+            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "hints": r.hints, "note": r.note.to_json()});
+            if let [id] = ids.as_slice() {
+                let r = backlog::move_item(&open()?, id, req)?;
+                out.emit(backlog::move_text(&r), moved_json(&r));
+                return Ok(0);
+            }
+            let results = backlog::move_items(&open()?, &ids, &req)?;
+            let mut text = String::new();
+            let mut data = vec![];
+            let mut failed = 0;
+            for (id, r) in &results {
+                match r {
+                    Ok(r) => {
+                        text.push_str(&backlog::move_text(r));
+                        data.push(moved_json(r));
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        text.push_str(&format!("failed {id}: {}\n", crate::util::one_line(&format!("{e:#}"))));
+                        data.push(json!({"id": id, "error": format!("{e:#}")}));
+                    }
+                }
+            }
+            out.emit(text, Json::Array(data));
+            if failed > 0 {
+                eprintln!("error: {failed} of {} moves failed, the others are done", results.len());
+                return Ok(1);
+            }
         }
         Cmd::Pins { scope } => {
             let v = open()?;

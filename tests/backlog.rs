@@ -143,7 +143,7 @@ fn tree_progress_promote_and_context() {
     let t1 = common::add(&v, "T1", "task", Some("app"), &[("parent", &f1.id)]);
     mv(&v, &f2.id, "shipped", None);
     let t = backlog::tree(&v, &epic.id).unwrap();
-    assert!(t.contains("APP-") && t.contains("    - ") && t.contains(&t1.id), "{t}");
+    assert!(!t.contains("APP-") && t.contains("    - ") && t.contains(&t1.id), "{t}");
     let cols = backlog::board(&v, &Scope::All, &BoardFilter { include_closed: true, ..Default::default() }).unwrap();
     let e = cols.iter().flat_map(|c| &c.items).find(|i| i.id == epic.id).unwrap();
     assert_eq!(e.progress, Some((1, 2)));

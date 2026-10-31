@@ -103,7 +103,7 @@ fn output_puts_the_slug_first_and_keeps_the_id() {
     assert!(digest::context(&v, Some("app"), 15).unwrap().contains(&want));
 
     let cols = backlog::board(&v, &scope, &Default::default()).unwrap();
-    assert!(backlog::board_text(&cols, "app").contains(&format!("stress-auto-mesh  APP-{}", a.id)));
+    assert!(backlog::board_text(&cols, "app").contains(&format!("stress-auto-mesh  {} ", a.id)));
     assert!(backlog::board_compact(&cols).contains(&want));
 
     let r = ops::search(&v, "stress", &scope, &Filter::default()).unwrap();
@@ -111,7 +111,7 @@ fn output_puts_the_slug_first_and_keeps_the_id() {
     assert!(breadcrumb::format::search_text(&r, "app").contains(&want));
 
     let m = backlog::move_item(&v, "stress-auto-mesh", backlog::MoveReq { state: "review".into(), ..Default::default() }).unwrap();
-    assert!(backlog::move_text(&m).starts_with(&format!("stress-auto-mesh APP-{} ", a.id)));
+    assert!(backlog::move_text(&m).starts_with(&format!("stress-auto-mesh {} ", a.id)));
     assert!(breadcrumb::format::ack("moved", &m.note).starts_with(&format!("moved {want} ")));
 }
 

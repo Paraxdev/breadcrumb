@@ -442,6 +442,8 @@ pub struct UpdateReq {
     pub fields: Vec<(String, FieldInput)>,
     pub unset: Vec<String>,
     pub body: Option<String>,
+    /// One exact string of the body and what takes its place.
+    pub replace: Option<(String, String)>,
     pub pinned: Option<bool>,
     pub status: Option<String>,
     /// Replaces all links when set.
@@ -545,6 +547,13 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         set_paths(&mut note, globs);
     }
     edit_refs(&mut note, &req.refs)?;
+    if let Some((old, new)) = &req.replace {
+        let found = if old.is_empty() { 0 } else { note.body.matches(old.as_str()).count() };
+        if found != 1 {
+            bail!("'{old}' occurs {found} times in the body of {}, nothing changed, it has to occur once", note.id);
+        }
+        note.body = note.body.replacen(old.as_str(), new, 1).trim_end().to_string();
+    }
     if let Some(b) = req.body {
         note.body = b.trim_end().to_string();
     }
