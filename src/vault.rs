@@ -29,6 +29,9 @@ fn default_lock_timeout() -> u64 {
 fn default_stale_days() -> u64 {
     60
 }
+fn default_pin_review_days() -> u64 {
+    30
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -45,11 +48,14 @@ pub struct Config {
     /// Notes not verified or updated for this many days are flagged as possibly stale.
     #[serde(default = "default_stale_days")]
     pub stale_days: u64,
+    /// `doctor` and `pins` flag a pin not verified for this many days, 0 turns it off.
+    #[serde(default = "default_pin_review_days")]
+    pub pin_review_days: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days() }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days() }
     }
 }
 

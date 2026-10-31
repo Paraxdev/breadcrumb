@@ -203,6 +203,11 @@ pub enum Cmd {
         #[arg(long, requires = "fix")]
         yes: bool,
     },
+    /// Every pin with its age and why it is flagged, flagged first, with the commands to verify, unpin or archive it (changes nothing)
+    Pins {
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
     /// Print the agent guide (AGENTS.md)
     Guide,
     /// Size in chars and approximate tokens of what breadcrumb injects into an agent's context
@@ -1317,6 +1322,13 @@ pub fn run(cli: Cli) -> Result<i32> {
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
             let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None, release_note })?;
             out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "hints": r.hints, "note": r.note.to_json()}));
+        }
+        Cmd::Pins { scope } => {
+            let v = open()?;
+            let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
+            let notes = ops::list(&v, &sc, &Filter { pinned: true, ..Default::default() })?;
+            let pins = crate::pins::review(&notes, v.config.pin_review_days);
+            out.emit(crate::pins::text(&pins, &sc.label(), v.config.pin_review_days), json!({"scope": sc.label(), "review_days": v.config.pin_review_days, "pins": pins}));
         }
         Cmd::Ship { range, repo, project, shipped_in, yes, by } => {
             if !range.contains("..") {

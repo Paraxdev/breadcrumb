@@ -18,6 +18,7 @@ pub mod map;
 pub mod mcp;
 pub mod note;
 pub mod ops;
+pub mod pins;
 pub mod project;
 pub mod question;
 pub mod recall;

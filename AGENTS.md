@@ -28,6 +28,8 @@ A feedback or user note can keep the user's exact words: `--said "..."` on add a
 
 ## Expiring notes
 
+Pins get retired by a person or lead, never automatically. `breadcrumb doctor` reports, as info so its error and warning counts stay comparable, pinned decisions whose body reads as finished, like a line of its own `2026-10-21 12:30: done.`, and pins not verified for `pin_review_days` (breadcrumb.toml, default 30, 0 turns it off). `breadcrumb pins [--project p | --all]` lists every pin with its age and why it is flagged, flagged first, with the commands to verify, unpin or archive it, and changes nothing. Every write sets `verified`, so a pin that was touched reads as fresh and only `doctor` and `pins` on the body can still flag it.
+
 A permission or rule meant for one night or one batch gets `--expires` (`expires` in the MCP fields): a date, the last day it holds, an RFC3339 time, `3d` or `12h` from now, or `until:<id>`, until that item is done, shipped, rejected or archived. An expired note leaves the digest and the hooks and ranks last in search, marked `[expired]`. Closing the item it waits for, the SessionEnd background job and `breadcrumb doctor --fix --yes` unpin it and set a decision's `decision_status` to superseded, and `breadcrumb doctor` names what expired in the last two weeks.
 
 ## Duplicates and search

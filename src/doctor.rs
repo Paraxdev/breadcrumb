@@ -178,6 +178,11 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
         if ops_pref_unpinned(n) {
             err(path.clone(), id.clone(), "info", format!("unpinned {}, a new session sees only its title, `breadcrumb update {} --pin` if every session needs it", n.kind, n.id));
         }
+        if n.pinned && !n.is_archived() {
+            for why in crate::pins::reasons(n, v.config.pin_review_days) {
+                err(path.clone(), id.clone(), "info", format!("pin {why}, `breadcrumb pins` shows how to verify, unpin or archive it"));
+            }
+        }
         match kinds.get(&n.kind) {
             None => err(path.clone(), id.clone(), "error", format!("unknown kind '{}', define it with `breadcrumb kind define`", n.kind)),
             Some(k) => {
