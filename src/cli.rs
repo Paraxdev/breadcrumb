@@ -352,9 +352,30 @@ pub enum Cmd {
         /// Moving to review, what the user should try (repeatable)
         #[arg(long = "step", value_name = "TEXT", allow_hyphen_values = true)]
         steps: Vec<String>,
+        /// One line for the release notes, `ship` prints it
+        #[arg(long, value_name = "LINE", allow_hyphen_values = true)]
+        release_note: Option<String>,
         /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, -type:value removes (repeatable)
         #[arg(long = "ref", value_name = "REF", allow_hyphen_values = true)]
         refs: Vec<String>,
+    },
+    /// What a range of commits landed: release note lines, items, merges no item points at, --yes moves the items to shipped
+    Ship {
+        /// A git range like origin/main..dev
+        range: String,
+        /// The checkout to read, default the one holding the current directory or the recorded project path
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Set shipped_in on the moved items
+        #[arg(long = "in", value_name = "NAME")]
+        shipped_in: Option<String>,
+        /// Move the matched open items, without it nothing changes
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        by: Option<String>,
     },
     /// What waits for your check, and the verdict: pass moves to done, fail back to queued
     Review {
@@ -787,6 +808,9 @@ pub struct UpdateArgs {
     /// The day they said it, default today
     #[arg(long, value_name = "DATE")]
     pub said_on: Option<String>,
+    /// One line for the release notes, `ship` prints it
+    #[arg(long, value_name = "LINE", allow_hyphen_values = true)]
+    pub release_note: Option<String>,
 }
 
 struct Out {
@@ -987,7 +1011,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     title: u.title,
                     kind: u.kind,
                     tags: u.tags,
-                    fields: ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires), u.said, u.said_on),
+                    fields: ops::with_field(ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires), u.said, u.said_on), backlog::RELEASE_NOTE_KEY, u.release_note),
                     unset: u.unset,
                     body: read_body_arg(u.body, u.body_file)?,
                     pinned,
@@ -1289,10 +1313,39 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => out.emit(format!("{id} has no claim to release"), Json::Null),
             }
         }
-        Cmd::Move { id, state, resolution, shipped_in, by, check, steps, refs } => {
+        Cmd::Move { id, state, resolution, shipped_in, by, check, steps, release_note, refs } => {
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None })?;
-            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "note": r.note.to_json()}));
+            let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None, release_note })?;
+            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "hints": r.hints, "note": r.note.to_json()}));
+        }
+        Cmd::Ship { range, repo, project, shipped_in, yes, by } => {
+            if !range.contains("..") {
+                bail!("'{range}' is one ref and would read its whole history, give a range like origin/main..dev");
+            }
+            let v = open()?;
+            let slug = workflow::resolve_project(&v, project.as_deref(), &cwd)?;
+            let repo = crate::map::repo_for(&v, &slug, repo.as_deref(), &cwd)?;
+            let commits = match crate::ship::commits(&repo, &range) {
+                Ok(c) => c,
+                Err(e) => {
+                    let line = e.lines().next().unwrap_or_default().to_string();
+                    out.emit(format!("could not read {range} in {}, nothing moved: {line}", repo.display()), json!({"range": range, "error": line, "moved": 0}));
+                    return Ok(0);
+                }
+            };
+            let report = crate::ship::report(&v, &slug, &commits)?;
+            let mut text = crate::ship::text(&report, &range, &repo);
+            let mut data = crate::ship::json(&report, &range, &repo);
+            if yes {
+                let ids: Vec<String> = report.open.iter().map(|n| n.id.clone()).collect();
+                let moved = backlog::ship_items(&v, &ids, shipped_in.as_deref(), by.as_deref())?;
+                text.push_str(&format!("\nMoved {} items to shipped in one vault commit\n", moved.len()));
+                data["moved"] = json!(moved.len());
+            } else {
+                text.push_str(&format!("\nDry run, --yes moves {} items to shipped\n", report.open.len()));
+                data["moved"] = json!(0);
+            }
+            out.emit(text, data);
         }
         Cmd::Review { scope, verdict } => {
             let v = open()?;

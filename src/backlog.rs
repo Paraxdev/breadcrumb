@@ -41,6 +41,7 @@ pub fn seed_kinds() -> Vec<KindDef> {
             plain("estimate", FieldType::String, "rough size, e.g. 2h, 3d, M"),
             plain("resolution", FieldType::String, "outcome when done, shipped or rejected"),
             plain("shipped_in", FieldType::String, "version, commit or PR that shipped it"),
+            plain(RELEASE_NOTE_KEY, FieldType::String, "one line for the release notes"),
         ];
         if acceptance {
             f.push(plain("acceptance", FieldType::List, "acceptance criteria, prefix met ones with [x]"));
@@ -104,6 +105,7 @@ pub fn assignee(n: &Note) -> Option<String> {
 }
 
 pub const CLAIMED_KEY: &str = "claimed";
+pub const RELEASE_NOTE_KEY: &str = "release_note";
 /// `<machine> <assignee>`, a claim's session can only be judged dead on the machine it ran on. The assignee is in the
 /// value because an old binary claiming over it leaves this key behind, a value for another assignee means nothing.
 pub const CLAIM_MACHINE_KEY: &str = "claim_machine";
@@ -795,6 +797,7 @@ pub struct MoveReq {
     pub steps: Vec<String>,
     /// The user's check of an item in review, refused for items in any other state.
     pub verdict: Option<Verdict>,
+    pub release_note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -812,6 +815,7 @@ pub struct MoveResult {
     /// False when the item already had the state and nothing else changed, so nothing was written.
     pub changed: bool,
     pub warnings: Vec<String>,
+    pub hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -935,7 +939,17 @@ fn move_warnings(n: &Note, from: &str, to: &str) -> Vec<String> {
     if to == "review" && review_steps(n).is_empty() {
         w.push(format!("{} has no steps for the user to check, add them with `breadcrumb move {} review --step \"text\"` (repeatable, MCP move steps)", n.id, n.id));
     }
+    if to == "review" && !crate::ship::has_commit_pointer(n) {
+        w.push(format!("{} has no commit: ref or shipped_in, `breadcrumb ship` cannot find it, add `--ref commit:<sha>` with the merge commit", n.id));
+    }
     w
+}
+
+fn move_hints(n: &Note, to: &str) -> Vec<String> {
+    if to == "review" && crate::ship::release_note(n).is_none() {
+        return vec![format!("{} has no release note, add a line with `breadcrumb update {} --release-note \"...\"`", n.id, n.id)];
+    }
+    vec![]
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1043,7 +1057,8 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     }
     let unchanged = |key: &str, want: &Option<String>| want.as_ref().is_none_or(|w| str_field(&n, key).as_deref() == Some(w.as_str()));
     let shipped_in = req.shipped_in.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let same = from == to && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in);
+    let release_note = req.release_note.as_deref().map(crate::util::one_line).filter(|s| !s.trim().is_empty());
+    let same = from == to && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) && unchanged(RELEASE_NOTE_KEY, &release_note);
     let ticked = match &req.check {
         Some(c) => apply_check(&mut n, c)?,
         None => 0,
@@ -1057,8 +1072,8 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     crate::ops::edit_refs(&mut n, &ref_edits)?;
     if same && ticked == 0 && added == 0 && n.refs() == refs_before {
         let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
-        let warnings = move_warnings(&n, &from, &to);
-        return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings });
+        let (warnings, hints) = (move_warnings(&n, &from, &to), move_hints(&n, &to));
+        return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings, hints });
     }
     match &req.verdict {
         Some(Verdict::Pass) if n.field("acceptance").is_some() => {
@@ -1079,6 +1094,9 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     if let Some(s) = shipped_in {
         n.set_field("shipped_in", Value::String(s));
     }
+    if let Some(s) = release_note {
+        n.set_field(RELEASE_NOTE_KEY, Value::String(s));
+    }
     if to == "queued" && from != "queued" {
         let all = v.load_notes();
         n.set_field("rank", Value::Number(end_rank(&all, &n.project, &n.id).into()));
@@ -1093,8 +1111,56 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let mut waiting = if is_closed(&to) { crate::lifecycle::waiting_for(&v.load_notes(), &n.id) } else { vec![] };
     waiting.iter_mut().for_each(crate::lifecycle::mark);
     save_with(v, &mut n, "move", waiting)?;
-    let warnings = move_warnings(&n, &from, &to);
-    Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings })
+    let (warnings, hints) = (move_warnings(&n, &from, &to), move_hints(&n, &to));
+    Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings, hints })
+}
+
+/// Moves items to shipped in one vault commit and returns the ones it moved. One already closed by now stays as it is.
+pub fn ship_items(v: &Vault, ids: &[String], shipped_in: Option<&str>, by: Option<&str>) -> Result<Vec<Note>> {
+    let shipped_in = shipped_in.map(str::trim).filter(|s| !s.is_empty());
+    let _g = v.lock()?;
+    let mut items = vec![];
+    for id in ids {
+        let mut n = get_item(v, id)?;
+        let from = state(&n);
+        if matches!(from.as_str(), "shipped" | "rejected") {
+            continue;
+        }
+        n.set_field("state", Value::String("shipped".into()));
+        if let Some(s) = shipped_in {
+            n.set_field("shipped_in", Value::String(s.to_string()));
+            if is_sha(s) {
+                crate::ops::edit_refs(&mut n, &[format!("commit:{s}")])?;
+            }
+        }
+        record_state_change(&mut n, &from, "shipped", by);
+        v.require_kind(&n.kind)?.validate(&mut n.extra)?;
+        items.push(n);
+    }
+    if items.is_empty() {
+        return Ok(items);
+    }
+    // Notes with `expires: until:<item>` stop holding now, one may wait for several items or be shipped itself.
+    let all = v.load_notes();
+    let mut waiting: HashMap<String, Note> = HashMap::new();
+    for n in &items {
+        waiting.extend(crate::lifecycle::waiting_for(&all, &n.id).into_iter().map(|w| (w.id.clone(), w)));
+    }
+    let mut paths = vec![];
+    for n in &mut items {
+        if waiting.remove(&n.id).is_some() {
+            crate::lifecycle::mark(n);
+        }
+        crate::session::stamp_write(n);
+        n.updated = now();
+        paths.push(v.write_note(n)?);
+    }
+    for w in waiting.values_mut() {
+        crate::lifecycle::mark(w);
+        paths.push(v.write_note(w)?);
+    }
+    v.commit(&paths, &format!("breadcrumb: ship {} items", items.len()))?;
+    Ok(items)
 }
 
 fn is_sha(s: &str) -> bool {
@@ -1116,6 +1182,9 @@ pub fn move_text(r: &MoveResult) -> String {
     }
     for w in &r.warnings {
         let _ = writeln!(s, "warning: {w}");
+    }
+    for h in &r.hints {
+        let _ = writeln!(s, "hint: {h}");
     }
     s
 }

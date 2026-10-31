@@ -1,7 +1,6 @@
 mod common;
 
 use breadcrumb::backlog::{self, MoveReq};
-use breadcrumb::ops::Scope;
 use breadcrumb::serve::{App, Request, Response};
 use breadcrumb::vault::Vault;
 use serde_json::{Value, json};
@@ -45,14 +44,14 @@ fn steps_are_acceptance_criteria_and_moving_without_them_only_warns() {
     assert!(r.warnings[0].contains("no steps") && backlog::move_text(&r).contains("warning: "), "{:?}", r.warnings);
 
     let r = to_review(&v, &a.id, &["Open the app", "Press the button"]);
-    assert!(r.changed && r.warnings.is_empty());
+    assert!(r.changed && !r.warnings.iter().any(|w| w.contains("no steps")));
     assert_eq!(backlog::review_steps(&r.note), ["Open the app", "Press the button"]);
     assert_eq!(backlog::unmet_acceptance(&r.note).len(), 2);
     assert!(!to_review(&v, &a.id, &["open the APP"]).changed, "a known step is not added twice");
 
     let f = common::add(&v, "Has criteria", "feature", Some("app"), &[("acceptance", "['[x] builds', renders]")]);
     let r = to_review(&v, &f.id, &[]);
-    assert!(r.warnings.is_empty(), "open criteria are the steps");
+    assert!(!r.warnings.iter().any(|w| w.contains("no steps")), "open criteria are the steps");
     assert_eq!(backlog::review_steps(&r.note), ["renders"]);
     let r = to_review(&v, &f.id, &["builds"]);
     assert_eq!(backlog::review_steps(&r.note), ["builds", "renders"], "asking for a met one again opens it");
@@ -95,7 +94,7 @@ fn pass_and_fail_through_the_cli() {
     let (_d, v) = common::vault();
     let a = common::add(&v, "Pass me", "task", Some("app"), &[("priority", "p1")]);
     let (ok, out, _) = crumb(&v, &["move", &a.id, "review", "--step", "Open it", "--step", "Click it"]);
-    assert!(ok && !out.contains("warning"), "{out}");
+    assert!(ok && !out.contains("no steps"), "{out}");
     let (_, out, _) = crumb(&v, &["review", "--project", "app"]);
     assert!(out.contains("1. Open it") && out.contains("2. Click it"), "{out}");
 

@@ -337,7 +337,7 @@ impl Server {
                     return Ok(format::ack("queued", &n));
                 }
                 let check = s(a, "check").map(|c| backlog::Check::parse(&c)).transpose()?;
-                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict: None })?;
+                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict: None, release_note: s(a, "release_note") })?;
                 let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.handle(), r.to) };
                 if !r.unmet.is_empty() {
                     let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
@@ -345,6 +345,9 @@ impl Server {
                 }
                 for w in &r.warnings {
                     out.push_str(&format!("\nwarning: {w}"));
+                }
+                for h in &r.hints {
+                    out.push_str(&format!("\nhint: {h}"));
                 }
                 Ok(out)
             }
@@ -546,6 +549,7 @@ fn fields(a: &Map<String, Value>, k: &str) -> Result<Vec<(String, FieldInput)>> 
 /// `fields` plus the options that are fields under the hood.
 fn note_fields(a: &Map<String, Value>) -> Result<Vec<(String, FieldInput)>> {
     let f = ops::with_field(fields(a, "fields")?, crate::digest::SUMMARY_KEY, s(a, "summary"));
+    let f = ops::with_field(f, backlog::RELEASE_NOTE_KEY, s(a, "release_note"));
     Ok(ops::with_said(ops::with_field(f, crate::note::EXPIRES_KEY, s(a, "expires")), s(a, "said"), s(a, "said_on")))
 }
 
@@ -652,7 +656,7 @@ pub fn tool_defs() -> Vec<Value> {
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
     let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});
-    let by = || json!({"type": "string", "description": "session name"});
+    let by = || json!({"type": "string", "description": "session"});
     let paths = || json!({"type": "array", "items": {"type": "string"}, "description": "file globs, src/db/**"});
     vec![
         tool("context", "Reload the session start digest.", obj(with(target(), json!({"kinds": bl()})), &[])),
@@ -683,8 +687,9 @@ pub fn tool_defs() -> Vec<Value> {
             "body": {"type": "string", "description": "replaces"},
             "tags": {"type": "array", "items": {"type": "string"}, "description": "-tag removes"},
             "fields": fields(),
-            "unset": {"type": "array", "items": {"type": "string"}, "description": "fields to remove"},
-            "links": {"type": "array", "items": {"type": ["string", "object"]}, "description": "replaces all links"},
+            "release_note": st(),
+            "unset": {"type": "array", "items": {"type": "string"}, "description": "removes"},
+            "links": {"type": "array", "items": {"type": ["string", "object"]}, "description": "replaces"},
             "pinned": bl(),
             "status": {"type": "string", "enum": ["active", "archived"]},
             "paths": paths(),
@@ -701,11 +706,12 @@ pub fn tool_defs() -> Vec<Value> {
         tool("delete", "Delete a note, prefer archiving.", obj(with(id(), json!({"confirm": bl()})), &["id", "confirm"])),
         tool("move", "Change a backlog item's state.", obj(with(id(), json!({
             "state": {"type": "string", "enum": backlog::STATES},
-            "position": {"type": "string", "description": "queued: top or id to follow"},
-            "resolution": {"type": "string", "description": "required for rejected"},
+            "position": {"type": "string", "description": "queued: top or id"},
+            "resolution": {"type": "string", "description": "for rejected"},
             "shipped_in": st(),
-            "check": {"type": "string", "description": "tick acceptance: all or 2,3"},
+            "check": {"type": "string", "description": "tick: all or 2,3"},
             "steps": {"type": "array", "items": st(), "description": "review: what to try"},
+            "release_note": st(),
             "refs": refs(),
             "by": st(),
         })), &["id", "state"])),

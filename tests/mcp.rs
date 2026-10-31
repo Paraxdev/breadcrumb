@@ -228,3 +228,25 @@ fn compact_rows_and_write_acks() {
     assert!(ctx.starts_with("breadcrumb context: app\n") && ctx.contains("\nKinds:\n") && ctx.contains("Recent (14 of "), "{ctx}");
     assert!(!ctx.contains("\n\n") && !ctx.contains('#'), "{ctx}");
 }
+
+#[test]
+fn move_and_update_set_a_release_note_and_review_says_when_it_is_missing() {
+    let (d, v) = common::vault();
+    let srv = Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let a = common::add(&v, "One", "task", Some("app"), &[]);
+    let b = common::add(&v, "Two", "task", Some("app"), &[]);
+    let out = run(
+        &srv,
+        &[
+            call(1, "move", json!({"id": a.id, "state": "review", "steps": ["Try"], "refs": ["commit:abc1234"]})),
+            call(2, "update", json!({"id": a.id, "release_note": "From update"})),
+            call(3, "move", json!({"id": b.id, "state": "review", "steps": ["Try"], "release_note": "From move"})),
+        ],
+        &[],
+    );
+    assert!(text(&out[0]).contains("hint:") && text(&out[0]).contains("no release note"), "{}", text(&out[0]));
+    assert!(!text(&out[0]).contains("no commit: ref"), "{}", text(&out[0]));
+    assert!(text(&out[2]).contains("no commit: ref") && !text(&out[2]).contains("hint:"), "{}", text(&out[2]));
+    assert_eq!(v.get(&a.id).unwrap().field("release_note").and_then(|x| x.as_str()), Some("From update"));
+    assert_eq!(v.get(&b.id).unwrap().field("release_note").and_then(|x| x.as_str()), Some("From move"));
+}
