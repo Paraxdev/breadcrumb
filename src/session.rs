@@ -36,9 +36,15 @@ pub struct Live {
 
 /// Sessions with a file under <claude dir>/sessions whose process still runs. A file without `pid` counts as running.
 pub fn live_sessions() -> Vec<Live> {
-    let Some(dir) = crate::importer::default_claude_dir().map(|d| d.join("sessions")) else { return vec![] };
-    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
-    rd.flatten()
+    read_sessions().unwrap_or_default()
+}
+
+/// None when this machine has no session list to ask, so nothing can be said about who is dead.
+fn read_sessions() -> Option<Vec<Live>> {
+    let dir = crate::importer::default_claude_dir()?.join("sessions");
+    let rd = std::fs::read_dir(dir).ok()?;
+    let live = rd
+        .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(e.path()).ok()?).ok())
         .filter(|j| match j["pid"].as_u64() {
@@ -50,7 +56,8 @@ pub fn live_sessions() -> Vec<Live> {
             let name = j["name"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
             Some(Live { id, name })
         })
-        .collect()
+        .collect();
+    Some(live)
 }
 
 /// A live session by full id, an id prefix of at least 8 characters (what claims store) or its current name.
@@ -59,7 +66,31 @@ pub fn find(who: &str) -> Option<Live> {
     if who.is_empty() {
         return None;
     }
-    live_sessions().into_iter().find(|s| s.id == who || (who.chars().count() >= SHORT_LEN && s.id.starts_with(who)) || s.name.as_deref() == Some(who))
+    live_sessions().into_iter().find(|s| matches(s, who))
+}
+
+fn matches(s: &Live, who: &str) -> bool {
+    s.id == who || (who.chars().count() >= SHORT_LEN && s.id.starts_with(who)) || s.name.as_deref() == Some(who)
+}
+
+/// The 8 character id claims store or a whole session id. Anything else is free text no session file can match.
+fn looks_like_id(who: &str) -> bool {
+    let hex = |s: &str| s.chars().all(|c| c.is_ascii_hexdigit());
+    (who.len() == SHORT_LEN && hex(who)) || (who.len() == 36 && hex(&who.replace('-', "")))
+}
+
+/// Whether this machine's session list says the session ended. Only means something for a session of this machine.
+pub fn known_dead(who: &str) -> bool {
+    let who = who.trim();
+    if !looks_like_id(who) || current().is_some_and(|c| c.starts_with(who)) {
+        return false;
+    }
+    read_sessions().is_some_and(|live| !live.iter().any(|s| matches(s, who)))
+}
+
+/// The current name of a claim's assignee when it is a live session, otherwise the assignee as stored.
+pub fn holder(who: &str) -> String {
+    find(who).and_then(|s| s.name).unwrap_or_else(|| who.to_string())
 }
 
 pub fn is_alive(who: &str) -> bool {

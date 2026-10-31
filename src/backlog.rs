@@ -104,6 +104,9 @@ pub fn assignee(n: &Note) -> Option<String> {
 }
 
 pub const CLAIMED_KEY: &str = "claimed";
+/// `<machine> <assignee>`, a claim's session can only be judged dead on the machine it ran on. The assignee is in the
+/// value because an old binary claiming over it leaves this key behind, a value for another assignee means nothing.
+pub const CLAIM_MACHINE_KEY: &str = "claim_machine";
 pub const SESSION_ENV: &str = "BREADCRUMB_SESSION";
 /// A claim with no write to its item for this long no longer keeps other sessions away.
 pub const CLAIM_STALE_HOURS: i64 = 24;
@@ -120,9 +123,62 @@ pub fn claimed_at(n: &Note) -> Option<chrono::DateTime<chrono::Utc>> {
     str_field(n, CLAIMED_KEY).and_then(|s| crate::util::parse_time(&s))
 }
 
+fn last_activity(n: &Note) -> chrono::DateTime<chrono::Utc> {
+    claimed_at(n).map_or(n.updated, |c| c.max(n.updated))
+}
+
+fn quiet_for_a_day(n: &Note) -> bool {
+    (now() - last_activity(n)).num_hours() >= CLAIM_STALE_HOURS
+}
+
+/// The vault syncs between machines and sessions are only listed locally, so anything but a claim recorded on this
+/// machine is left to the one day rule.
+fn claim_dead_here(n: &Note) -> bool {
+    let (Some(a), Some(rec)) = (assignee(n), str_field(n, CLAIM_MACHINE_KEY)) else { return false };
+    let machine = crate::util::machine_name();
+    machine != "unknown" && rec.split_once(' ').is_some_and(|(m, who)| m == machine && who.eq_ignore_ascii_case(&a)) && crate::session::known_dead(&a)
+}
+
 pub fn claim_stale(n: &Note) -> bool {
-    let last = claimed_at(n).map_or(n.updated, |c| c.max(n.updated));
-    (now() - last).num_hours() >= CLAIM_STALE_HOURS
+    claim_dead_here(n) || quiet_for_a_day(n)
+}
+
+fn set_claim(n: &mut Note, by: &str) {
+    n.set_field("assignee", Value::String(by.to_string()));
+    n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
+    n.set_field(CLAIM_MACHINE_KEY, Value::String(format!("{} {by}", crate::util::machine_name())));
+}
+
+fn clear_claim(n: &mut Note) {
+    n.unset_field("assignee");
+    n.unset_field(CLAIMED_KEY);
+    n.unset_field(CLAIM_MACHINE_KEY);
+}
+
+fn is_build_ref(r: &str) -> bool {
+    r.starts_with("branch:") || r.starts_with("run:")
+}
+
+/// The ref showing work runs for a queued item. Leads start lanes with workflows, so the stored state stays queued.
+/// A ref has no time of its own, so a day without a write or a dead session's claim ends it, or a lost lane would
+/// hide its item from `next` forever.
+pub fn being_built(n: &Note) -> Option<String> {
+    if state(n) != "queued" || quiet_for_a_day(n) || claim_dead_here(n) {
+        return None;
+    }
+    n.refs().into_iter().find(|r| is_build_ref(r))
+}
+
+/// Going back to the queue ends an earlier build, its refs would read as work still running. The history keeps them.
+fn end_build_refs(n: &mut Note, from: &str, keep: &[String], by: Option<&str>) {
+    if !matches!(from, "in-progress" | "review" | "done" | "shipped" | "rejected") {
+        return;
+    }
+    let (ended, kept): (Vec<String>, Vec<String>) = n.refs().into_iter().partition(|r| is_build_ref(r) && !keep.contains(r));
+    if !ended.is_empty() {
+        n.set_refs(kept);
+        n.body = append_history(&n.body, &event_line(&format!("build refs ended: {}", ended.join(" ")), &actor(by)));
+    }
 }
 
 /// The assignee while the claim is fresh, unless that is `who`.
@@ -157,15 +213,14 @@ pub fn claim(v: &Vault, id: &str, by: &str, force: bool) -> Result<Note> {
     if let Some(h) = held_by_other(&n, Some(&by))
         && !force
     {
-        bail!("{} is claimed by {h}, last written {} ago, pass force to take it over", n.id, age(&n));
+        bail!("{} is claimed by {}, last written {} ago, pass force to take it over", n.id, crate::session::holder(&h), age(&n));
     }
     let (what, by) = match assignee(&n) {
         Some(p) if !p.eq_ignore_ascii_case(&by) => (format!("claim taken over from {p}"), by),
         Some(p) => ("claim renewed".to_string(), p),
         None => ("claimed".to_string(), by),
     };
-    n.set_field("assignee", Value::String(by.clone()));
-    n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
+    set_claim(&mut n, &by);
     n.body = append_history(&n.body, &event_line(&what, &by));
     crate::question::ack_in(&mut n, &by);
     save(v, &mut n, "claim")?;
@@ -183,8 +238,7 @@ pub fn release(v: &Vault, id: &str, by: &str, force: bool) -> Result<Option<Note
     {
         bail!("{} is claimed by {h}, not {by}, pass force to release it anyway", n.id);
     }
-    n.unset_field("assignee");
-    n.unset_field(CLAIMED_KEY);
+    clear_claim(&mut n);
     let what = if holder.eq_ignore_ascii_case(&by) { "released".to_string() } else { format!("released the claim of {holder}") };
     n.body = append_history(&n.body, &event_line(&what, &by));
     save(v, &mut n, "release")?;
@@ -373,6 +427,12 @@ pub struct BoardItem {
     pub priority: String,
     pub rank: Option<f64>,
     pub assignee: Option<String>,
+    /// The assignee under its current session name.
+    pub holder: Option<String>,
+    /// Since the last write or claim, like 45m, 3h, 2d.
+    pub age: String,
+    /// The branch or run ref of a queued item being built.
+    pub building: Option<String>,
     /// When a session claimed it.
     pub claimed: Option<String>,
     /// A session claim on an open item with no write for a day.
@@ -400,6 +460,9 @@ impl BoardItem {
             priority: priority(n),
             rank: rank(n),
             assignee: assignee(n),
+            holder: assignee(n).map(|a| crate::session::holder(&a)),
+            age: crate::util::short_age(&last_activity(n)),
+            building: being_built(n),
             claimed: str_field(n, CLAIMED_KEY),
             claim_stale: assignee(n).is_some() && claimed_at(n).is_some() && !is_closed(&state(n)) && claim_stale(n),
             project: n.project.clone(),
@@ -416,9 +479,10 @@ impl BoardItem {
     pub fn short(&self) -> String {
         let name = self.slug.as_ref().map(|x| format!("{x} ")).unwrap_or_default();
         let mut s = format!("{name}{} {} {} {}", self.id, self.kind, self.priority, crate::format::fit_title(&self.title, self.slug.as_deref()));
-        if let Some(a) = &self.assignee {
+        if let Some(a) = &self.holder {
             let _ = write!(s, " @{a}{}", if self.claim_stale { " (stale)" } else { "" });
         }
+        s.push_str(&self.work_mark());
         if self.blocked {
             let _ = write!(s, " [blocked by {}]", self.blocked_by.join(", "));
         }
@@ -432,9 +496,10 @@ impl BoardItem {
     pub fn line(&self) -> String {
         let name = self.slug.as_ref().map(|x| format!("{x}  ")).unwrap_or_default();
         let mut s = format!("{name}{}  {:<7} {}  {}", self.key, self.kind, self.priority, self.title);
-        if let Some(a) = &self.assignee {
+        if let Some(a) = &self.holder {
             let _ = write!(s, "  @{a}{}", if self.claim_stale { " (stale claim)" } else { "" });
         }
+        s.push_str(&self.work_mark());
         if self.blocked {
             let _ = write!(s, "  [blocked by {}]", self.blocked_by.join(", "));
         }
@@ -443,6 +508,16 @@ impl BoardItem {
         }
         s.push_str(self.question_mark());
         s
+    }
+
+    /// The age for work under way, in progress without an owner says so.
+    fn work_mark(&self) -> String {
+        match (&self.building, self.state.as_str(), &self.holder) {
+            (Some(b), ..) => format!(" [being built {b} {}]", self.age),
+            (None, "in-progress", Some(_)) => format!(" {}", self.age),
+            (None, "in-progress", None) => format!(" (no owner) {}", self.age),
+            _ => String::new(),
+        }
     }
 
     fn question_mark(&self) -> &'static str {
@@ -476,6 +551,8 @@ fn scoped_items(v: &Vault, scope: &Scope) -> Result<(Vec<Note>, Vec<String>)> {
 
 /// Board column for items locked by an open question, whatever their state.
 pub const WAITING: &str = "waiting-on-user";
+/// Board column for queued items with a branch or run ref. Their stored state stays queued.
+pub const BUILDING: &str = "being-built";
 
 fn waiting_items(all: &[Note], ids: &HashSet<&str>, f: &BoardFilter, idx: &Index) -> Vec<BoardItem> {
     let mut items: Vec<&Note> = all
@@ -499,13 +576,23 @@ pub fn board(v: &Vault, scope: &Scope, f: &BoardFilter) -> Result<Vec<Column>> {
         }
         let mut items: Vec<&Note> = all
             .iter()
-            .filter(|n| ids.contains(n.id.as_str()) && state(n) == st && !crate::question::locked(n))
+            .filter(|n| ids.contains(n.id.as_str()) && state(n) == st && !crate::question::locked(n) && being_built(n).is_none())
             .filter(|n| f.kind.as_ref().is_none_or(|k| n.kind.eq_ignore_ascii_case(k)))
             .filter(|n| f.assignee.as_ref().is_none_or(|a| assignee(n).is_some_and(|x| x.eq_ignore_ascii_case(a))))
             .collect();
         sort_items(&mut items);
         cols.push(Column { state: st.to_string(), items: items.iter().map(|n| BoardItem::from_note(n, &idx)).collect() });
         if st == "in-progress" {
+            let mut built: Vec<&Note> = all
+                .iter()
+                .filter(|n| ids.contains(n.id.as_str()) && being_built(n).is_some() && !crate::question::locked(n))
+                .filter(|n| f.kind.as_ref().is_none_or(|k| n.kind.eq_ignore_ascii_case(k)))
+                .filter(|n| f.assignee.as_ref().is_none_or(|a| assignee(n).is_some_and(|x| x.eq_ignore_ascii_case(a))))
+                .collect();
+            sort_items(&mut built);
+            if !built.is_empty() {
+                cols.push(Column { state: BUILDING.to_string(), items: built.iter().map(|n| BoardItem::from_note(n, &idx)).collect() });
+            }
             cols.push(Column { state: WAITING.to_string(), items: waiting_items(&all, &ids, f, &idx) });
         }
     }
@@ -634,6 +721,7 @@ pub fn queue(v: &Vault, id: &str, pos: QueuePos, by: Option<&str>) -> Result<Not
     n.set_field("state", Value::String("queued".into()));
     n.set_field("rank", Value::Number(r.into()));
     record_state_change(&mut n, &from, "queued", by);
+    end_build_refs(&mut n, &from, &[], by);
     save(v, &mut n, "queue")?;
     Ok(n)
 }
@@ -665,6 +753,7 @@ pub fn next_notice(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, clai
             _ => true,
         })
         .filter(|n| held_by_other(n, who).is_none())
+        .filter(|n| being_built(n).is_none() || who.is_some_and(|w| assignee(n).is_some_and(|a| a.eq_ignore_ascii_case(w))))
         .collect();
     sort_items(&mut cands);
     cands.sort_by_key(|n| !crate::question::answered_unseen(n));
@@ -679,8 +768,7 @@ pub fn next_notice(v: &Vault, scope: &Scope, assignee_filter: Option<&str>, clai
             record_state_change(&mut n, "queued", "in-progress", Some(&by));
         }
         if !is_closed(&from) {
-            n.set_field("assignee", Value::String(by.clone()));
-            n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
+            set_claim(&mut n, &by);
         }
         crate::question::ack_in(&mut n, &by);
         save(v, &mut n, "claim")?;
@@ -853,8 +941,11 @@ pub fn review_steps(n: &Note) -> Vec<String> {
     unmet_acceptance(n).iter().map(|c| criterion_text(c).to_string()).collect()
 }
 
-fn move_warnings(n: &Note, to: &str) -> Vec<String> {
+fn move_warnings(n: &Note, from: &str, to: &str) -> Vec<String> {
     let mut w = vec![];
+    if from == "queued" && to == "review" && assignee(n).is_none() {
+        w.push(format!("{} went from queued to review and was never claimed, `breadcrumb claim {}` when work starts so nobody else picks it up", n.id, n.id));
+    }
     if to == "review" && review_steps(n).is_empty() {
         w.push(format!("{} has no steps for the user to check, add them with `breadcrumb move {} review --check \"step\"` (repeatable, MCP move steps)", n.id, n.id));
     }
@@ -980,7 +1071,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     crate::ops::edit_refs(&mut n, &ref_edits)?;
     if same && ticked == 0 && added == 0 && n.refs() == refs_before {
         let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
-        let warnings = move_warnings(&n, &to);
+        let warnings = move_warnings(&n, &from, &to);
         return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings });
     }
     match &req.verdict {
@@ -991,8 +1082,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
             let who = crate::session::attribute(req.by.as_deref());
             let date = crate::util::fmt_date(&now());
             n.body = insert_before_history(&n.body, &format!("{date} {who}:\nreview failed: {}", crate::util::normalize_newlines(reason.trim())));
-            n.unset_field("assignee");
-            n.unset_field(CLAIMED_KEY);
+            clear_claim(&mut n);
         }
         _ => {}
     }
@@ -1009,11 +1099,15 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     }
     let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
     record_state_change(&mut n, &from, &to, req.by.as_deref());
+    if to == "queued" {
+        let keep = crate::note::normalize_refs(&req.refs.iter().filter(|r| !r.trim().starts_with('-')).map(|r| r.trim().trim_start_matches('+').to_string()).collect::<Vec<_>>())?;
+        end_build_refs(&mut n, &from, &keep, req.by.as_deref());
+    }
     // Notes with `expires: until:<this item>` stop holding now.
     let mut waiting = if is_closed(&to) { crate::lifecycle::waiting_for(&v.load_notes(), &n.id) } else { vec![] };
     waiting.iter_mut().for_each(crate::lifecycle::mark);
     save_with(v, &mut n, "move", waiting)?;
-    let warnings = move_warnings(&n, &to);
+    let warnings = move_warnings(&n, &from, &to);
     Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings })
 }
 
@@ -1209,6 +1303,8 @@ pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
         .filter(|(_, c)| *c > 0)
         .map(|(st, c)| format!("{st} {c}"))
         .collect();
+    let mut built: Vec<&Note> = items.iter().copied().filter(|n| being_built(n).is_some() && !crate::question::locked(n)).collect();
+    sort_items(&mut built);
     let mut s = format!("Backlog: {}\n", counts.join(", "));
     let mut wip: Vec<&Note> = items.iter().copied().filter(|n| state(n) == "in-progress").collect();
     sort_items(&mut wip);
@@ -1218,7 +1314,13 @@ pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
             let _ = writeln!(s, "{}", BoardItem::from_note(n, &idx).short());
         }
     }
-    let mut queued: Vec<&Note> = items.iter().copied().filter(|n| state(n) == "queued" && !crate::question::locked(n)).collect();
+    if !built.is_empty() {
+        s.push_str("Being built (stored as queued):\n");
+        for n in built {
+            let _ = writeln!(s, "{}", BoardItem::from_note(n, &idx).short());
+        }
+    }
+    let mut queued: Vec<&Note> = items.iter().copied().filter(|n| state(n) == "queued" && !crate::question::locked(n) && being_built(n).is_none()).collect();
     sort_items(&mut queued);
     if !queued.is_empty() {
         s.push_str("Queued (next takes the first unblocked):\n");

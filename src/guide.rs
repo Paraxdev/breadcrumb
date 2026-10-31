@@ -7,10 +7,10 @@ Git-backed memory and backlog shared by agent sessions. Use the MCP tools or CLI
 - One fact per note with a short specific title. Pin only what every session needs, a pin shows one line, `get` the body.
 - A rule for one night or one batch gets `expires`: a date, 3d, or until:<id>.
 - Kinds: note, decision, gotcha, todo, handoff, reference, plan, feedback, user, map (read with `brief`). `kinds` lists them.
-- Backlog items (idea, epic, feature, task, bug) have a state and priority p0 to p3. `next` picks work, `claim` marks yours, `move` changes state.
+- Backlog items (idea, epic, feature, task, bug) have a state and priority p0 to p3. `next` picks work, `move` changes state. `claim` when work starts, also for a lane or workflow.
 - `move` to review with how to check it: `--check "step"` (MCP `steps`), the user sees them in `review`.
 - Need the user's call on an item? `ask` locks it until answered. Items with an unseen answer come first: built means adjust, not built means build with it. `claim` or `ack` clears it.
-- Machine facts (where things live on this PC) go in kind `env`.
+- Machine facts go in kind `env`.
 - Writes record session and date.
 - End of session: add a `handoff`, it replaces only this session's or its `track`'s, `supersedes` names another.
 - Handoffs and feedback notes keep what the user said (`said`, the quote) apart from conclusions.

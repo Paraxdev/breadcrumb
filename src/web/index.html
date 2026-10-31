@@ -237,6 +237,7 @@ async function loadBoard() {
     colEl.addEventListener("drop", (e) => {
       e.preventDefault(); colEl.classList.remove("over");
       const id = e.dataTransfer.getData("text/plain");
+      if (col.state === "being-built" || col.state === "waiting-on-user") return;
       if (id && !(S.drag && S.drag.id === id && S.drag.state === col.state)) moveTo(id, col.state);
     });
     for (const it of col.items) items.append(card(it));
@@ -246,7 +247,9 @@ async function loadBoard() {
 
 function card(it) {
   const foot = [];
-  if (it.assignee) foot.push(h("span", { text: "@" + it.assignee + (it.claim_stale ? " (stale)" : ""), title: it.claimed ? "claimed " + it.claimed : "" }));
+  if (it.assignee) foot.push(h("span", { text: "@" + it.holder + (it.claim_stale ? " (stale)" : ""), title: it.claimed ? "claimed " + it.claimed : "" }));
+  if (it.building) foot.push(h("span", { text: it.building + " " + it.age }));
+  else if (it.state === "in-progress") foot.push(h("span", { text: (it.assignee ? "" : "no owner ") + it.age }));
   if (it.blocked) foot.push(h("span", { class: "blocked", text: "blocked", title: "blocked by " + it.blocked_by.join(", ") }));
   if (it.progress) foot.push(h("span", { text: it.progress[0] + "/" + it.progress[1] + " done" }));
   const el = h("div", { class: "card", draggable: "true" },

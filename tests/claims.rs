@@ -75,7 +75,7 @@ fn next_skips_items_other_sessions_hold_and_the_board_shows_holders() {
     assert!(it.claim_stale && it.short().ends_with(" @s1 (stale)") && it.line().contains("@s1 (stale claim)"), "{}", it.line());
     assert_eq!(next(Some("s3")), Some(first.id.clone()), "a stale claim no longer keeps others away");
     let ctx = breadcrumb::ops::context(&v, Some("app"), 15).unwrap();
-    assert!(ctx.contains(&format!("{} task p2 Second @s2\n", second.id)), "{ctx}");
+    assert!(ctx.contains(&format!("{} task p2 Second @s2 0m\n", second.id)), "{ctx}");
 }
 
 #[test]
