@@ -77,6 +77,31 @@ fn go_quiet(v: &Vault, id: &str) {
 }
 
 #[test]
+fn an_unreadable_session_file_says_nothing_about_who_is_dead() {
+    let e = setup();
+    let id = queued(&e, "Claimed by a dead session");
+    claim_then_die(&e, &id, "pc-a");
+    assert!(crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1.contains("(stale"), "a whole list reads it as dead");
+
+    let sessions = e.claude.join("sessions");
+    std::fs::write(sessions.join("torn.json"), r#"{"pid":"#).unwrap();
+    assert!(!crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1.contains("(stale"), "half a file may be that session");
+    let (ok, out) = crumb(&e, ME, "pc-a", &["claim", &id]);
+    assert!(!ok && out.contains("claimed by"), "{out}");
+    std::fs::remove_file(sessions.join("torn.json")).unwrap();
+
+    std::fs::create_dir(sessions.join("locked.json")).unwrap();
+    assert!(!crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1.contains("(stale"), "a file that fails to read may be that session");
+    std::fs::remove_dir(sessions.join("locked.json")).unwrap();
+
+    std::fs::write(sessions.join("noid.json"), r#"{"name":"x"}"#).unwrap();
+    assert!(!crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1.contains("(stale"), "a file with no session id may be that session");
+    std::fs::remove_file(sessions.join("noid.json")).unwrap();
+
+    assert!(crumb(&e, ME, "pc-a", &["claim", &id]).0, "a whole list again");
+}
+
+#[test]
 fn a_branch_or_run_ref_on_a_queued_item_is_being_built_without_changing_its_state() {
     let e = setup();
     let lane = queued(&e, "Lane item");

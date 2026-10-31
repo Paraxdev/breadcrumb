@@ -2,12 +2,14 @@
 
 use crate::note::{Note, yaml_scalar_string};
 use serde_yaml::Value;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const SESSION_KEY: &str = "session";
 pub const LAST_SESSION_KEY: &str = "last_session";
 pub const ID_ENV: &str = "CLAUDE_CODE_SESSION_ID";
 pub const SHORT_LEN: usize = 8;
+const RETRY_MS: u64 = 30;
 
 static DISABLED: AtomicBool = AtomicBool::new(false);
 
@@ -34,30 +36,73 @@ pub struct Live {
     pub name: Option<String>,
 }
 
+struct SessionList {
+    live: Vec<Live>,
+    /// False when some file could not be read, then the session it holds may be any of them.
+    whole: bool,
+}
+
 /// Sessions with a file under <claude dir>/sessions whose process still runs. A file without `pid` counts as running.
 pub fn live_sessions() -> Vec<Live> {
-    read_sessions().unwrap_or_default()
+    read_sessions().map(|l| l.live).unwrap_or_default()
+}
+
+enum SessionFile {
+    Gone,
+    Bad,
+    Good(serde_json::Value),
+}
+
+fn try_session_file(path: &Path) -> SessionFile {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_or(SessionFile::Bad, SessionFile::Good),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SessionFile::Gone,
+        Err(_) => SessionFile::Bad,
+    }
+}
+
+/// Note: Claude Code rewrites these files in place, so a read can meet half a file or a Windows sharing violation.
+fn session_file(path: &Path) -> SessionFile {
+    match try_session_file(path) {
+        SessionFile::Bad => {
+            std::thread::sleep(std::time::Duration::from_millis(RETRY_MS));
+            try_session_file(path)
+        }
+        read => read,
+    }
 }
 
 /// None when this machine has no session list to ask, so nothing can be said about who is dead.
-fn read_sessions() -> Option<Vec<Live>> {
+fn read_sessions() -> Option<SessionList> {
     let dir = crate::importer::default_claude_dir()?.join("sessions");
-    let rd = std::fs::read_dir(dir).ok()?;
-    let live = rd
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(e.path()).ok()?).ok())
-        .filter(|j| match j["pid"].as_u64() {
-            Some(pid) => process_running(pid as u32, j["procStart"].as_str()),
-            None => true,
-        })
-        .filter_map(|j| {
-            let id = j["sessionId"].as_str()?.to_string();
-            let name = j["name"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-            Some(Live { id, name })
-        })
-        .collect();
-    Some(live)
+    let mut list = SessionList { live: vec![], whole: true };
+    for entry in std::fs::read_dir(dir).ok()? {
+        let Ok(entry) = entry else {
+            list.whole = false;
+            continue;
+        };
+        if entry.path().extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let j = match session_file(&entry.path()) {
+            SessionFile::Gone => continue,
+            SessionFile::Bad => {
+                list.whole = false;
+                continue;
+            }
+            SessionFile::Good(j) => j,
+        };
+        if j["pid"].as_u64().is_some_and(|pid| !process_running(pid as u32, j["procStart"].as_str())) {
+            continue;
+        }
+        let Some(id) = j["sessionId"].as_str() else {
+            list.whole = false;
+            continue;
+        };
+        let name = j["name"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        list.live.push(Live { id: id.to_string(), name });
+    }
+    Some(list)
 }
 
 /// A live session by full id, an id prefix of at least 8 characters (what claims store) or its current name.
@@ -80,12 +125,13 @@ fn looks_like_id(who: &str) -> bool {
 }
 
 /// Whether this machine's session list says the session ended. Only means something for a session of this machine.
+/// A list with an unreadable file says nothing, that file may be this session's.
 pub fn known_dead(who: &str) -> bool {
     let who = who.trim();
     if !looks_like_id(who) || current().is_some_and(|c| c.starts_with(who)) {
         return false;
     }
-    read_sessions().is_some_and(|live| !live.iter().any(|s| matches(s, who)))
+    read_sessions().is_some_and(|l| l.whole && !l.live.iter().any(|s| matches(s, who)))
 }
 
 /// The current name of a claim's assignee when it is a live session, otherwise the assignee as stored.
