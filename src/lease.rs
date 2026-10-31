@@ -29,6 +29,9 @@ pub struct Lease {
     /// The holder had a session file when taking it, only then can its absence mean it ended.
     #[serde(default)]
     pub seen: bool,
+    /// That file's process, `/clear` changes the session id under it. Early leases have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
     pub machine: String,
     pub taken: DateTime<Utc>,
     pub expires: DateTime<Utc>,
@@ -87,18 +90,25 @@ fn unexpired(l: &Lease) -> bool {
     l.expires > now() && on_this_machine(l)
 }
 
-fn holds(l: &Lease) -> bool {
-    unexpired(l) && !(l.seen && session::known_dead(&l.holder))
+fn ended(l: &Lease) -> bool {
+    match l.pid {
+        Some(pid) => session::process_gone(pid, &l.holder),
+        None => l.seen && session::known_dead(&l.holder),
+    }
 }
 
-/// Whether session `id` is the one holding the lease.
+fn holds(l: &Lease) -> bool {
+    unexpired(l) && !ended(l)
+}
+
+/// Whether session `id` is the one holding the lease, also under a new id in the same process.
 fn is_session(l: &Lease, id: &str) -> bool {
-    l.session.as_deref() == Some(id) || (l.holder.len() >= session::SHORT_LEN && id.starts_with(&l.holder))
+    l.session.as_deref() == Some(id) || (l.holder.len() >= session::SHORT_LEN && id.starts_with(&l.holder)) || l.pid.is_some_and(|pid| session::is_process(id, pid))
 }
 
 /// `neocad-4b a03e0d0a` for a live session, otherwise the holder as stored.
 pub fn who(l: &Lease) -> String {
-    match session::find(&l.holder) {
+    match l.pid.and_then(session::by_pid).or_else(|| session::find(&l.holder)) {
         Some(s) => session::signature(&s.id),
         None => l.holder.clone(),
     }
@@ -157,7 +167,7 @@ pub fn take(root: &Path, r: TakeReq) -> Result<Taken> {
     let old = all.iter().position(|l| same_name(&l.name, name)).map(|i| all.remove(i));
     let holder = live.as_ref().map_or_else(|| asked.clone(), |s| session::short(&s.id));
     let held = old.as_ref().filter(|l| holds(l));
-    let mine = held.is_some_and(|l| l.holder.eq_ignore_ascii_case(&holder) || me.as_deref().is_some_and(|id| is_session(l, id)));
+    let mine = held.is_some_and(|l| l.holder.eq_ignore_ascii_case(&holder) || is_session(l, &holder) || me.as_deref().is_some_and(|id| is_session(l, id)));
     let other = held.filter(|_| !mine).map(who);
     if let Some(w) = &other
         && !r.force
@@ -169,6 +179,7 @@ pub fn take(root: &Path, r: TakeReq) -> Result<Taken> {
         name: name.to_string(),
         session: if live.is_some() { None } else { me },
         seen: live.is_some(),
+        pid: live.as_ref().and_then(|s| s.pid),
         machine: crate::util::machine_name(),
         taken: kept.map_or_else(now, |l| l.taken),
         expires,
@@ -193,7 +204,7 @@ pub fn release(root: &Path, name: &str, by: Option<&str>, force: bool) -> Result
     let mut all = read(root)?;
     let Some(i) = all.iter().position(|l| same_name(&l.name, name)) else { return Ok(false) };
     let l = &all[i];
-    let mine = l.holder.eq_ignore_ascii_case(&holder) || me.as_deref().is_some_and(|id| is_session(l, id));
+    let mine = l.holder.eq_ignore_ascii_case(&holder) || is_session(l, &holder) || me.as_deref().is_some_and(|id| is_session(l, id));
     if holds(l) && !mine && !force {
         bail!("{name} is leased by {}, `crumb lease --release {name} --force` releases it anyway", who(l));
     }

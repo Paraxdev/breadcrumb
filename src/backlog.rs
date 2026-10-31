@@ -117,8 +117,9 @@ pub fn assignee(n: &Note) -> Option<String> {
 
 pub const CLAIMED_KEY: &str = "claimed";
 pub const RELEASE_NOTE_KEY: &str = "release_note";
-/// `<machine> <assignee>`, a claim's session can only be judged dead on the machine it ran on. The assignee is in the
-/// value because an old binary claiming over it leaves this key behind, a value for another assignee means nothing.
+/// `<machine> <assignee> <pid>`, a claim's session can only be judged dead on the machine it ran on. The assignee is in
+/// the value because an old binary claiming over it leaves this key behind, a value for another assignee means nothing.
+/// The pid is what lives on when `/clear` changes the session id. Early claims have no pid.
 pub const CLAIM_MACHINE_KEY: &str = "claim_machine";
 pub const SESSION_ENV: &str = "BREADCRUMB_SESSION";
 /// A claim with no write to its item for this long no longer keeps other sessions away.
@@ -144,12 +145,30 @@ fn quiet_for_a_day(n: &Note) -> bool {
     (now() - last_activity(n)).num_hours() >= CLAIM_STALE_HOURS
 }
 
+/// This machine's record of the claim: Some with the pid when it has one, None when the claim was not recorded here.
+fn claim_here(n: &Note) -> Option<Option<u32>> {
+    let (a, rec) = (assignee(n)?, str_field(n, CLAIM_MACHINE_KEY)?);
+    let machine = crate::util::machine_name();
+    if machine == "unknown" {
+        return None;
+    }
+    let rest = rec.strip_prefix(&format!("{machine} "))?;
+    if rest.eq_ignore_ascii_case(&a) {
+        return Some(None);
+    }
+    let (who, pid) = rest.rsplit_once(' ')?;
+    who.eq_ignore_ascii_case(&a).then(|| pid.parse().ok().map(Some)).flatten()
+}
+
 /// The vault syncs between machines and sessions are only listed locally, so anything but a claim recorded on this
 /// machine is left to the one day rule.
 fn claim_dead_here(n: &Note) -> bool {
-    let (Some(a), Some(rec)) = (assignee(n), str_field(n, CLAIM_MACHINE_KEY)) else { return false };
-    let machine = crate::util::machine_name();
-    machine != "unknown" && rec.split_once(' ').is_some_and(|(m, who)| m == machine && who.eq_ignore_ascii_case(&a)) && crate::session::known_dead(&a)
+    let Some(a) = assignee(n) else { return false };
+    match claim_here(n) {
+        Some(Some(pid)) => crate::session::process_gone(pid, &a),
+        Some(None) => crate::session::known_dead(&a),
+        None => false,
+    }
 }
 
 pub fn claim_stale(n: &Note) -> bool {
@@ -160,10 +179,14 @@ fn set_claim(n: &mut Note, by: &str) {
     n.set_field("assignee", Value::String(by.to_string()));
     n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
     // Note: only a session seen in the list can later be read as gone from it, `claude -p` may have no file at all.
-    if crate::session::find(by).is_some() {
-        n.set_field(CLAIM_MACHINE_KEY, Value::String(format!("{} {by}", crate::util::machine_name())));
-    } else {
-        n.unset_field(CLAIM_MACHINE_KEY);
+    match crate::session::find(by) {
+        Some(s) => {
+            let pid = s.pid.map(|p| format!(" {p}")).unwrap_or_default();
+            n.set_field(CLAIM_MACHINE_KEY, Value::String(format!("{} {by}{pid}", crate::util::machine_name())));
+        }
+        None => {
+            n.unset_field(CLAIM_MACHINE_KEY);
+        }
     }
 }
 
@@ -199,9 +222,9 @@ fn end_build_refs(n: &mut Note, from: &str, keep: &[String], by: Option<&str>) {
     }
 }
 
-/// Whether `who` holds the item's claim, however it names itself.
+/// Whether `who` holds the item's claim, however it names itself. After `/clear` it has a new id in the same process.
 fn is_holder(n: &Note, who: &str) -> bool {
-    assignee(n).is_some_and(|a| crate::session::same_holder(&a, who))
+    assignee(n).is_some_and(|a| crate::session::same_holder(&a, who) || claim_here(n).flatten().is_some_and(|pid| crate::session::is_process(who, pid)))
 }
 
 /// The assignee while the claim is fresh, unless that is `who`.
@@ -213,9 +236,11 @@ pub fn held_by_other(n: &Note, who: Option<&str>) -> Option<String> {
     Some(a)
 }
 
-/// The name to show for the holder of a claim.
+/// The name to show for the holder of a claim, its current one when the process still runs.
 pub fn holder_name(n: &Note) -> Option<String> {
-    assignee(n).map(|a| crate::session::holder(&a))
+    let a = assignee(n)?;
+    let by_process = claim_here(n).flatten().and_then(crate::session::by_pid).and_then(|s| s.name);
+    Some(by_process.unwrap_or_else(|| crate::session::holder(&a)))
 }
 
 fn age(n: &Note) -> String {
@@ -244,7 +269,9 @@ pub fn claim(v: &Vault, id: &str, by: &str, force: bool) -> Result<Note> {
     let mine = is_holder(&n, &by);
     let (what, by) = match assignee(&n) {
         Some(p) if !mine => (format!("claim taken over from {p}"), by),
-        Some(p) => ("claim renewed".to_string(), p),
+        // After `/clear` the stored id names nobody any more, the caller's new one takes over the record.
+        Some(p) if p.eq_ignore_ascii_case(&by) || crate::session::find(&p).is_some() => ("claim renewed".to_string(), p),
+        Some(_) => ("claim renewed".to_string(), by),
         None => ("claimed".to_string(), by),
     };
     set_claim(&mut n, &by);

@@ -29,8 +29,9 @@ fn setup() -> Env {
 
 /// A session that has a file while it claims, and ends afterwards.
 fn claim_then_die(e: &Env, id: &str, machine: &str) {
+    let proc = common::Sleeper::start();
     let file = e.claude.join("sessions").join(format!("{DEAD_PID}.json"));
-    std::fs::write(&file, format!(r#"{{"pid":{},"sessionId":"{DEAD}","name":"neocad-dead"}}"#, std::process::id())).unwrap();
+    std::fs::write(&file, format!(r#"{{"pid":{},"sessionId":"{DEAD}","name":"neocad-dead"}}"#, proc.pid())).unwrap();
     assert!(crumb(e, DEAD, machine, &["claim", id]).0);
     std::fs::remove_file(file).unwrap();
 }
@@ -74,6 +75,97 @@ fn go_quiet(v: &Vault, id: &str) {
         n.set_field("claimed", Value::String(breadcrumb::util::fmt_time(&old)));
     }
     v.write_note(&mut n).unwrap();
+}
+
+/// A session with a process of its own. Rewriting the file with another id is what `/clear` does.
+fn own_process_session(e: &Env, proc: &common::Sleeper, id: &str, name: &str) -> std::path::PathBuf {
+    let file = e.claude.join("sessions").join(format!("{}.json", proc.pid()));
+    std::fs::write(&file, format!(r#"{{"pid":{},"sessionId":"{id}","name":"{name}"}}"#, proc.pid())).unwrap();
+    file
+}
+
+const CLEARED: &str = "c1ea4ed0-1111-2222-3333-444444444444";
+
+#[test]
+fn clear_keeps_a_session_alive_and_its_new_id_is_the_holder() {
+    let e = setup();
+    let proc = common::Sleeper::start();
+    own_process_session(&e, &proc, DEAD, "lead-a");
+    let id = queued(&e, "Held across a clear");
+    assert!(crumb(&e, DEAD, "pc-a", &["claim", &id]).0);
+    assert_eq!(e.v.get(&id).unwrap().field("claim_machine").and_then(|v| v.as_str()), Some(format!("pc-a dead0000 {}", proc.pid()).as_str()));
+
+    own_process_session(&e, &proc, CLEARED, "lead-a");
+    let board = crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1;
+    assert!(board.contains("lead-a") && !board.contains("(stale"), "{board}");
+    let (ok, out) = crumb(&e, ME, "pc-a", &["claim", &id]);
+    assert!(!ok && out.contains("claimed by lead-a"), "another session is refused: {out}");
+    let (ok, out) = crumb(&e, ME, "pc-a", &["next", "--project", "app"]);
+    assert!(ok && !out.contains(&id), "{out}");
+
+    let (ok, out) = crumb(&e, CLEARED, "pc-a", &["claim", &id]);
+    assert!(ok, "its own Bash child is not refused: {out}");
+    let n = e.v.get(&id).unwrap();
+    assert!(n.body.contains("claim renewed") && !n.body.contains("taken over"), "{}", n.body);
+    assert_eq!(backlog::assignee(&n).as_deref(), Some(&CLEARED[..8]), "the record follows the id that still resolves");
+
+    assert!(crumb(&e, CLEARED, "pc-a", &["release", &id]).0);
+}
+
+#[test]
+fn an_old_id_after_clear_is_refused_when_the_new_id_holds() {
+    let e = setup();
+    let proc = common::Sleeper::start();
+    own_process_session(&e, &proc, CLEARED, "lead-a");
+    let id = queued(&e, "Claimed after the clear");
+    assert!(crumb(&e, CLEARED, "pc-a", &["claim", &id]).0);
+    let (ok, out) = crumb(&e, DEAD, "pc-a", &["claim", &id]);
+    assert!(!ok && out.contains("claimed by lead-a"), "an MCP server still on the old id refuses and loses nothing: {out}");
+}
+
+#[test]
+fn a_claim_ends_with_its_process_not_with_its_file_saying_something_else() {
+    let e = setup();
+    let mut proc = common::Sleeper::start();
+    let file = own_process_session(&e, &proc, DEAD, "lead-a");
+    let id = queued(&e, "Held by a process");
+    assert!(crumb(&e, DEAD, "pc-a", &["claim", &id]).0);
+    proc.stop();
+    assert!(file.exists(), "a crash leaves the file behind");
+    assert!(crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1.contains("(stale"));
+}
+
+#[test]
+fn a_resumed_session_keeps_its_claim_under_a_new_process() {
+    let e = setup();
+    let first = common::Sleeper::start();
+    let file = own_process_session(&e, &first, DEAD, "lead-a");
+    let id = queued(&e, "Held across a restart");
+    assert!(crumb(&e, DEAD, "pc-a", &["claim", &id]).0);
+    std::fs::remove_file(file).unwrap();
+    assert!(crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1.contains("(stale"));
+
+    let second = common::Sleeper::start();
+    own_process_session(&e, &second, DEAD, "lead-a2");
+    let board = crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1;
+    assert!(board.contains("lead-a2") && !board.contains("(stale"), "{board}");
+}
+
+#[test]
+fn the_two_word_record_still_reads() {
+    let e = setup();
+    let id = queued(&e, "Claimed by an earlier build");
+    assert!(crumb(&e, DEAD, "pc-a", &["claim", &id, "--by", &DEAD[..8]]).0);
+    let mut n = e.v.get(&id).unwrap();
+    n.set_field("claim_machine", Value::String("pc-a dead0000".into()));
+    e.v.write_note(&mut n).unwrap();
+    assert!(crumb(&e, ME, "pc-a", &["board", "--project", "app"]).1.contains("(stale"), "no file under that id");
+    let live = queued(&e, "Claimed by a live session in the old form");
+    assert!(crumb(&e, LIVE, "pc-a", &["claim", &live]).0);
+    let mut n = e.v.get(&live).unwrap();
+    n.set_field("claim_machine", Value::String("pc-a abcd1234".into()));
+    e.v.write_note(&mut n).unwrap();
+    assert!(!crumb(&e, ME, "pc-a", &["claim", &live]).0);
 }
 
 #[test]
@@ -235,7 +327,9 @@ fn a_dead_sessions_claim_is_stale_on_its_own_machine_only() {
     let dead_here = queued(&e, "Dead here");
     claim_then_die(&e, &dead_here, "pc-a");
     let n = e.v.get(&dead_here).unwrap();
-    assert_eq!(n.field("claim_machine").and_then(|v| v.as_str()), Some("pc-a dead0000"));
+    let rec = n.field("claim_machine").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let (head, pid) = rec.rsplit_once(' ').unwrap_or_default();
+    assert!(head == "pc-a dead0000" && pid.parse::<u32>().is_ok(), "{rec}");
     assert!(context(&e).contains("@dead0000 (stale)"), "{}", context(&e));
     assert!(next_id(&e).contains(&dead_here), "no longer keeps others away");
     let (ok, out) = crumb(&e, ME, "pc-a", &["claim", &dead_here, "--by", "taker"]);
@@ -256,7 +350,7 @@ fn a_session_of_another_machine_or_free_text_only_goes_stale_after_a_day() {
     let e = setup();
     let elsewhere = queued(&e, "Elsewhere");
     claim_then_die(&e, &elsewhere, "pc-b");
-    assert_eq!(e.v.get(&elsewhere).unwrap().field("claim_machine").and_then(|v| v.as_str()), Some("pc-b dead0000"));
+    assert!(e.v.get(&elsewhere).unwrap().field("claim_machine").and_then(|v| v.as_str()).is_some_and(|r| r.starts_with("pc-b dead0000 ")));
     let free = queued(&e, "Free text");
     crumb(&e, ME, "pc-a", &["claim", &free, "--by", "neocad-lead"]);
     let no_key = queued(&e, "Old binary claim");

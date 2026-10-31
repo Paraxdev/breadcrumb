@@ -34,6 +34,7 @@ pub fn short(id: &str) -> String {
 pub struct Live {
     pub id: String,
     pub name: Option<String>,
+    pub pid: Option<u32>,
 }
 
 struct SessionList {
@@ -100,7 +101,7 @@ fn read_sessions() -> Option<SessionList> {
             continue;
         };
         let name = j["name"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-        list.live.push(Live { id: id.to_string(), name });
+        list.live.push(Live { id: id.to_string(), name, pid: j["pid"].as_u64().map(|p| p as u32) });
     }
     Some(list)
 }
@@ -143,6 +144,26 @@ pub fn known_dead(who: &str) -> bool {
         return false;
     }
     read_sessions().is_some_and(|l| l.whole && !l.live.iter().any(|s| matches(s, who)))
+}
+
+/// Whether a process recorded for `who` has ended. `/clear` gives a running process a new session id and a resume gives
+/// an id a new process, so either one still running means the session did not end.
+pub fn process_gone(pid: u32, who: &str) -> bool {
+    let who = who.trim();
+    if looks_like_id(who) && current().is_some_and(|c| c.starts_with(who)) {
+        return false;
+    }
+    read_sessions().is_some_and(|l| l.whole && !l.live.iter().any(|s| s.pid == Some(pid) || matches(s, who)))
+}
+
+/// The live session running as this process, whichever id it has by now.
+pub fn by_pid(pid: u32) -> Option<Live> {
+    live_sessions().into_iter().find(|s| s.pid == Some(pid))
+}
+
+/// Whether `who` names the live session of this process.
+pub fn is_process(who: &str, pid: u32) -> bool {
+    find(who).is_some_and(|s| s.pid == Some(pid))
 }
 
 /// The current name of a claim's assignee when it is a live session, otherwise the assignee as stored.

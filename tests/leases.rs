@@ -14,21 +14,24 @@ struct Env {
     _d: tempfile::TempDir,
     v: Vault,
     claude: PathBuf,
+    procs: std::sync::Mutex<Vec<common::Sleeper>>,
 }
 
 fn setup() -> Env {
     let (d, v) = common::vault();
     let claude = d.path().join("claude");
     std::fs::create_dir_all(claude.join("sessions")).unwrap();
-    let e = Env { _d: d, v, claude };
+    let e = Env { _d: d, v, claude, procs: Default::default() };
     session_file(&e, 1, A, "lead-a");
     session_file(&e, 2, B, "lead-b");
     e
 }
 
-// The pid is this test's own so the session counts as running, the file name is what a test removes to end it.
+// Each session has a process of its own, a pid is what identifies it. The file name is what a test removes to end it.
 fn session_file(e: &Env, n: u32, id: &str, name: &str) {
-    std::fs::write(e.claude.join("sessions").join(format!("{n}.json")), format!(r#"{{"pid":{},"sessionId":"{id}","name":"{name}"}}"#, std::process::id())).unwrap();
+    let proc = common::Sleeper::start();
+    std::fs::write(e.claude.join("sessions").join(format!("{n}.json")), format!(r#"{{"pid":{},"sessionId":"{id}","name":"{name}"}}"#, proc.pid())).unwrap();
+    e.procs.lock().unwrap().push(proc);
 }
 
 fn end_session(e: &Env, n: u32) {
@@ -101,6 +104,37 @@ fn age(v: &Vault, expired: bool) {
         l["expires"] = json!(if expired { "2020-01-01T00:00:00Z" } else { "2999-01-01T00:00:00Z" });
     }
     std::fs::write(file(v), serde_json::to_string(&all).unwrap()).unwrap();
+}
+
+/// What `/clear` does: the running process gets a new id in the same file.
+fn clear_session(e: &Env, n: u32, new_id: &str) {
+    let file = e.claude.join("sessions").join(format!("{n}.json"));
+    let mut j: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    j["sessionId"] = json!(new_id);
+    std::fs::write(file, j.to_string()).unwrap();
+}
+
+#[test]
+fn clear_keeps_a_lease_with_its_process() {
+    const CLEARED: &str = "c1ea4ed0-1111-2222-3333-444444444444";
+    let e = setup();
+    lease_a(&e);
+    clear_session(&e, 1, CLEARED);
+    assert!(ok(&e, Some(B), &["leases"]).contains("lead-a c1ea4ed0"), "still held, under its current signature");
+    let (fine, out) = crumb(&e, Some(B), &["lease", "c4"]);
+    assert!(!fine && out.contains("leased by lead-a c1ea4ed0"), "{out}");
+    assert!(bash(&e, CLEARED, "ls D:/fxt-c4").is_none(), "its own Bash call goes through");
+    assert!(bash(&e, B, "ls D:/fxt-c4").is_some());
+    assert!(ok(&e, Some(CLEARED), &["lease", "c4"]).contains("renewed"), "a renewal, not a takeover");
+    assert!(ok(&e, Some(CLEARED), &["lease", "--release", "c4"]).contains("released c4"));
+}
+
+#[test]
+fn a_lease_frees_at_once_when_its_process_ends_whatever_its_file_says() {
+    let e = setup();
+    lease_a(&e);
+    e.procs.lock().unwrap()[0].stop();
+    assert!(!ok(&e, Some(B), &["leases"]).contains("c4"), "the file is still there, the process is not");
 }
 
 #[test]
