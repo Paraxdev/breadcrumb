@@ -83,6 +83,34 @@ pub fn resolve_vault_path(flag: Option<&Path>) -> Result<PathBuf> {
     Ok(home.join("breadcrumb"))
 }
 
+/// Holds an advisory lock on `path`, waiting up to `timeout_secs` for another process to let go.
+pub fn lock_file(path: &Path, timeout_secs: u64) -> Result<LockGuard> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let start = Instant::now();
+    let mut wait = 10u64;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(LockGuard { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if start.elapsed() >= timeout {
+                    bail!("vault is busy: could not acquire {} within {}s", path.display(), timeout.as_secs());
+                }
+                let jitter = (crate::util::random_bytes::<1>()[0] % 20) as u64;
+                std::thread::sleep(Duration::from_millis(wait + jitter));
+                wait = (wait * 2).min(100);
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e).context("locking vault"),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct InitReport {
     pub created_files: Vec<String>,
@@ -194,31 +222,7 @@ impl Vault {
     }
 
     fn acquire_lock(&self) -> Result<LockGuard> {
-        let path = self.root.join(LOCK_FILE);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        let timeout = Duration::from_secs(self.config.lock_timeout_secs.max(1));
-        let start = Instant::now();
-        let mut wait = 10u64;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(LockGuard { _file: file }),
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    if start.elapsed() >= timeout {
-                        bail!("vault is busy: could not acquire {} within {}s", path.display(), timeout.as_secs());
-                    }
-                    let jitter = (crate::util::random_bytes::<1>()[0] % 20) as u64;
-                    std::thread::sleep(Duration::from_millis(wait + jitter));
-                    wait = (wait * 2).min(100);
-                }
-                Err(std::fs::TryLockError::Error(e)) => return Err(e).context("locking vault"),
-            }
-        }
+        lock_file(&self.root.join(LOCK_FILE), self.config.lock_timeout_secs)
     }
 
     pub fn is_git(&self) -> bool {

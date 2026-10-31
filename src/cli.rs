@@ -343,6 +343,31 @@ pub enum Cmd {
         #[arg(long)]
         by: Option<String>,
     },
+    /// Hold a resource that is not an item, like a build dir or a runner, on this machine until released or expired
+    Lease {
+        /// What is held, an absolute path here also becomes the lease's path
+        name: String,
+        /// Holder (default: $BREADCRUMB_SESSION, else the Claude Code session id), free text only expires by ttl
+        #[arg(long)]
+        by: Option<String>,
+        /// How long it holds, like 30m, 4h or 2d (default 4h), taking it again renews
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Why, shown to whoever is refused
+        #[arg(long)]
+        note: Option<String>,
+        /// Directory the Bash hook guards for this lease
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
+        /// Take over from another live holder, or with --release release it
+        #[arg(long)]
+        force: bool,
+        /// Release the lease instead
+        #[arg(long, conflicts_with_all = ["ttl", "note", "path"])]
+        release: bool,
+    },
+    /// The leases that hold on this machine
+    Leases,
     /// Claim an item for this session, `next` in other sessions skips it until the claim is a day without activity
     Claim {
         /// Item id or slug
@@ -605,6 +630,8 @@ pub enum HookCmd {
     FileTouch,
     /// Stop: one handoff reminder when the session changed notes and wrote no handoff
     Stop,
+    /// PreToolUse on Bash: refuses a command that names a path another live session leases
+    BashLease,
     /// The detached work SessionEnd starts
     #[command(hide = true)]
     Background {
@@ -636,6 +663,9 @@ pub enum HooksCmd {
         /// Skip the Stop hook that asks once per session for a handoff note
         #[arg(long)]
         no_handoff: bool,
+        /// Add the PreToolUse hook that refuses Bash commands on paths another session leases, it stays when left out
+        #[arg(long)]
+        bash_leases: bool,
     },
     /// Remove breadcrumb hooks, leaving every other setting alone
     Uninstall {
@@ -1082,6 +1112,11 @@ fn run_hook(vault: Option<&Path>, h: &HookCmd) {
         HookCmd::Prompt => print(crate::hooks::prompt(&root, &input(), &cwd())),
         HookCmd::FileTouch => print(crate::hooks::file_touch(&root, &input(), &cwd())),
         HookCmd::Stop => print(crate::hooks::stop(&root, &input(), &cwd())),
+        HookCmd::BashLease => {
+            if let Some(reason) = crate::lease::check_bash(&root, &input()) {
+                println!("{}", crate::lease::deny_json(&reason));
+            }
+        }
         HookCmd::SessionEnd { no_import } => {
             if let Ok(v) = Vault::open(&root)
                 && (crate::hooks::needs_sync(&v) || (!no_import && crate::hooks::needs_import(&v.root)) || !crate::lifecycle::sweep_plan(&v).is_empty())
@@ -1113,6 +1148,7 @@ fn hooks_text(r: &crate::hooks::HookChange) -> String {
         line(crate::hooks::PROMPT_EVENT, &r.prompt),
         line(crate::hooks::FILE_EVENT, &r.file_touch),
         line(crate::hooks::STOP_EVENT, &r.stop),
+        line("PreToolUse Bash", &r.bash_lease),
     ]
     .join("\n")
 }
@@ -1481,6 +1517,22 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => out.emit(format!("no unblocked queued items in {}", sc.label()), Json::Null),
             }
         }
+        Cmd::Lease { name, by, force, release: true, .. } => {
+            let was_held = crate::lease::release(&root, &name, by.as_deref(), force)?;
+            let text = if was_held { format!("released {name}") } else { format!("no lease holds {name}") };
+            out.emit(text, json!({"name": name, "released": was_held}));
+        }
+        Cmd::Lease { name, by, ttl, note, path, force, release: false } => {
+            let t = crate::lease::take(&root, crate::lease::TakeReq { name: &name, by: by.as_deref(), ttl: ttl.as_deref(), note: note.as_deref(), path: path.as_deref(), force })?;
+            let verb = if t.renewed { "renewed" } else { "leased" };
+            let from = t.took_from.as_deref().map(|w| format!(", taken over from {w}")).unwrap_or_default();
+            out.emit(format!("{verb} {}{from}", crate::lease::line(&t.lease)), json!({"lease": t.lease, "renewed": t.renewed, "took_from": t.took_from}));
+        }
+        Cmd::Leases => {
+            let all = crate::lease::active(&root)?;
+            let text = if all.is_empty() { "no leases on this machine".to_string() } else { all.iter().map(crate::lease::line).collect::<Vec<_>>().join("\n") };
+            out.emit(text, serde_json::to_value(&all)?);
+        }
         Cmd::Claim { id, by, force, release: true } => release_cmd(&out, &open()?, &id, by.as_deref(), force)?,
         Cmd::Claim { id, by, force, release: false } => {
             let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
@@ -1656,8 +1708,8 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Hooks(hc) => {
             let explicit_vault = cli.vault.as_deref().map(crate::util::absolutize);
             let (r, verb) = match hc {
-                HooksCmd::Install { settings, no_sync, no_import, no_recall, no_file_notes, no_handoff } => {
-                    let o = crate::hooks::InstallOpts { sync: !no_sync, import: !no_import, recall: !no_recall, file_notes: !no_file_notes, handoff: !no_handoff };
+                HooksCmd::Install { settings, no_sync, no_import, no_recall, no_file_notes, no_handoff, bash_leases } => {
+                    let o = crate::hooks::InstallOpts { sync: !no_sync, import: !no_import, recall: !no_recall, file_notes: !no_file_notes, handoff: !no_handoff, bash_leases };
                     (crate::hooks::install(&settings_path(settings)?, explicit_vault.as_deref(), o)?, "installed")
                 }
                 HooksCmd::Uninstall { settings } => (crate::hooks::uninstall(&settings_path(settings)?)?, "removed"),

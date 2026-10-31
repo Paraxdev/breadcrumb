@@ -221,6 +221,9 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     if env > 0 {
         writeln!(prefs_text, "Machine facts: {env} for {machine}, `breadcrumb env` or list kind env")?;
     }
+    if let Some(l) = crate::lease::digest_line(&v.root) {
+        writeln!(prefs_text, "{l}")?;
+    }
     let mut todos = String::new();
     for n in notes.iter().filter(|n| !n.pinned && is_open_todo(n)) {
         if todos.is_empty() {

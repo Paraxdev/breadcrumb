@@ -13,6 +13,8 @@ pub const END_SUFFIX: &str = "hook session-end";
 pub const PROMPT_SUFFIX: &str = "hook prompt";
 pub const FILE_SUFFIX: &str = "hook file-touch";
 pub const STOP_SUFFIX: &str = "hook stop";
+pub const BASH_LEASE_SUFFIX: &str = "hook bash-lease";
+pub const BASH_MATCHER: &str = "Bash";
 pub const STOP_EVENT: &str = "Stop";
 pub const START_MATCHER: &str = "startup|resume|clear|compact";
 pub const FILE_MATCHER: &str = "Read|Edit|Write|MultiEdit|NotebookEdit";
@@ -30,6 +32,7 @@ pub struct HookInput {
     pub session_id: Option<String>,
     pub prompt: Option<String>,
     pub file_path: Option<String>,
+    pub command: Option<String>,
     pub stop_hook_active: bool,
 }
 
@@ -43,6 +46,7 @@ pub fn parse_input(stdin: &str) -> HookInput {
         session_id: get(&v, "session_id"),
         prompt: get(&v, "prompt"),
         file_path: get(&tool, "file_path").or_else(|| get(&tool, "notebook_path")),
+        command: tool.get("command").and_then(Value::as_str).map(str::to_string),
         stop_hook_active: v.get("stop_hook_active").and_then(Value::as_bool).unwrap_or(false),
     }
 }
@@ -388,6 +392,7 @@ pub struct HookChange {
     pub prompt: Option<String>,
     pub file_touch: Option<String>,
     pub stop: Option<String>,
+    pub bash_lease: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -397,11 +402,12 @@ pub struct InstallOpts {
     pub recall: bool,
     pub file_notes: bool,
     pub handoff: bool,
+    pub bash_leases: bool,
 }
 
 impl Default for InstallOpts {
     fn default() -> Self {
-        InstallOpts { sync: true, import: true, recall: true, file_notes: true, handoff: true }
+        InstallOpts { sync: true, import: true, recall: true, file_notes: true, handoff: true, bash_leases: false }
     }
 }
 
@@ -440,11 +446,15 @@ pub fn install(path: &Path, vault: Option<&Path>, o: InstallOpts) -> Result<Hook
     let prompt = toggle(hooks, o.recall, Spec { event: PROMPT_EVENT, matcher: None, suffix: PROMPT_SUFFIX, command: prompt, timeout: RECALL_TIMEOUT })?;
     let file_touch = toggle(hooks, o.file_notes, Spec { event: FILE_EVENT, matcher: Some(FILE_MATCHER), suffix: FILE_SUFFIX, command: file, timeout: RECALL_TIMEOUT })?;
     let stop = toggle(hooks, o.handoff, Spec { event: STOP_EVENT, matcher: None, suffix: STOP_SUFFIX, command: stop, timeout: RECALL_TIMEOUT })?;
+    if o.bash_leases {
+        ensure(hooks, FILE_EVENT, Some(BASH_MATCHER), BASH_LEASE_SUFFIX, &exe_command(vault, BASH_LEASE_SUFFIX)?, RECALL_TIMEOUT)?;
+    }
+    let bash_lease = registered(&s, FILE_EVENT, BASH_LEASE_SUFFIX);
     let changed = s != before;
     if changed {
         save_settings(path, &s)?;
     }
-    Ok(HookChange { settings: path_str(path), changed, session_start: Some(start), session_end, prompt, file_touch, stop })
+    Ok(HookChange { settings: path_str(path), changed, session_start: Some(start), session_end, prompt, file_touch, stop, bash_lease })
 }
 
 pub fn uninstall(path: &Path) -> Result<HookChange> {
@@ -458,6 +468,7 @@ pub fn uninstall(path: &Path) -> Result<HookChange> {
         changed |= remove_from(hooks, PROMPT_EVENT, PROMPT_SUFFIX);
         changed |= remove_from(hooks, FILE_EVENT, FILE_SUFFIX);
         changed |= remove_from(hooks, STOP_EVENT, STOP_SUFFIX);
+        changed |= remove_from(hooks, FILE_EVENT, BASH_LEASE_SUFFIX);
         if changed && hooks.is_empty() {
             root.shift_remove("hooks");
         }
@@ -465,16 +476,18 @@ pub fn uninstall(path: &Path) -> Result<HookChange> {
     if changed {
         save_settings(path, &s)?;
     }
-    Ok(HookChange { settings: path_str(path), changed, session_start: None, session_end: None, prompt: None, file_touch: None, stop: None })
+    Ok(HookChange { settings: path_str(path), changed, session_start: None, session_end: None, prompt: None, file_touch: None, stop: None, bash_lease: None })
+}
+
+fn registered(s: &Value, event: &str, suffix: &str) -> Option<String> {
+    s.get("hooks")?.get(event)?.as_array()?.iter().find_map(|e| {
+        e.get("hooks")?.as_array()?.iter().find(|h| is_breadcrumb(h, suffix)).and_then(|h| h.get("command")?.as_str().map(str::to_string))
+    })
 }
 
 pub fn status(path: &Path) -> Result<HookChange> {
     let s = load_settings(path)?;
-    let find = |event: &str, suffix: &str| -> Option<String> {
-        s.get("hooks")?.get(event)?.as_array()?.iter().find_map(|e| {
-            e.get("hooks")?.as_array()?.iter().find(|h| is_breadcrumb(h, suffix)).and_then(|h| h.get("command")?.as_str().map(str::to_string))
-        })
-    };
+    let find = |event: &str, suffix: &str| registered(&s, event, suffix);
     Ok(HookChange {
         settings: path_str(path),
         changed: false,
@@ -483,5 +496,6 @@ pub fn status(path: &Path) -> Result<HookChange> {
         prompt: find(PROMPT_EVENT, PROMPT_SUFFIX),
         file_touch: find(FILE_EVENT, FILE_SUFFIX),
         stop: find(STOP_EVENT, STOP_SUFFIX),
+        bash_lease: find(FILE_EVENT, BASH_LEASE_SUFFIX),
     })
 }
