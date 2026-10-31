@@ -146,7 +146,12 @@ pub fn claim_stale(n: &Note) -> bool {
 fn set_claim(n: &mut Note, by: &str) {
     n.set_field("assignee", Value::String(by.to_string()));
     n.set_field(CLAIMED_KEY, Value::String(crate::util::fmt_time(&now())));
-    n.set_field(CLAIM_MACHINE_KEY, Value::String(format!("{} {by}", crate::util::machine_name())));
+    // Note: only a session seen in the list can later be read as gone from it, `claude -p` may have no file at all.
+    if crate::session::find(by).is_some() {
+        n.set_field(CLAIM_MACHINE_KEY, Value::String(format!("{} {by}", crate::util::machine_name())));
+    } else {
+        n.unset_field(CLAIM_MACHINE_KEY);
+    }
 }
 
 fn clear_claim(n: &mut Note) {

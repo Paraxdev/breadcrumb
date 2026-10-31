@@ -10,6 +10,7 @@ use std::process::Command;
 const LIVE: &str = "abcd1234-1111-2222-3333-444444444444";
 const DEAD: &str = "dead0000-1111-2222-3333-444444444444";
 const ME: &str = "ffff0000-1111-2222-3333-444444444444";
+const DEAD_PID: u32 = 4242;
 
 struct Env {
     _d: tempfile::TempDir,
@@ -24,6 +25,14 @@ fn setup() -> Env {
     let file = |pid: u32, id: &str, name: &str| std::fs::write(claude.join("sessions").join(format!("{pid}.json")), format!(r#"{{"pid":{pid},"sessionId":"{id}","name":"{name}"}}"#)).unwrap();
     file(std::process::id(), LIVE, "neocad-live");
     Env { _d: d, v, claude }
+}
+
+/// A session that has a file while it claims, and ends afterwards.
+fn claim_then_die(e: &Env, id: &str, machine: &str) {
+    let file = e.claude.join("sessions").join(format!("{DEAD_PID}.json"));
+    std::fs::write(&file, format!(r#"{{"pid":{},"sessionId":"{DEAD}","name":"neocad-dead"}}"#, std::process::id())).unwrap();
+    assert!(crumb(e, DEAD, machine, &["claim", id]).0);
+    std::fs::remove_file(file).unwrap();
 }
 
 fn crumb(e: &Env, session: &str, machine: &str, args: &[&str]) -> (bool, String) {
@@ -174,7 +183,7 @@ fn in_progress_lines_show_owner_and_age() {
 fn a_dead_sessions_claim_is_stale_on_its_own_machine_only() {
     let e = setup();
     let dead_here = queued(&e, "Dead here");
-    crumb(&e, DEAD, "pc-a", &["claim", &dead_here]);
+    claim_then_die(&e, &dead_here, "pc-a");
     let n = e.v.get(&dead_here).unwrap();
     assert_eq!(n.field("claim_machine").and_then(|v| v.as_str()), Some("pc-a dead0000"));
     assert!(context(&e).contains("@dead0000 (stale)"), "{}", context(&e));
@@ -182,7 +191,7 @@ fn a_dead_sessions_claim_is_stale_on_its_own_machine_only() {
     let (ok, out) = crumb(&e, ME, "pc-a", &["claim", &dead_here, "--by", "taker"]);
     assert!(ok, "no force needed: {out}");
     assert!(e.v.get(&dead_here).unwrap().body.contains("claim taken over from dead0000"));
-    assert_eq!(e.v.get(&dead_here).unwrap().field("claim_machine").and_then(|v| v.as_str()), Some("pc-a taker"));
+    assert_eq!(e.v.get(&dead_here).unwrap().field("claim_machine").and_then(|v| v.as_str()), None, "a free text name has no session file");
 
     let live = queued(&e, "Live here");
     crumb(&e, LIVE, "pc-a", &["claim", &live]);
@@ -196,7 +205,8 @@ fn a_dead_sessions_claim_is_stale_on_its_own_machine_only() {
 fn a_session_of_another_machine_or_free_text_only_goes_stale_after_a_day() {
     let e = setup();
     let elsewhere = queued(&e, "Elsewhere");
-    crumb(&e, DEAD, "pc-b", &["claim", &elsewhere]);
+    claim_then_die(&e, &elsewhere, "pc-b");
+    assert_eq!(e.v.get(&elsewhere).unwrap().field("claim_machine").and_then(|v| v.as_str()), Some("pc-b dead0000"));
     let free = queued(&e, "Free text");
     crumb(&e, ME, "pc-a", &["claim", &free, "--by", "neocad-lead"]);
     let no_key = queued(&e, "Old binary claim");
@@ -227,7 +237,7 @@ fn a_session_of_another_machine_or_free_text_only_goes_stale_after_a_day() {
 fn no_session_list_says_nothing_about_who_is_dead() {
     let e = setup();
     let a = queued(&e, "Claim");
-    crumb(&e, DEAD, "pc-a", &["claim", &a]);
+    claim_then_die(&e, &a, "pc-a");
     let nowhere = e.claude.join("missing");
     let out = run(&e.v.root, &nowhere, ME, "pc-a", &["context", "--project", "app"]).1;
     assert!(out.contains("@dead0000") && !out.contains("(stale)"), "{out}");
@@ -237,11 +247,39 @@ fn no_session_list_says_nothing_about_who_is_dead() {
 fn release_and_failed_review_drop_the_machine_key() {
     let e = setup();
     let a = queued(&e, "Claim");
-    crumb(&e, ME, "pc-a", &["claim", &a]);
-    crumb(&e, ME, "pc-a", &["release", &a]);
+    crumb(&e, LIVE, "pc-a", &["claim", &a]);
+    assert!(e.v.get(&a).unwrap().field("claim_machine").is_some());
+    crumb(&e, LIVE, "pc-a", &["release", &a]);
     assert!(e.v.get(&a).unwrap().field("claim_machine").is_none());
-    crumb(&e, ME, "pc-a", &["claim", &a]);
+    crumb(&e, LIVE, "pc-a", &["claim", &a]);
     backlog::move_item(&e.v, &a, MoveReq { state: "review".into(), ..Default::default() }).unwrap();
     backlog::review_fail(&e.v, &a, "no", None).unwrap();
     assert!(e.v.get(&a).unwrap().field("claim_machine").is_none());
+}
+
+#[test]
+fn a_session_with_no_file_at_claim_time_is_not_read_as_dead() {
+    let e = setup();
+    let a = queued(&e, "Claimed by claude -p");
+    assert!(crumb(&e, ME, "pc-a", &["claim", &a]).0);
+    let n = e.v.get(&a).unwrap();
+    assert_eq!(backlog::assignee(&n).as_deref(), Some("ffff0000"));
+    assert!(n.field("claim_machine").is_none(), "no file, no record");
+
+    let other = "aaaa0000-1111-2222-3333-444444444444";
+    assert!(!crumb(&e, other, "pc-a", &["context", "--project", "app"]).1.contains("(stale)"));
+    assert!(!crumb(&e, other, "pc-a", &["claim", &a, "--by", "taker"]).0, "the claim holds");
+    go_quiet(&e.v, &a);
+    assert!(crumb(&e, other, "pc-a", &["context", "--project", "app"]).1.contains("(stale)"), "the one day rule still covers it");
+}
+
+#[test]
+fn a_new_claim_with_no_file_drops_the_record_of_the_old_one() {
+    let e = setup();
+    let a = queued(&e, "Claimed twice");
+    claim_then_die(&e, &a, "pc-a");
+    assert!(e.v.get(&a).unwrap().field("claim_machine").is_some());
+    assert!(crumb(&e, DEAD, "pc-a", &["claim", &a]).0);
+    assert!(e.v.get(&a).unwrap().field("claim_machine").is_none());
+    assert!(!context(&e).contains("(stale)"), "{}", context(&e));
 }
