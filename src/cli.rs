@@ -670,6 +670,12 @@ pub struct AddArgs {
     /// Id or slug this note replaces (repeatable), needed for another session's handoff
     #[arg(long, value_name = "ID")]
     pub supersedes: Vec<String>,
+    /// The user's exact words behind this note
+    #[arg(long, allow_hyphen_values = true, value_name = "QUOTE")]
+    pub said: Option<String>,
+    /// The day they said it, default today
+    #[arg(long, value_name = "DATE")]
+    pub said_on: Option<String>,
     #[arg(long, short = 'k')]
     pub kind: Option<String>,
     #[arg(long, short = 'p')]
@@ -747,6 +753,12 @@ pub struct UpdateArgs {
     /// A date, an RFC3339 time, 3d or 12h from now, or until:<id>, `--unset expires` drops it
     #[arg(long, value_name = "WHEN")]
     pub expires: Option<String>,
+    /// The user's exact words behind this note
+    #[arg(long, allow_hyphen_values = true, value_name = "QUOTE")]
+    pub said: Option<String>,
+    /// The day they said it, default today
+    #[arg(long, value_name = "DATE")]
+    pub said_on: Option<String>,
 }
 
 struct Out {
@@ -903,7 +915,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     kind: a.kind,
                     project,
                     tags: a.tags,
-                    fields: ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires),
+                    fields: ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires), a.said, a.said_on),
                     pinned: a.pin,
                     body: read_body_arg(a.body, a.body_file)?,
                     source: a.source,
@@ -917,6 +929,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             let mut created = if new_project { format!("\n(created new project {})", n.scope_label()) } else { String::new() };
             if ops::is_pref(&n) && !n.pinned {
                 created.push_str(&format!("\n{}, `breadcrumb update {} --pin`", ops::PIN_HINT, n.id));
+            }
+            if ops::lacks_quote(&n) {
+                created.push_str(&format!("\n{}", ops::SAID_HINT));
             }
             if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                 created.push_str(&format!("\n{h}"));
@@ -944,7 +959,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     title: u.title,
                     kind: u.kind,
                     tags: u.tags,
-                    fields: ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires),
+                    fields: ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires), u.said, u.said_on),
                     unset: u.unset,
                     body: read_body_arg(u.body, u.body_file)?,
                     pinned,

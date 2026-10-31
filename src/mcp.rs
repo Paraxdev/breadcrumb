@@ -266,6 +266,9 @@ impl Server {
                 if ops::is_pref(&n) && !n.pinned {
                     out.push_str(&format!("\n{}", ops::PIN_HINT));
                 }
+                if ops::lacks_quote(&n) {
+                    out.push_str(&format!("\n{}", ops::SAID_HINT));
+                }
                 if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                     out.push_str(&format!("\n{h}"));
                 }
@@ -536,7 +539,7 @@ fn fields(a: &Map<String, Value>, k: &str) -> Result<Vec<(String, FieldInput)>> 
 /// `fields` plus the options that are fields under the hood.
 fn note_fields(a: &Map<String, Value>) -> Result<Vec<(String, FieldInput)>> {
     let f = ops::with_field(fields(a, "fields")?, crate::digest::SUMMARY_KEY, s(a, "summary"));
-    Ok(ops::with_field(f, crate::note::EXPIRES_KEY, s(a, "expires")))
+    Ok(ops::with_said(ops::with_field(f, crate::note::EXPIRES_KEY, s(a, "expires")), s(a, "said"), s(a, "said_on")))
 }
 
 fn links(a: &Map<String, Value>) -> Result<Vec<Link>> {
@@ -638,7 +641,7 @@ pub fn tool_defs() -> Vec<Value> {
     let scope = || json!({"project": {"type": "string", "description": "slug, global or all"}});
     let target = || json!({"project": {"type": "string", "description": "slug or global"}});
     let filters = || json!({"kind": st(), "tags": arr(), "limit": int()});
-    let fields = || json!({"type": "object", "description": "kind fields, summary: digest line of a pin, expires: date, 3d or until:id"});
+    let fields = || json!({"type": "object", "description": "summary: pin's digest line, expires: date, 3d or until:id, said: user's quote"});
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
     let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});

@@ -79,7 +79,7 @@ struct Prepared {
 fn prepare(n: &Note) -> Prepared {
     let mut fields = vec![];
     for (k, v) in &n.extra {
-        if k.as_str().is_some_and(|k| k == crate::session::SESSION_KEY || k == crate::session::LAST_SESSION_KEY || k == crate::slug::SLUG_KEY) {
+        if k.as_str().is_some_and(|k| k == crate::session::SESSION_KEY || k == crate::session::LAST_SESSION_KEY || k == crate::slug::SLUG_KEY || k == crate::note::SAID_ON_KEY) {
             continue;
         }
         fields.extend(tokenize(&yaml_display(v)));

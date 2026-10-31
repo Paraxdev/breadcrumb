@@ -113,6 +113,8 @@ pub enum FieldInput {
 }
 
 fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, FieldInput)>) -> Result<()> {
+    let said = fields.iter().any(|(key, _)| key.trim() == crate::note::SAID_KEY);
+    let said_on = fields.iter().any(|(key, _)| key.trim() == crate::note::SAID_ON_KEY);
     for (key, input) in fields {
         let key = key.trim().to_string();
         if key.is_empty() {
@@ -188,6 +190,14 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
         };
         note.set_field(&key, val);
     }
+    if said && !said_on {
+        note.set_field(crate::note::SAID_ON_KEY, Value::String(crate::util::fmt_date(&crate::util::now())));
+    }
+    if let Some(d) = note.field(crate::note::SAID_ON_KEY).and_then(yaml_scalar_string)
+        && chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").is_err()
+    {
+        bail!("said_on '{d}' must be a date like 2026-10-30");
+    }
     Ok(())
 }
 
@@ -216,6 +226,14 @@ pub fn with_field(mut fields: Vec<(String, FieldInput)>, key: &str, val: Option<
         fields.push((key.to_string(), FieldInput::Value(Value::String(s))));
     }
     fields
+}
+
+/// The quote stays as given, line breaks too, it is what the user said.
+pub fn with_said(mut fields: Vec<(String, FieldInput)>, said: Option<String>, on: Option<String>) -> Vec<(String, FieldInput)> {
+    if let Some(q) = said.map(|q| q.trim().to_string()).filter(|q| !q.is_empty()) {
+        fields.push((crate::note::SAID_KEY.to_string(), FieldInput::Value(Value::String(q))));
+    }
+    with_field(fields, crate::note::SAID_ON_KEY, on)
 }
 
 fn set_paths(note: &mut Note, globs: Vec<String>) {
@@ -497,6 +515,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
             bail!("cannot unset note metadata '{key}'");
         } else {
             note.unset_field(key);
+            if key == crate::note::SAID_KEY {
+                note.unset_field(crate::note::SAID_ON_KEY);
+            }
         }
     }
     let (fields, field_slug) = split_slug(req.fields);
@@ -884,10 +905,15 @@ pub use crate::digest::{ContextOpts, context, context_with};
 pub use crate::lifecycle::{HANDOFF, SUPERSEDES};
 
 pub const PREFS_LINE_MAX: usize = 400;
+pub const SAID_HINT: &str = "no quote, so a pin of it reads (inferred) in the digest, `said` keeps the user's exact words";
 pub const PIN_HINT: &str = "pin it if every session must see it, unpinned preferences only share one short line";
 const PREF_TITLE_MAX: usize = 60;
 
 /// Feedback and user notes hold preferences, they only reach a new session with a line of their own when pinned.
+pub fn lacks_quote(n: &Note) -> bool {
+    is_pref(n) && n.field(crate::note::SAID_KEY).is_none()
+}
+
 pub fn is_pref(n: &Note) -> bool {
     n.kind == "feedback" || n.kind == "user"
 }

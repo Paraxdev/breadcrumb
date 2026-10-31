@@ -21,6 +21,8 @@ pub const VERIFIED_KEY: &str = "verified";
 pub const REFS_KEY: &str = "refs";
 /// When the note stops holding: a date, a time or `until:<id>`. See lifecycle.
 pub const EXPIRES_KEY: &str = "expires";
+pub const SAID_KEY: &str = "said";
+pub const SAID_ON_KEY: &str = "said_on";
 
 /// Trimmed `type:value` entries with a lowercase type, deduplicated in order.
 pub fn normalize_refs(raw: &[String]) -> anyhow::Result<Vec<String>> {

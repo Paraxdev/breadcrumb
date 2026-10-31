@@ -19,6 +19,9 @@ pub const SUMMARY_MAX: usize = 120;
 const HANDOFF_MIN: usize = 800;
 const HANDOFF_MAX: usize = 3500;
 const RECENT_RESERVE: usize = 800;
+/// Prefs from before `said` existed are never marked. Most of them quote the user in their body, in forms no check can
+/// tell from a paraphrase, so a mark on them would be a false claim. Bump this to the day the feature lands.
+const SAID_SINCE: &str = "2026-11-01";
 const OTHER_HANDOFFS_MAX: usize = 3;
 const PINS_HEAD: &str = "Pinned (get an id for its body):\n";
 
@@ -66,6 +69,10 @@ fn is_rule(n: &Note) -> bool {
     n.kind == "decision" || is_pref(n)
 }
 
+fn inferred_mark(n: &Note) -> &'static str {
+    if crate::ops::lacks_quote(n) && crate::util::fmt_date(&n.created).as_str() >= SAID_SINCE { " (inferred)" } else { "" }
+}
+
 fn scope_suffix(n: &Note, project: Option<&str>) -> String {
     if n.project.as_deref() != project { format!(" ({})", n.scope_label()) } else { String::new() }
 }
@@ -80,7 +87,7 @@ fn pins_section(notes: &[Note], project: Option<&str>, stale_days: u64, max: usi
     let mut s = PINS_HEAD.to_string();
     let mut rest: Vec<&str> = vec![];
     for n in &pins {
-        let line = format!("{} {} {}{}{}\n", n.id, n.kind, summary(n), scope_suffix(n, project), crate::recall::stale_mark(n, stale_days));
+        let line = format!("{} {}{} {}{}{}\n", n.id, n.kind, inferred_mark(n), summary(n), scope_suffix(n, project), crate::recall::stale_mark(n, stale_days));
         if rest.is_empty() && s.chars().count() + line.chars().count() <= max {
             s.push_str(&line);
         } else {
