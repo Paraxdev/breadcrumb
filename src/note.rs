@@ -24,7 +24,11 @@ pub const EXPIRES_KEY: &str = "expires";
 pub const SAID_KEY: &str = "said";
 pub const SAID_ON_KEY: &str = "said_on";
 
-/// Trimmed `type:value` entries with a lowercase type, deduplicated in order.
+pub fn is_commit_hex(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Trimmed `type:value` entries with a lowercase type, deduplicated in order, a bare sha reads as `commit:<sha>`.
 pub fn normalize_refs(raw: &[String]) -> anyhow::Result<Vec<String>> {
     let mut out: Vec<String> = vec![];
     for r in raw {
@@ -32,7 +36,8 @@ pub fn normalize_refs(raw: &[String]) -> anyhow::Result<Vec<String>> {
         if r.is_empty() {
             continue;
         }
-        let Some((k, val)) = r.split_once(':') else {
+        let bare = is_commit_hex(r).then(|| format!("commit:{}", r.to_ascii_lowercase()));
+        let Some((k, val)) = bare.as_deref().unwrap_or(r).split_once(':') else {
             anyhow::bail!("ref '{r}' must be type:value, like commit:abc123, run:wf_1, branch:fix/x or pr:12");
         };
         let k = k.trim().to_ascii_lowercase();

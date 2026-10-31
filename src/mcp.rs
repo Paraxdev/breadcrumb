@@ -1,6 +1,6 @@
 //! MCP server: JSON-RPC 2.0 over newline-delimited stdio, no async runtime.
 
-use crate::backlog::{self, BoardFilter, MoveReq, QueuePos};
+use crate::backlog::{self, BoardFilter, MoveReq};
 use crate::format;
 use crate::kind::{self, FieldDef, FieldType, KindDef};
 use crate::note::Link;
@@ -325,14 +325,7 @@ impl Server {
             "move" => {
                 let id = req_s(a, "id")?;
                 let state = req_s(a, "state")?;
-                let pos = match (s(a, "position").or_else(|| s(a, "after")), state.trim().eq_ignore_ascii_case("queued")) {
-                    (Some(p), true) if p.eq_ignore_ascii_case("top") => Some(QueuePos::Top),
-                    (Some(p), true) if p.eq_ignore_ascii_case("end") => Some(QueuePos::End),
-                    (Some(p), true) => Some(QueuePos::After(p)),
-                    (Some(_), false) => bail!("position only applies to state queued"),
-                    (None, _) => None,
-                };
-                if let Some(pos) = pos {
+                if let Some(pos) = backlog::queue_position(&state, s(a, "position").or_else(|| s(a, "after")).as_deref())? {
                     let n = backlog::queue(&v, &id, pos, s(a, "by").as_deref())?;
                     return Ok(format::ack("queued", &n));
                 }

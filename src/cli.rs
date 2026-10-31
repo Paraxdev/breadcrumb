@@ -48,10 +48,11 @@ impl ScopeArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct FilterArgs {
+    /// Only this kind
     #[arg(long, short = 'k')]
     pub kind: Option<String>,
     /// Require this tag (repeatable)
-    #[arg(long = "tag")]
+    #[arg(long = "tag", alias = "tags")]
     pub tags: Vec<String>,
     /// active, archived or all
     #[arg(long, default_value = "active")]
@@ -62,13 +63,14 @@ pub struct FilterArgs {
     /// Only pinned notes
     #[arg(long)]
     pub pinned: bool,
+    /// Most notes to return
     #[arg(long, short = 'n')]
     pub limit: Option<usize>,
     /// updated, created or title
     #[arg(long, default_value = "updated")]
     pub sort: String,
     /// Has this ref, type:value or just the value (repeatable)
-    #[arg(long = "ref", value_name = "REF")]
+    #[arg(long = "ref", alias = "refs", value_name = "REF")]
     pub refs: Vec<String>,
 }
 
@@ -90,6 +92,7 @@ impl FilterArgs {
 pub enum Cmd {
     /// Create a vault, or add missing files to an existing one
     Init {
+        /// Git remote URL for the vault
         #[arg(long)]
         remote: Option<String>,
     },
@@ -101,45 +104,79 @@ pub enum Cmd {
     /// Add a note
     Add(AddArgs),
     /// Print a full note
-    Get { id: String },
+    Get {
+        /// Note id or slug
+        id: String,
+    },
     /// Change a note
     Update(UpdateArgs),
     /// Append a paragraph to a note body ("-" reads stdin)
-    Append { id: String, text: String },
+    Append {
+        /// Note id or slug
+        id: String,
+        /// The paragraph, "-" reads stdin
+        text: String,
+    },
     /// Mark notes as still accurate, without changing them otherwise
     Verify {
+        /// Note ids or slugs
         #[arg(required = true, num_args = 1..)]
         ids: Vec<String>,
     },
     /// List short names, --backfill names the notes without one (dry unless --yes)
     Slugs {
+        /// Name the notes that have no short name
         #[arg(long)]
         backfill: bool,
         /// Only backlog items that are not closed
         #[arg(long)]
         open_only: bool,
+        /// Only this project
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// Write the names, without it only print them
         #[arg(long)]
         yes: bool,
     },
-    /// Link two notes
-    Link {
+    /// Remove a link, the same as `link --remove`
+    Unlink {
+        /// The note holding the link, id or slug
         from: String,
+        /// The note it points at, id or slug
         to: String,
+        /// Only the link of this type (default: every link between the two)
         #[arg(long)]
         rel: Option<String>,
+    },
+    /// Link two notes
+    Link {
+        /// The note that holds the link, id or slug
+        from: String,
+        /// The note it points at, id or slug
+        to: String,
+        /// Link type: relates (default), blocks, depends-on, supersedes, or parent and part-of, which `tree` reads as the parent when the item has no parent field
+        #[arg(long)]
+        rel: Option<String>,
+        /// Remove the link instead, every link between the two without --rel, same as `unlink`
         #[arg(long)]
         remove: bool,
     },
     /// Archive a note
-    Archive { id: String },
+    Archive {
+        /// Note id or slug
+        id: String,
+    },
     /// Restore an archived note to active
-    Unarchive { id: String },
+    Unarchive {
+        /// Note id or slug
+        id: String,
+    },
     /// Delete a note file (git history keeps it)
     Delete {
+        /// Note id or slug
         id: String,
-        #[arg(long)]
+        /// Really delete, without it the command refuses
+        #[arg(long, alias = "confirm")]
         yes: bool,
     },
     /// List notes
@@ -151,6 +188,7 @@ pub enum Cmd {
     },
     /// Ranked full-text search
     Search {
+        /// Words to search for
         #[arg(required = true, num_args = 1..)]
         query: Vec<String>,
         #[command(flatten)]
@@ -160,16 +198,22 @@ pub enum Cmd {
     },
     /// Compact digest for agents to read at session start
     Context {
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// Only the global digest
         #[arg(long, conflicts_with = "project")]
         global: bool,
+        /// Most recent notes to list
         #[arg(long, short = 'n', default_value_t = 15)]
         limit: usize,
     },
-    /// Note kinds (schemas)
-    #[command(subcommand)]
-    Kind(KindCmd),
+    /// Note kinds (schemas), bare it lists them
+    #[command(visible_alias = "kinds")]
+    Kind {
+        #[command(subcommand)]
+        cmd: Option<KindCmd>,
+    },
     /// Import Claude Code memory or arbitrary files
     #[command(subcommand)]
     Import(ImportCmd),
@@ -178,7 +222,9 @@ pub enum Cmd {
     Export(ExportCmd),
     /// Clone a bundle into a new vault location
     Restore {
+        /// The bundle file
         bundle: PathBuf,
+        /// Where to put the vault (default: the vault path)
         #[arg(long)]
         to: Option<PathBuf>,
     },
@@ -187,6 +233,7 @@ pub enum Cmd {
     Remote(RemoteCmd),
     /// Commit, pull --rebase and push
     Sync {
+        /// Commit message
         #[arg(short = 'm', long)]
         message: Option<String>,
     },
@@ -200,7 +247,7 @@ pub enum Cmd {
         #[arg(long)]
         fix: bool,
         /// Apply the --fix changes in one commit
-        #[arg(long, requires = "fix")]
+        #[arg(long, requires = "fix", alias = "apply")]
         yes: bool,
     },
     /// Every pin with its age and why it is flagged, flagged first, with the commands to verify, unpin or archive it (changes nothing)
@@ -221,14 +268,19 @@ pub enum Cmd {
     },
     /// Capture an idea quickly
     Idea {
+        /// One line title
         title: String,
+        /// Body text
         #[arg(long)]
         body: Option<String>,
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// A global idea, in no project
         #[arg(long, conflicts_with = "project")]
         global: bool,
-        #[arg(long = "tag")]
+        /// Tag (repeatable)
+        #[arg(long = "tag", alias = "tags")]
         tags: Vec<String>,
     },
     /// Machine facts (kind env) for this computer: where files, folders and tools live
@@ -240,23 +292,31 @@ pub enum Cmd {
         all_machines: bool,
     },
     /// Backlog items grouped by state
+    #[command(visible_alias = "backlog")]
     Board {
         #[command(flatten)]
         scope: ScopeArgs,
+        /// Only this kind
         #[arg(long, short = 'k')]
         kind: Option<String>,
+        /// Only items held by this session name
         #[arg(long)]
         assignee: Option<String>,
+        /// Also the shipped and rejected columns
         #[arg(long)]
         include_closed: bool,
     },
     /// Queue an item (end of queue by default)
     Queue {
+        /// Item id or slug
         id: String,
+        /// Put it first in the queue
         #[arg(long, conflicts_with = "after")]
         top: bool,
+        /// Put it right after this item
         #[arg(long)]
         after: Option<String>,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
@@ -264,6 +324,7 @@ pub enum Cmd {
     Next {
         #[command(flatten)]
         scope: ScopeArgs,
+        /// Only items assigned to this session name
         #[arg(long)]
         assignee: Option<String>,
         /// Move it to in-progress and assign it
@@ -275,27 +336,35 @@ pub enum Cmd {
     },
     /// Claim an item for this session, `next` in other sessions skips it until the claim is a day without activity
     Claim {
+        /// Item id or slug
         id: String,
         /// Session name (default: $BREADCRUMB_SESSION, else the Claude Code session id)
         #[arg(long)]
         by: Option<String>,
-        /// Take over another session's fresh claim
+        /// Take over another session's fresh claim, or with --release release it
         #[arg(long)]
         force: bool,
+        /// Release the claim instead, the same as `release`
+        #[arg(long)]
+        release: bool,
     },
     /// Release the claim on an item
     Release {
+        /// Item id or slug
         id: String,
+        /// Session name (default: $BREADCRUMB_SESSION, else the Claude Code session id)
         #[arg(long)]
         by: Option<String>,
         /// Release another session's fresh claim
         #[arg(long)]
         force: bool,
     },
-    /// Ask the user a question about an item, an open question locks the item until it is answered
+    /// Ask the user a question about an item, an open question locks the item until it is answered. `questions` lists, `answer` and `unask` close
+    #[command(visible_alias = "question")]
     Ask {
         /// Item id
         id: String,
+        /// The question
         text: String,
         /// Answer option as `label: description`, two to four (repeatable)
         #[arg(long = "option", short = 'o')]
@@ -306,6 +375,7 @@ pub enum Cmd {
         /// The user may answer in free text too
         #[arg(long)]
         free: bool,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
@@ -313,6 +383,7 @@ pub enum Cmd {
     Questions {
         #[command(flatten)]
         scope: ScopeArgs,
+        /// Also answers no agent acknowledged yet
         #[arg(long)]
         answered: bool,
     },
@@ -322,46 +393,61 @@ pub enum Cmd {
         qid: Option<String>,
         /// Option numbers
         choices: Vec<String>,
+        /// Answer in free text, when the question allows it
         #[arg(long)]
         text: Option<String>,
         #[command(flatten)]
         scope: ScopeArgs,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
     /// Acknowledge the answers on an item, which clears its unseen flag (claiming it does the same)
     Ack {
+        /// Item id or slug
         id: String,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
     /// Withdraw an open question, which unlocks the item
+    #[command(visible_alias = "withdraw")]
     Unask {
+        /// Question id like abc123.1
         qid: String,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
     /// Change the state of a backlog item
     Move {
+        /// Item id or slug
         id: String,
+        /// idea, backlog, queued, in-progress, review, done, shipped or rejected
         state: String,
+        /// Why it was rejected, required moving to rejected
         #[arg(long)]
         resolution: Option<String>,
+        /// Where it landed, a merge sha or version like 1.0.386, read by `ship`
         #[arg(long)]
         shipped_in: Option<String>,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
+        /// Moving to queued, where: top, end or the id to go after
+        #[arg(long, value_name = "WHERE")]
+        position: Option<String>,
         /// Also mark acceptance criteria met: all, or positions like 2,3
         #[arg(long, value_name = "WHICH")]
         check: Option<String>,
         /// Moving to review, what the user should try (repeatable)
-        #[arg(long = "step", value_name = "TEXT", allow_hyphen_values = true)]
+        #[arg(long = "step", alias = "steps", value_name = "TEXT", allow_hyphen_values = true)]
         steps: Vec<String>,
         /// One line for the release notes, `ship` prints it
         #[arg(long, value_name = "LINE", allow_hyphen_values = true)]
         release_note: Option<String>,
-        /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, -type:value removes (repeatable)
-        #[arg(long = "ref", value_name = "REF", allow_hyphen_values = true)]
+        /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, a bare sha reads as commit:<sha>, -type:value removes (repeatable)
+        #[arg(long = "ref", alias = "refs", value_name = "REF", allow_hyphen_values = true)]
         refs: Vec<String>,
     },
     /// What a range of commits landed: release note lines, items, merges no item points at, --yes moves the items to shipped
@@ -371,6 +457,7 @@ pub enum Cmd {
         /// The checkout to read, default the one holding the current directory or the recorded project path
         #[arg(long, value_name = "DIR")]
         repo: Option<PathBuf>,
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
         /// Set shipped_in on the moved items
@@ -379,6 +466,7 @@ pub enum Cmd {
         /// Move the matched open items, without it nothing changes
         #[arg(long)]
         yes: bool,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
@@ -391,19 +479,29 @@ pub enum Cmd {
     },
     /// Mark acceptance criteria of an item met ([x])
     Check {
+        /// Item id or slug
         id: String,
         /// all (default), or 1 based positions like 2,3
         which: Option<String>,
     },
     /// Epic, feature and task hierarchy
-    Tree { id: String },
+    Tree {
+        /// Item id or slug
+        id: String,
+    },
     /// What an item blocks and what blocks it, transitively
-    Deps { id: String },
+    Deps {
+        /// Item id or slug
+        id: String,
+    },
     /// Change the kind of an item, keeping id, links and history
     Promote {
+        /// Item id or slug
         id: String,
+        /// The new kind: idea, epic, feature, task or bug
         #[arg(long)]
         to: String,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
@@ -416,8 +514,10 @@ pub enum Cmd {
     /// What to read before working on files, directories or map areas: their map lines with stale ones marked,
     /// and the gotchas, decisions and feedback whose path globs match, in about 2k tokens
     Brief {
+        /// Files, directories or map areas
         #[arg(required = true, num_args = 1..)]
         targets: Vec<String>,
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
         /// Git checkout to check freshness against (default: the one holding the cwd, else a recorded project path)
@@ -429,8 +529,10 @@ pub enum Cmd {
     },
     /// Local web UI on 127.0.0.1
     Serve {
+        /// Port on 127.0.0.1
         #[arg(long, default_value_t = 7878)]
         port: u16,
+        /// Open it in the browser
         #[arg(long)]
         open: bool,
         /// Accept the --allow-host names behind a TLS proxy such as `tailscale serve`, with a login token, questions and a read only board only
@@ -458,15 +560,20 @@ pub enum Cmd {
 pub enum ReviewCmd {
     /// It works: move to done and mark its steps met
     Pass {
+        /// Item id or slug
         id: String,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
     /// It does not: back to queued with the reason, keeping its priority
     Fail {
+        /// Item id or slug
         id: String,
+        /// What did not work, added to the body
         #[arg(long)]
         reason: String,
+        /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
     },
@@ -478,6 +585,7 @@ pub enum HookCmd {
     SessionStart,
     /// Start a background Claude memory import and sync when there is something to do
     SessionEnd {
+        /// Skip the Claude memory import
         #[arg(long)]
         no_import: bool,
     },
@@ -490,6 +598,7 @@ pub enum HookCmd {
     /// The detached work SessionEnd starts
     #[command(hide = true)]
     Background {
+        /// Skip the Claude memory import
         #[arg(long)]
         no_import: bool,
     },
@@ -520,11 +629,13 @@ pub enum HooksCmd {
     },
     /// Remove breadcrumb hooks, leaving every other setting alone
     Uninstall {
+        /// Settings file (default: ~/.claude/settings.json)
         #[arg(long, value_name = "PATH")]
         settings: Option<PathBuf>,
     },
     /// Show which breadcrumb hooks are registered
     Status {
+        /// Settings file (default: ~/.claude/settings.json)
         #[arg(long, value_name = "PATH")]
         settings: Option<PathBuf>,
     },
@@ -532,22 +643,32 @@ pub enum HooksCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum ProjectCmd {
+    /// List the projects
     List,
+    /// Show one project with its paths and remotes
     Show {
+        /// Project slug
         slug: String,
     },
+    /// Create a project
     Add {
+        /// Project slug
         slug: String,
+        /// Display name
         #[arg(long)]
         name: Option<String>,
+        /// One line description
         #[arg(long)]
         description: Option<String>,
+        /// Directory the project lives in (repeatable)
         #[arg(long = "path")]
         paths: Vec<String>,
     },
     /// Bind a directory and its git remotes to a project, creating it if needed
     Link {
+        /// Project slug
         slug: String,
+        /// One line description
         #[arg(long)]
         description: Option<String>,
         /// Directory to bind (default: current directory)
@@ -558,38 +679,61 @@ pub enum ProjectCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum MapCmd {
+    /// The same as the top level `brief`: what to read before working on these targets
+    Brief {
+        /// Files, directories or map areas
+        #[arg(required = true, num_args = 1..)]
+        targets: Vec<String>,
+        /// Project slug (default: detected from the current directory)
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Git checkout to read (default: the one holding the current directory, else a recorded project path)
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Most chars to print
+        #[arg(long, default_value_t = crate::map::BRIEF_BUDGET)]
+        budget: usize,
+    },
     /// Create the area's map or merge lines into it, a line for the same file and symbol replaces the old one
     Put {
+        /// Map area name
         area: String,
         /// `file:line symbol, what it does` (repeatable)
-        #[arg(long = "line", value_name = "LINE")]
+        #[arg(long = "line", alias = "lines", value_name = "LINE")]
         lines: Vec<String>,
         /// File with one map line per line, `-` reads stdin
         #[arg(long, value_name = "FILE")]
         lines_file: Option<PathBuf>,
         /// Path glob the area covers (repeatable), default the files its lines name
-        #[arg(long = "path-glob", value_name = "GLOB")]
+        #[arg(long = "path-glob", alias = "paths", value_name = "GLOB")]
         paths: Vec<String>,
         /// Remove the lines of a file, or one line by `file symbol` (repeatable)
         #[arg(long, value_name = "KEY")]
         drop: Vec<String>,
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// Git checkout to read (default: the one holding the current directory, else a recorded project path)
         #[arg(long, value_name = "DIR")]
         repo: Option<PathBuf>,
     },
     /// Show an area's map with stale lines marked
     Get {
+        /// Map area name
         area: String,
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// Git checkout to read (default: the one holding the current directory, else a recorded project path)
         #[arg(long, value_name = "DIR")]
         repo: Option<PathBuf>,
     },
     /// One header line per map of the project
     List {
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// Git checkout to read (default: the one holding the current directory, else a recorded project path)
         #[arg(long, value_name = "DIR")]
         repo: Option<PathBuf>,
     },
@@ -599,15 +743,19 @@ pub enum MapCmd {
 pub enum WorkflowCmd {
     /// Copy scripts into the vault and record a workflow note for each
     Save {
+        /// Script files
         #[arg(required = true, num_args = 1..)]
         files: Vec<PathBuf>,
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// Store them as global, in no project
         #[arg(long, conflicts_with = "project")]
         global: bool,
     },
     /// Copy the project's stored workflows into <DIR>/.claude/workflows
     Install {
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
         /// Project directory (default: the project containing the cwd, else its first recorded path)
@@ -619,13 +767,16 @@ pub enum WorkflowCmd {
     },
     /// Compare stored workflows with the local .claude/workflows
     Status {
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// Project directory (default: the project containing the cwd, else its first recorded path)
         #[arg(long, value_name = "DIR")]
         to: Option<PathBuf>,
     },
     /// Stored workflows of the current project and global
     List {
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
         /// Every project
@@ -636,26 +787,34 @@ pub enum WorkflowCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum KindCmd {
+    /// List the kinds, also what a bare `kind` does
     List,
+    /// Show one kind with its fields
     Show {
+        /// Kind name
         name: String,
     },
     /// Create or update a kind from flags or a toml file
     Define {
+        /// Kind name
         #[arg(long, required_unless_present = "file")]
         name: Option<String>,
+        /// One line description
         #[arg(long)]
         description: Option<String>,
         /// name:type[:required][:a|b|c][:default=x], repeatable
         #[arg(long = "field")]
         fields: Vec<String>,
+        /// Body template for new notes of this kind
         #[arg(long)]
         template: Option<String>,
+        /// A toml file holding the definition
         #[arg(long)]
         file: Option<PathBuf>,
         /// Replace the whole definition instead of merging fields by name
         #[arg(long)]
         replace: bool,
+        /// Field to drop from the definition (repeatable)
         #[arg(long = "remove-field")]
         remove_fields: Vec<String>,
     },
@@ -665,8 +824,10 @@ pub enum KindCmd {
 pub enum ImportCmd {
     /// Claude Code auto-memory and plans
     Claude {
+        /// Claude directory (default: ~/.claude)
         #[arg(long)]
         claude_dir: Option<PathBuf>,
+        /// Print what would change, write nothing
         #[arg(long)]
         dry_run: bool,
         /// dirname=slug, repeatable ("global" as slug maps to global)
@@ -681,13 +842,18 @@ pub enum ImportCmd {
     },
     /// Markdown or text files from a file or directory
     Files {
+        /// A file or directory
         path: PathBuf,
+        /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
+        /// Kind for the new notes
         #[arg(long, short = 'k')]
         kind: Option<String>,
-        #[arg(long = "tag")]
+        /// Tag for the new notes (repeatable)
+        #[arg(long = "tag", alias = "tags")]
         tags: Vec<String>,
+        /// Print what would change, write nothing
         #[arg(long)]
         dry_run: bool,
     },
@@ -696,19 +862,29 @@ pub enum ImportCmd {
 #[derive(Subcommand, Debug)]
 pub enum ExportCmd {
     /// git bundle with full history, for moving PCs
-    Bundle { file: PathBuf },
+    Bundle {
+        /// The bundle file to write
+        file: PathBuf,
+    },
     /// One JSON object per note, kind and project
-    Jsonl { file: PathBuf },
+    Jsonl {
+        /// The file to write
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmd {
+    /// Set the git remote of the vault
     Set {
+        /// Git remote URL
         url: String,
     },
     /// Create a GitHub repo with gh (private by default) and push
     Github {
+        /// Repository name
         name: String,
+        /// Make the repository public
         #[arg(long)]
         public: bool,
     },
@@ -716,6 +892,7 @@ pub enum RemoteCmd {
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
+    /// Short specific title
     #[arg(long, short = 't')]
     pub title: String,
     /// A handoff's line of work, a new handoff replaces the live one of its track, or without one its own session's
@@ -730,28 +907,35 @@ pub struct AddArgs {
     /// The day they said it, default today
     #[arg(long, value_name = "DATE")]
     pub said_on: Option<String>,
+    /// Kind of note (default: note, see `kind`)
     #[arg(long, short = 'k')]
     pub kind: Option<String>,
+    /// Project slug (default: detected from the current directory)
     #[arg(long, short = 'p')]
     pub project: Option<String>,
+    /// A global note, in no project
     #[arg(long, conflicts_with = "project")]
     pub global: bool,
-    #[arg(long = "tag")]
+    /// Tag (repeatable)
+    #[arg(long = "tag", alias = "tags")]
     pub tags: Vec<String>,
     /// key=value, parsed per the kind's field type (repeatable)
-    #[arg(long = "field", value_name = "K=V")]
+    #[arg(long = "field", alias = "fields", value_name = "K=V")]
     pub fields: Vec<String>,
-    #[arg(long)]
+    /// Show it in the digest of every session
+    #[arg(long, alias = "pinned")]
     pub pin: bool,
     /// Body text, "-" reads stdin
     #[arg(long, allow_hyphen_values = true)]
     pub body: Option<String>,
+    /// File holding the body text
     #[arg(long, conflicts_with = "body")]
     pub body_file: Option<PathBuf>,
+    /// Where the fact came from, a path or URL
     #[arg(long)]
     pub source: Option<String>,
     /// File glob relative to the project root the note applies to, like src/engine/** (repeatable)
-    #[arg(long = "path-glob", value_name = "GLOB")]
+    #[arg(long = "path-glob", alias = "paths", value_name = "GLOB")]
     pub paths: Vec<String>,
     /// One line the session digest shows for a pinned note, instead of the title's first sentence
     #[arg(long)]
@@ -766,27 +950,36 @@ pub struct AddArgs {
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
+    /// Note id or slug
     pub id: String,
+    /// New title
     #[arg(long)]
     pub title: Option<String>,
     /// Rename the short name, a retitle never does and messages that used the old one stop resolving
     #[arg(long)]
     pub slug: Option<String>,
+    /// New kind
     #[arg(long)]
     pub kind: Option<String>,
     /// +tag adds, -tag removes (repeatable)
-    #[arg(long = "tag", allow_hyphen_values = true)]
+    #[arg(long = "tag", alias = "tags", allow_hyphen_values = true)]
     pub tags: Vec<String>,
-    #[arg(long = "field", value_name = "K=V")]
+    /// key=value, parsed per the kind's field type (repeatable)
+    #[arg(long = "field", alias = "fields", value_name = "K=V")]
     pub fields: Vec<String>,
+    /// Field to remove (repeatable)
     #[arg(long)]
     pub unset: Vec<String>,
+    /// New body text, replaces the old one, "-" reads stdin
     #[arg(long, allow_hyphen_values = true)]
     pub body: Option<String>,
+    /// File holding the new body text
     #[arg(long, conflicts_with = "body")]
     pub body_file: Option<PathBuf>,
-    #[arg(long, conflicts_with = "unpin")]
+    /// Show it in the digest of every session
+    #[arg(long, alias = "pinned", conflicts_with = "unpin")]
     pub pin: bool,
+    /// Stop showing it in the digest
     #[arg(long)]
     pub unpin: bool,
     /// active or archived
@@ -796,10 +989,10 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub by: Option<String>,
     /// +glob or glob adds a file glob, -glob removes it (repeatable)
-    #[arg(long = "path-glob", value_name = "GLOB", allow_hyphen_values = true)]
+    #[arg(long = "path-glob", alias = "paths", value_name = "GLOB", allow_hyphen_values = true)]
     pub paths: Vec<String>,
-    /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, -type:value removes (repeatable)
-    #[arg(long = "ref", value_name = "REF", allow_hyphen_values = true)]
+    /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, a bare sha reads as commit:<sha>, -type:value removes (repeatable)
+    #[arg(long = "ref", alias = "refs", value_name = "REF", allow_hyphen_values = true)]
     pub refs: Vec<String>,
     /// One line the session digest shows for a pinned note
     #[arg(long)]
@@ -1052,11 +1245,8 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text: Vec<String> = ns.iter().map(|n| format::ack("verified", n)).collect();
             out.emit(text.join("\n"), Json::Array(ns.iter().map(|n| n.to_json()).collect()));
         }
-        Cmd::Link { from, to, rel, remove } => {
-            let n = ops::link(&open()?, &from, &to, rel.as_deref(), remove)?;
-            let links: Vec<String> = n.links.iter().map(|l| format!("{} {}", l.rel, l.to)).collect();
-            out.emit(format!("{} links: {}", n.id, if links.is_empty() { "(none)".into() } else { links.join(", ") }), n.to_json());
-        }
+        Cmd::Link { from, to, rel, remove } => link_cmd(&out, &open()?, &from, &to, rel.as_deref(), remove)?,
+        Cmd::Unlink { from, to, rel } => link_cmd(&out, &open()?, &from, &to, rel.as_deref(), true)?,
         Cmd::Archive { id } => {
             let n = ops::set_status(&open()?, &id, "archived")?;
             out.emit(format!("archived {}  {}", n.id, n.title), n.to_json());
@@ -1098,7 +1288,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text = ops::context(&v, p.as_deref(), limit)?;
             out.emit(&text, json!({"project": p, "markdown": text}));
         }
-        Cmd::Kind(kc) => kind_cmd(&out, &open()?, kc)?,
+        Cmd::Kind { cmd } => kind_cmd(&out, &open()?, cmd.unwrap_or(KindCmd::List))?,
         Cmd::Import(ic) => {
             let v = open()?;
             let mut quiet = false;
@@ -1255,7 +1445,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => out.emit(format!("no unblocked queued items in {}", sc.label()), Json::Null),
             }
         }
-        Cmd::Claim { id, by, force } => {
+        Cmd::Claim { id, by, force, release: true } => release_cmd(&out, &open()?, &id, by.as_deref(), force)?,
+        Cmd::Claim { id, by, force, release: false } => {
             let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
             let v = open()?;
             let notice = question::notice(&v.get(&id)?);
@@ -1311,14 +1502,13 @@ pub fn run(cli: Cli) -> Result<i32> {
             let n = question::withdraw(&open()?, &qid, &by)?;
             out.emit(format!("withdrew the question on {}", backlog::item_summary(&n)), n.to_json());
         }
-        Cmd::Release { id, by, force } => {
-            let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
-            match backlog::release(&open()?, &id, &by, force)? {
-                Some(n) => out.emit(format!("released {}", backlog::item_summary(&n)), n.to_json()),
-                None => out.emit(format!("{id} has no claim to release"), Json::Null),
+        Cmd::Release { id, by, force } => release_cmd(&out, &open()?, &id, by.as_deref(), force)?,
+        Cmd::Move { id, state, position, resolution, shipped_in, by, check, steps, release_note, refs } => {
+            if let Some(pos) = backlog::queue_position(&state, position.as_deref())? {
+                let n = backlog::queue(&open()?, &id, pos, by.as_deref())?;
+                out.emit(backlog::item_summary(&n), n.to_json());
+                return Ok(0);
             }
-        }
-        Cmd::Move { id, state, resolution, shipped_in, by, check, steps, release_note, refs } => {
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
             let r = backlog::move_item(&open()?, &id, MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None, release_note })?;
             out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "hints": r.hints, "note": r.note.to_json()}));
@@ -1390,13 +1580,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Workflow(wc) => return workflow_cmd(&out, &open()?, wc, &cwd),
         Cmd::Map(mc) => map_cmd(&out, &open()?, mc, &cwd)?,
-        Cmd::Brief { targets, project, repo, budget } => {
-            let v = open()?;
-            let slug = workflow::resolve_project(&v, project.as_deref(), &cwd)?;
-            let repo = crate::map::repo_for(&v, &slug, repo.as_deref(), &cwd).ok();
-            let text = crate::map::brief(&v, &slug, &targets, repo.as_deref(), budget)?;
-            out.emit(&text, json!({"project": slug, "brief": text}));
-        }
+        Cmd::Brief { targets, project, repo, budget } => brief_cmd(&out, &open()?, &targets, project.as_deref(), repo.as_deref(), budget, &cwd)?,
         Cmd::Serve { port, open: open_browser, remote, allow_host } => {
             open()?;
             let hosts = if remote { Some(allow_host.iter().map(String::as_str).map(crate::serve::normalize_host).collect::<Result<Vec<_>>>()?) } else { None };
@@ -1430,6 +1614,33 @@ running MCP and serve processes keep the old version until their client restarts
         }
     }
     Ok(0)
+}
+
+fn release_cmd(out: &Out, v: &Vault, id: &str, by: Option<&str>, force: bool) -> Result<()> {
+    let by = backlog::session_name(by).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
+    match backlog::release(v, id, &by, force)? {
+        Some(n) => out.emit(format!("released {}", backlog::item_summary(&n)), n.to_json()),
+        None => out.emit(format!("{id} has no claim to release"), Json::Null),
+    }
+    Ok(())
+}
+
+fn link_cmd(out: &Out, v: &Vault, from: &str, to: &str, rel: Option<&str>, remove: bool) -> Result<()> {
+    let n = ops::link(v, from, to, rel, remove)?;
+    let links: Vec<String> = n.links.iter().map(|l| format!("{} {}", l.rel, l.to)).collect();
+    let mut text = format!("{} links: {}", n.id, if links.is_empty() { "(none)".into() } else { links.join(", ") });
+    if !remove && rel.is_some_and(backlog::is_parent_rel) {
+        let to_id = v.resolve_id(to)?;
+        text.push('\n');
+        text.push_str(&match backlog::tree_parent(&n) {
+            Some(p) if p == to_id => format!("linked {} as a child of {to_id}, `tree {to_id}` shows it there", n.id),
+            Some(p) if backlog::parent(&n).is_some() => format!("linked, but the parent field {p} wins, `tree` keeps {} under {p}", n.id),
+            Some(p) => format!("linked, but an earlier link wins, `tree` keeps {} under {p}", n.id),
+            None => format!("linked, but {} is a '{}' note and `tree` only places backlog items", n.id, n.kind),
+        });
+    }
+    out.emit(text, n.to_json());
+    Ok(())
 }
 
 fn project_cmd(out: &Out, v: &Vault, pc: ProjectCmd, cwd: &Path) -> Result<()> {
@@ -1478,9 +1689,18 @@ fn project_cmd(out: &Out, v: &Vault, pc: ProjectCmd, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+fn brief_cmd(out: &Out, v: &Vault, targets: &[String], project: Option<&str>, repo: Option<&Path>, budget: usize, cwd: &Path) -> Result<()> {
+    let slug = workflow::resolve_project(v, project, cwd)?;
+    let repo = crate::map::repo_for(v, &slug, repo, cwd).ok();
+    let text = crate::map::brief(v, &slug, targets, repo.as_deref(), budget)?;
+    out.emit(&text, json!({"project": slug, "brief": text}));
+    Ok(())
+}
+
 fn map_cmd(out: &Out, v: &Vault, mc: MapCmd, cwd: &Path) -> Result<()> {
     use crate::map;
     match mc {
+        MapCmd::Brief { targets, project, repo, budget } => brief_cmd(out, v, &targets, project.as_deref(), repo.as_deref(), budget, cwd)?,
         MapCmd::Put { area, mut lines, lines_file, paths, drop, project, repo } => {
             let slug = workflow::resolve_project(v, project.as_deref(), cwd)?;
             let repo = map::repo_for(v, &slug, repo.as_deref(), cwd)?;

@@ -10,8 +10,6 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-const MIN_SHA: usize = 7;
-
 #[derive(Debug, Clone)]
 pub struct Commit {
     pub sha: String,
@@ -33,17 +31,13 @@ pub fn commits(repo: &Path, range: &str) -> std::result::Result<Vec<Commit>, Str
         .collect())
 }
 
-fn hex_of_a_commit(s: &str) -> bool {
-    (MIN_SHA..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 /// `shipped_in` is free text in the vault, like `0450c1a5`, `c3b1c7c2 beta` or `beta 1.0.386 (main 19fcf4af)`, so
 /// every hex word in it counts. A `commit:` ref is one value.
 fn pointers(n: &Note) -> Vec<String> {
     let refs = n.refs().into_iter().filter_map(|r| r.strip_prefix("commit:").map(str::to_string));
     let shipped = n.field("shipped_in").and_then(yaml_scalar_string).unwrap_or_default();
     let words = shipped.split(|c: char| !c.is_ascii_alphanumeric()).map(str::to_string).collect::<Vec<_>>();
-    refs.chain(words).map(|s| s.to_ascii_lowercase()).filter(|s| hex_of_a_commit(s)).collect()
+    refs.chain(words).map(|s| s.to_ascii_lowercase()).filter(|s| crate::note::is_commit_hex(s)).collect()
 }
 
 pub fn has_commit_pointer(n: &Note) -> bool {

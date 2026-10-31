@@ -100,6 +100,17 @@ pub fn parent(n: &Note) -> Option<String> {
     str_field(n, "parent")
 }
 
+pub fn is_parent_rel(rel: &str) -> bool {
+    matches!(rel.trim(), "parent" | "part-of")
+}
+
+/// Where `tree` places a note: the parent field, else an item's first `parent` link, else its first `part-of` link.
+/// Board progress, `next` and the digest read only the field.
+pub fn tree_parent(n: &Note) -> Option<String> {
+    let link = |rel: &str| n.links.iter().find(|l| l.rel == rel).map(|l| l.to.clone());
+    parent(n).or_else(|| if is_item(n) { link("parent").or_else(|| link("part-of")) } else { None })
+}
+
 pub fn assignee(n: &Note) -> Option<String> {
     str_field(n, "assignee")
 }
@@ -385,7 +396,11 @@ impl<'a> Index<'a> {
     }
 
     pub fn children(&self, id: &str) -> Vec<&'a Note> {
-        let mut c: Vec<&Note> = self.notes.iter().filter(|n| parent(n).as_deref() == Some(id) && n.id != id && !n.is_archived()).collect();
+        self.children_by(id, parent)
+    }
+
+    fn children_by(&self, id: &str, parent_of: fn(&Note) -> Option<String>) -> Vec<&'a Note> {
+        let mut c: Vec<&Note> = self.notes.iter().filter(|n| parent_of(n).as_deref() == Some(id) && n.id != id && !n.is_archived()).collect();
         sort_items(&mut c);
         c
     }
@@ -1231,7 +1246,7 @@ fn tree_lines(idx: &Index, n: &Note, depth: usize, seen: &mut HashSet<String>, o
         let _ = writeln!(out, "{}  (cycle)", "  ".repeat(depth));
         return;
     }
-    for c in idx.children(&n.id) {
+    for c in idx.children_by(&n.id, tree_parent) {
         if seen.contains(&c.id) {
             let _ = writeln!(out, "{}- {} (cycle)", "  ".repeat(depth + 1), c.id);
             continue;
@@ -1240,13 +1255,25 @@ fn tree_lines(idx: &Index, n: &Note, depth: usize, seen: &mut HashSet<String>, o
     }
 }
 
+/// `position` on a move: where in the queue, only for state queued.
+pub fn queue_position(state: &str, position: Option<&str>) -> Result<Option<QueuePos>> {
+    let queued = state.trim().eq_ignore_ascii_case("queued");
+    Ok(match (position, queued) {
+        (Some(p), true) if p.eq_ignore_ascii_case("top") => Some(QueuePos::Top),
+        (Some(p), true) if p.eq_ignore_ascii_case("end") => Some(QueuePos::End),
+        (Some(p), true) => Some(QueuePos::After(p.to_string())),
+        (Some(_), false) => bail!("position only applies to state queued"),
+        (None, _) => None,
+    })
+}
+
 pub fn tree(v: &Vault, id: &str) -> Result<String> {
     let root = get_item(v, id)?;
     let all = v.load_notes();
     let idx = Index::new(&all);
     let mut out = String::new();
     let mut chain = vec![];
-    let mut cur = parent(&root);
+    let mut cur = tree_parent(&root);
     let mut guard = HashSet::from([root.id.clone()]);
     while let Some(p) = cur {
         if !guard.insert(p.clone()) {
@@ -1255,7 +1282,7 @@ pub fn tree(v: &Vault, id: &str) -> Result<String> {
         match idx.by_id.get(p.as_str()) {
             Some(pn) => {
                 chain.push(format!("{} {} [{}] {}", key(pn), pn.kind, state_label(pn), pn.title));
-                cur = parent(pn);
+                cur = tree_parent(pn);
             }
             None => {
                 chain.push(format!("{p} (missing)"));
