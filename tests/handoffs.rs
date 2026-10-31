@@ -144,7 +144,7 @@ fn old_others_leave_the_digest_unless_pinned_and_at_most_three_show() {
     let d = digest(&v);
     let others: Vec<&str> = d.lines().skip_while(|l| *l != "Other live handoffs:").skip(1).take_while(|l| !l.starts_with("Recent")).collect();
     assert_eq!(others.iter().filter(|l| l.contains(": Recent ") || l.contains(": Pinned legacy")).count(), 3, "{d}");
-    assert!(others.iter().any(|l| l.starts_with("+2 more: ")), "{d}");
+    assert!(others.iter().any(|l| *l == "+2 more"), "a count and no ids, they would push Recent out: {d}");
 }
 
 #[test]

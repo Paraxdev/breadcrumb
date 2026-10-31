@@ -155,8 +155,7 @@ fn other_handoffs(others: &[&Note]) -> String {
         s.push('\n');
     }
     if shown.len() > OTHER_HANDOFFS_MAX {
-        let rest: Vec<&str> = shown[OTHER_HANDOFFS_MAX..].iter().map(|n| n.id.as_str()).collect();
-        let _ = writeln!(s, "+{} more: {}", rest.len(), rest.join(" "));
+        let _ = writeln!(s, "+{} more", shown.len() - OTHER_HANDOFFS_MAX);
     }
     s
 }
