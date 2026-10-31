@@ -663,7 +663,7 @@ pub fn tool_defs() -> Vec<Value> {
             "sort": {"type": "string", "enum": ["updated", "created", "title"]},
         })), &[])),
         tool("get", "Read a note, full adds default keys.", obj(with(id(), json!({"full": bl()})), &["id"])),
-        tool("add", "Save one durable fact, decision, gotcha, preference, handoff, idea or machine fact (kind env).", obj(with(target(), json!({
+        tool("add", "Save one durable fact, decision, gotcha, preference, handoff, idea or env fact.", obj(with(target(), json!({
             "title": st(),
             "kind": {"type": "string", "description": "default note"},
             "body": st(),
@@ -705,13 +705,13 @@ pub fn tool_defs() -> Vec<Value> {
             "resolution": {"type": "string", "description": "required for rejected"},
             "shipped_in": st(),
             "check": {"type": "string", "description": "tick acceptance: all or 2,3"},
-            "steps": {"type": "array", "items": st(), "description": "moving to review: what the user should try"},
+            "steps": {"type": "array", "items": st(), "description": "review: what to try"},
             "refs": refs(),
             "by": st(),
         })), &["id", "state"])),
-        tool("next", "Top unblocked queued item no other session claimed, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
+        tool("next", "Top unblocked queued item nobody holds, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
         tool("claim", "Claim an item for this session, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": bl()})), &["id"])),
-        tool("question", "Ask the user about an item (locks it), list open questions, record an answer, ack, withdraw.", obj(json!({
+        tool("question", "Ask the user about an item (locks it), list, answer, ack, withdraw.", obj(json!({
             "action": {"type": "string", "enum": ["ask", "list", "answer", "ack", "withdraw"]},
             "id": {"type": "string", "description": "item id, abc123.1 to answer"},
             "text": st(),
@@ -722,7 +722,7 @@ pub fn tool_defs() -> Vec<Value> {
             "answer": st(),
             "by": by(),
         }), &[])),
-        tool("backlog", "Board, what waits for the user's review, or tree or deps of one item.", obj(with(json!({"project": st()}), json!({
+        tool("backlog", "Board, review list, or tree or deps of one item.", obj(with(json!({"project": st()}), json!({
             "view": {"type": "string", "enum": ["board", "review", "tree", "deps"]},
             "id": st(),
             "include_closed": bl(),
@@ -747,7 +747,7 @@ pub fn tool_defs() -> Vec<Value> {
             "to": st(),
             "force": bl(),
         })), &[])),
-        tool("map", "Code maps: brief (default) targets before editing, put lines, same file and symbol replaces.", obj(with(json!({"project": st()}), json!({
+        tool("map", "Code maps: brief (default) targets before editing, put lines.", obj(with(json!({"project": st()}), json!({
             "action": {"type": "string", "enum": ["brief", "list", "get", "put"]},
             "targets": {"type": "array", "items": {"type": "string"}, "description": "files, dirs or areas"},
             "area": st(),
