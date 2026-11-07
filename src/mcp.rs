@@ -232,6 +232,9 @@ impl Server {
                 let mut f = filter(a)?;
                 f.limit = Some(f.limit.unwrap_or(LIST_LIMIT));
                 let (notes, total) = ops::list_counted(&v, &sc, &f)?;
+                if f.since.is_some() || f.others {
+                    return Ok(format::recent_rows(&notes, total, self.current(&v, a).as_deref(), f.since.as_ref(), crate::session::current().as_deref()));
+                }
                 Ok(format::rows(&notes, total, self.current(&v, a).as_deref()))
             }
             "get" => {
@@ -275,7 +278,7 @@ impl Server {
                 if ops::lacks_quote(&n) {
                     out.push_str(&format!("\n{}", ops::SAID_HINT));
                 }
-                if let Some(h) = crate::kind::kind_hint(&n) {
+                for h in [crate::kind::kind_hint(&n).map(String::from), ops::paths_hint(&n)].into_iter().flatten() {
                     out.push_str(&format!("\n{h}"));
                 }
                 if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
@@ -595,6 +598,8 @@ fn filter(a: &Map<String, Value>) -> Result<Filter> {
             Some(x) => SortKey::parse(&x)?,
             None => SortKey::Updated,
         },
+        since: s(a, "since").as_deref().map(ops::parse_since).transpose()?,
+        others: b(a, "others"),
     })
 }
 
@@ -661,7 +666,7 @@ pub fn tool_defs() -> Vec<Value> {
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
     let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});
-    let by = || json!({"type": "string", "description": "session"});
+    let by = st;
     let paths = || json!({"type": "array", "items": {"type": "string"}, "description": "file globs, src/db/**"});
     vec![
         tool("context", "Reload the session start digest.", obj(with(target(), json!({"kinds": bl()})), &[])),
@@ -670,6 +675,8 @@ pub fn tool_defs() -> Vec<Value> {
             "status": {"type": "string", "enum": ["active", "archived", "all"]},
             "where": {"type": ["object", "array"], "description": "{field: value} or k=v, ref=commit:sha"},
             "sort": {"type": "string", "enum": ["updated", "created", "title"]},
+            "since": {"type": "string", "description": "date, 2h or 3d, shows who wrote"},
+            "others": bl(),
         })), &[])),
         tool("get", "Read a note: full keys, body alone or last tail lines.", obj(with(id(), json!({"full": bl(), "body": bl(), "tail": int()})), &["id"])),
         tool("add", "Save one fact, decision, gotcha, preference, handoff, idea or env fact.", obj(with(target(), json!({
@@ -741,7 +748,7 @@ pub fn tool_defs() -> Vec<Value> {
         tool("project", "List projects or bind a directory to one.", obj(json!({
             "action": {"type": "string", "enum": ["list", "link"]},
             "slug": st(),
-            "path": {"type": "string", "description": "default cwd"},
+            "path": st(),
             "description": st(),
         }), &[])),
         tool("kinds", "List kinds, or define one.", obj(json!({"define": obj(json!({

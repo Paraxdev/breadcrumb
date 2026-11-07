@@ -7,6 +7,7 @@ use crate::search::{self, SearchResult};
 use crate::util::{is_valid_slug, now, path_str, slugify};
 use crate::vault::Vault;
 use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
 use serde_yaml::Value;
 use std::path::{Path, PathBuf};
 
@@ -434,6 +435,12 @@ pub fn similar_hint(xs: &[Note]) -> Option<String> {
     Some(format!("possible duplicates, update one instead if it holds the same fact: {}", items.join(", ")))
 }
 
+/// A project gotcha or decision with no path glob, which `brief` and the file hook can only find by glob.
+pub fn paths_hint(n: &Note) -> Option<String> {
+    let unreachable = matches!(n.kind.as_str(), "gotcha" | "decision") && n.project.is_some() && n.path_globs().is_empty();
+    unreachable.then(|| format!("no path glob, so `brief` and the file hook cannot find this {} when its files are edited, `breadcrumb update {} --path-glob 'src/x/**'` adds one", n.kind, n.id))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UpdateReq {
     pub title: Option<String>,
@@ -674,6 +681,7 @@ pub fn link(v: &Vault, from: &str, to: &str, rel: Option<&str>, remove: bool) ->
         }
         note.links.push(Link { to: to_id, rel });
     }
+    crate::session::stamp_write(&mut note);
     note.updated = now();
     let p = v.write_note(&mut note)?;
     v.commit(&[p], &commit_msg(if remove { "unlink" } else { "link" }, &note))?;
@@ -707,6 +715,7 @@ pub fn set_status(v: &Vault, id: &str, status: &str) -> Result<Note> {
     }
     note.status = status;
     note.clear_kept("status");
+    crate::session::stamp_write(&mut note);
     note.updated = now();
     let p = v.write_note(&mut note)?;
     let op = if note.is_archived() { "archive" } else { "unarchive" };
@@ -770,6 +779,27 @@ pub struct Filter {
     pub pinned: bool,
     pub limit: Option<usize>,
     pub sort: SortKey,
+    /// Only notes written at or after this time, appends, moves, claims and links count since they set `updated`.
+    pub since: Option<DateTime<Utc>>,
+    /// Hide notes whose latest write was by this session.
+    pub others: bool,
+}
+
+/// A date (from its start, UTC), an RFC3339 time, or `2h`, `3d`, `30m` ago.
+pub fn parse_since(raw: &str) -> Result<DateTime<Utc>> {
+    let r = raw.trim();
+    if let Some(d) = crate::lifecycle::relative(r) {
+        return Ok(now() - d);
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(r, "%Y-%m-%d")
+        && let Some(t) = d.and_hms_opt(0, 0, 0)
+    {
+        return Ok(t.and_utc());
+    }
+    match DateTime::parse_from_rfc3339(r) {
+        Ok(t) => Ok(t.with_timezone(&Utc)),
+        Err(_) => bail!("since '{r}' must be a date, an RFC3339 time, or 2h, 3d or 30m ago"),
+    }
 }
 
 fn note_values(n: &Note, key: &str) -> Vec<String> {
@@ -825,6 +855,7 @@ pub fn ref_matches(have: &str, want: &str) -> bool {
 
 pub fn filter_notes(notes: Vec<Note>, scope: &Scope, f: &Filter) -> Result<Vec<Note>> {
     let mut out = vec![];
+    let me = crate::session::current();
     for n in notes {
         if !scope.contains(&n) {
             continue;
@@ -842,6 +873,12 @@ pub fn filter_notes(notes: Vec<Note>, scope: &Scope, f: &Filter) -> Result<Vec<N
             continue;
         }
         if f.pinned && !n.pinned {
+            continue;
+        }
+        if f.since.is_some_and(|t| n.updated < t) {
+            continue;
+        }
+        if f.others && me.is_some() && crate::session::last_writer(&n) == me {
             continue;
         }
         let mut ok = true;

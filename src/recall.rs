@@ -185,6 +185,15 @@ pub struct IndexEntry {
     /// Unix seconds an `expires` date or time runs out, checked on every read since time passes without file changes.
     #[serde(default)]
     pub expires: Option<i64>,
+    /// The `summary` field or the title's first sentence, see digest::summary.
+    #[serde(default)]
+    pub summary: String,
+    /// A backlog item that is done, shipped or rejected.
+    #[serde(default)]
+    pub closed: bool,
+    /// A backlog item, whatever its state.
+    #[serde(default)]
+    pub item: bool,
 }
 
 impl IndexEntry {
@@ -207,7 +216,7 @@ struct PathIndex {
 /// so this costs no file reads.
 fn notes_signature(v: &Vault) -> String {
     // The version rebuilds an index written by an older binary, which lacks newer entry fields.
-    let mut parts: Vec<String> = vec!["v2".into()];
+    let mut parts: Vec<String> = vec!["v3".into()];
     for d in v.notes_dirs() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
@@ -258,6 +267,9 @@ pub fn path_index(v: &Vault) -> Vec<IndexEntry> {
                     Some(crate::lifecycle::Expiry::At(t)) => Some(t.timestamp()),
                     _ => None,
                 },
+                summary: crate::digest::summary(n),
+                closed: crate::backlog::is_item(n) && crate::backlog::is_closed(&crate::backlog::state(n)),
+                item: crate::backlog::is_item(n),
             })
         })
         .collect();
@@ -267,39 +279,98 @@ pub fn path_index(v: &Vault) -> Vec<IndexEntry> {
     notes
 }
 
-fn kind_rank(kind: &str) -> u8 {
-    match kind {
-        "gotcha" => 0,
-        "feedback" => 1,
-        _ => 2,
-    }
-}
-
 fn item(id: &str, kind: &str, title: &str, stale: bool) -> String {
     let t = crate::util::truncate_chars(&crate::util::one_line(title), ITEM_TITLE_MAX);
     format!("{id} {kind} {t}{}", if stale { STALE } else { "" })
 }
 
+const WHY_MAX: usize = 100;
+const WHY_TITLE_MAX: usize = 60;
+
+enum Place {
+    /// Listed, lower ranks first: gotchas and decisions warn, then feedback, open items, other notes.
+    Show(u8),
+    /// Only counted, a code map is read with `brief`.
+    Map,
+    /// Only counted, a done, shipped or rejected item warns of nothing.
+    Closed,
+}
+
+fn place(e: &IndexEntry) -> Place {
+    if e.kind == crate::map::MAP {
+        Place::Map
+    } else if e.closed {
+        Place::Closed
+    } else {
+        Place::Show(match e.kind.as_str() {
+            "gotcha" | "decision" => 0,
+            "feedback" => 1,
+            _ if e.item => 2,
+            _ => 3,
+        })
+    }
+}
+
+/// A gotcha or decision carries its why, the summary when it says more than the start of the title.
+fn file_item(rank: u8, e: &IndexEntry, stale: bool) -> String {
+    if rank > 0 {
+        return item(&e.id, &e.kind, &e.title, stale);
+    }
+    let title = crate::util::one_line(&e.title);
+    let why = e.summary.trim_end_matches("...");
+    let text = if why.is_empty() || title.starts_with(why) {
+        crate::util::truncate_chars(&title, WHY_MAX)
+    } else {
+        format!("{}: {}", crate::util::truncate_chars(&title, WHY_TITLE_MAX), crate::util::truncate_chars(&e.summary, WHY_MAX))
+    };
+    format!("{} {} {text}{}", e.id, e.kind, if stale { STALE } else { "" })
+}
+
 /// One line naming the notes whose globs match `file`, skipping ids in `exclude`. Returns the line and the ids.
+/// Maps and closed items are left out behind a count, a map also points at `brief` for the file.
 pub fn file_notes(v: &Vault, cwd: &Path, file: &Path, exclude: &HashSet<String>) -> Option<(String, Vec<String>)> {
     let abs = if file.is_absolute() { file.to_path_buf() } else { cwd.join(file) };
     let projects = v.load_projects();
     let cwd_project = crate::project::detect(&projects, &crate::git::config_remote_urls(cwd), cwd);
     let (slug, rel) = locate(&projects, cwd_project.as_deref(), &abs)?;
-    let mut hits: Vec<IndexEntry> = path_index(v)
+    let hits: Vec<IndexEntry> = path_index(v)
         .into_iter()
         .filter(|e| e.project.as_deref().is_none_or(|p| p == slug))
         .filter(|e| !exclude.contains(&e.id) && e.holds())
         .filter(|e| e.paths.iter().any(|g| glob_match(g, &rel)))
         .collect();
-    if hits.is_empty() {
+    let mut shown: Vec<(u8, IndexEntry)> = vec![];
+    let (mut maps, mut closed): (Vec<String>, Vec<String>) = (vec![], vec![]);
+    for e in hits {
+        match place(&e) {
+            Place::Show(rank) => shown.push((rank, e)),
+            Place::Map => maps.push(e.id),
+            Place::Closed => closed.push(e.id),
+        }
+    }
+    if shown.is_empty() && maps.is_empty() {
         return None;
     }
-    hits.sort_by(|a, b| kind_rank(&a.kind).cmp(&kind_rank(&b.kind)).then(b.fresh.cmp(&a.fresh)));
-    hits.truncate(FILE_NOTES_MAX);
+    shown.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.fresh.cmp(&a.1.fresh)));
+    shown.truncate(FILE_NOTES_MAX);
     let days = v.config.stale_days;
-    let items: Vec<String> = hits.iter().map(|e| item(&e.id, &e.kind, &e.title, e.stale(days))).collect();
-    Some((format!("breadcrumb notes for {rel}: {}", items.join("; ")), hits.into_iter().map(|e| e.id).collect()))
+    let items: Vec<String> = shown.iter().map(|(rank, e)| file_item(*rank, e, e.stale(days))).collect();
+    let mut counts: Vec<String> = vec![];
+    if !maps.is_empty() {
+        counts.push(format!("+{} map{}", maps.len(), if maps.len() == 1 { "" } else { "s" }));
+    }
+    if !closed.is_empty() {
+        counts.push(format!("+{} closed", closed.len()));
+    }
+    let mut line = format!("breadcrumb notes for {rel}: {}", items.join("; "));
+    if !counts.is_empty() {
+        line.push_str(&if items.is_empty() { counts.join(", ") } else { format!(" ({})", counts.join(", ")) });
+    }
+    if !maps.is_empty() {
+        line.push_str(&format!(". A code map covers it, `crumb brief {rel}` (or the map tool) lists its lines"));
+    }
+    let ids = shown.into_iter().map(|(_, e)| e.id).chain(maps).chain(closed).collect();
+    Some((line, ids))
 }
 
 pub const STOPWORDS: &[&str] = &[
