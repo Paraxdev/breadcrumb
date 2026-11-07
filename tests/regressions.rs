@@ -454,7 +454,7 @@ fn unpinned_prefs_get_one_line_and_doctor_info() {
     let ctx = breadcrumb::ops::context(&v, None, 15).unwrap();
     let line = ctx.lines().find(|l| l.starts_with("Prefs")).unwrap_or_else(|| panic!("{ctx}"));
     assert!(line.find(&new.id).unwrap() < line.find(&old.id).unwrap(), "most recent first: {line}");
-    assert!(!line.contains(&pinned.id) && ctx.contains(&format!("{} feedback Never force push\n", pinned.id)) && !ctx.contains("Ask first."));
+    assert!(!line.contains(&pinned.id) && ctx.contains(&format!("{} feedback (inferred) Never force push\n", pinned.id)) && !ctx.contains("Ask first."));
     assert_eq!(ctx.matches(&old.id).count(), 1, "not repeated under Recent: {ctx}");
 
     for i in 0..30 {
