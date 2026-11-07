@@ -455,6 +455,7 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
     let k = v.require_kind(MAP)?;
     k.validate(&mut m.note.extra)?;
     m.note.mark_verified();
+    crate::session::stamp_write(&mut m.note);
     m.note.updated = now();
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(MAP)?.into_iter().collect();
     touched.extend(crate::ops::ensure_project(v, &project)?);

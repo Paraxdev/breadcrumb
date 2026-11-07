@@ -72,6 +72,12 @@ pub struct FilterArgs {
     /// Has this ref, type:value or just the value (repeatable)
     #[arg(long = "ref", alias = "refs", value_name = "REF")]
     pub refs: Vec<String>,
+    /// Written since a date, an RFC3339 time or 2h, 3d, 30m ago, appends and moves count
+    #[arg(long, value_name = "WHEN")]
+    pub since: Option<String>,
+    /// Hide notes this session wrote last
+    #[arg(long)]
+    pub others: bool,
 }
 
 impl FilterArgs {
@@ -84,6 +90,8 @@ impl FilterArgs {
             pinned: self.pinned,
             limit: self.limit,
             sort: SortKey::parse(&self.sort)?,
+            since: self.since.as_deref().map(ops::parse_since).transpose()?,
+            others: self.others,
         })
     }
 }
@@ -190,6 +198,13 @@ pub enum Cmd {
     },
     /// List notes
     List {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[command(flatten)]
+        filter: FilterArgs,
+    },
+    /// What other sessions wrote since this one started, list --since <start> --others
+    Recent {
         #[command(flatten)]
         scope: ScopeArgs,
         #[command(flatten)]
@@ -1161,6 +1176,14 @@ fn scope_label(s: &Scope) -> String {
     s.label()
 }
 
+/// From the session file Claude Code keeps, else from the first SessionStart hook the vault saw.
+fn session_start(root: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    crate::session::started().or_else(|| {
+        let st = crate::recall::load_session(root, &crate::session::current()?);
+        chrono::DateTime::from_timestamp(st.started, 0).filter(|_| st.started > 0)
+    })
+}
+
 fn notes_json(notes: &[crate::note::Note]) -> Json {
     Json::Array(notes.iter().map(|n| n.to_json()).collect())
 }
@@ -1341,8 +1364,24 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::List { scope, filter } => {
             let v = open()?;
             let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
-            let notes = ops::list(&v, &sc, &filter.filter()?)?;
-            out.emit(format::notes_text(&notes), notes_json(&notes));
+            let f = filter.filter()?;
+            let notes = ops::list(&v, &sc, &f)?;
+            let me = crate::session::current();
+            let text = if f.since.is_some() || f.others { format::recent_text(&notes, f.since.as_ref(), me.as_deref()) } else { format::notes_text(&notes) };
+            out.emit(text, notes_json(&notes));
+        }
+        Cmd::Recent { scope, mut filter } => {
+            let v = open()?;
+            let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
+            if filter.since.is_none() {
+                let start = session_start(&root).ok_or_else(|| anyhow::anyhow!("this session's start time is unknown, use `list --since 2h` instead"))?;
+                filter.since = Some(crate::util::fmt_time(&start));
+            }
+            filter.others = true;
+            let f = filter.filter()?;
+            let notes = ops::list(&v, &sc, &f)?;
+            let me = crate::session::current();
+            out.emit(format::recent_text(&notes, f.since.as_ref(), me.as_deref()), notes_json(&notes));
         }
         Cmd::Search { query, scope, filter } => {
             let v = open()?;

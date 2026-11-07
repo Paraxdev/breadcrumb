@@ -35,6 +35,7 @@ pub struct Live {
     pub id: String,
     pub name: Option<String>,
     pub pid: Option<u32>,
+    pub started: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 struct SessionList {
@@ -101,7 +102,8 @@ fn read_sessions() -> Option<SessionList> {
             continue;
         };
         let name = j["name"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-        list.live.push(Live { id: id.to_string(), name, pid: j["pid"].as_u64().map(|p| p as u32) });
+        let started = j["startedAt"].as_i64().and_then(chrono::DateTime::from_timestamp_millis);
+        list.live.push(Live { id: id.to_string(), name, pid: j["pid"].as_u64().map(|p| p as u32), started });
     }
     Some(list)
 }
@@ -173,6 +175,11 @@ pub fn holder(who: &str) -> String {
 
 pub fn is_alive(who: &str) -> bool {
     find(who).is_some()
+}
+
+/// When this process's session started, from its session file.
+pub fn started() -> Option<chrono::DateTime<chrono::Utc>> {
+    find(&current()?).and_then(|s| s.started)
 }
 
 /// The current name when the session is live and named, otherwise the id's first 8 characters.

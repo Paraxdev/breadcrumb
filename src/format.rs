@@ -3,9 +3,15 @@ use crate::note::Note;
 use crate::project::Project;
 use crate::search::SearchResult;
 use crate::util::fmt_date;
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::fmt::Write;
 
 pub fn note_line(n: &Note) -> String {
+    note_line_at(n, &fmt_date(&n.updated))
+}
+
+fn note_line_at(n: &Note, when: &str) -> String {
     let mut flags = String::new();
     if n.pinned {
         flags.push_str(" [pinned]");
@@ -13,7 +19,62 @@ pub fn note_line(n: &Note) -> String {
     if n.is_archived() {
         flags.push_str(" [archived]");
     }
-    format!("{}  {:<12} {:<14} {}{}  ({})", n.handle(), n.kind, n.scope_label(), n.title, flags, fmt_date(&n.updated))
+    format!("{}  {:<12} {:<14} {}{}  ({})", n.handle(), n.kind, n.scope_label(), n.title, flags, when)
+}
+
+fn minute(n: &Note) -> String {
+    n.updated.format("%Y-%m-%d %H:%MZ").to_string()
+}
+
+/// Who wrote a note last, and `[other]` when that was not `me`. Session names are looked up once per id.
+struct Writers<'a> {
+    me: Option<&'a str>,
+    names: HashMap<String, String>,
+}
+
+impl Writers<'_> {
+    fn mark(&mut self, n: &Note) -> String {
+        let Some(id) = crate::session::last_writer(n) else { return String::new() };
+        if self.me == Some(id.as_str()) {
+            return " by you".into();
+        }
+        let name = self.names.entry(id.clone()).or_insert_with(|| crate::session::label(&id));
+        format!(" by {name}{}", if self.me.is_some() { " [other]" } else { "" })
+    }
+}
+
+fn since_head(since: Option<&DateTime<Utc>>) -> String {
+    since.map(|t| format!("changed since {}
+", crate::util::fmt_time(t))).unwrap_or_default()
+}
+
+/// `list --since` for the CLI: the minute of the last write and who made it.
+pub fn recent_text(notes: &[Note], since: Option<&DateTime<Utc>>, me: Option<&str>) -> String {
+    let mut s = since_head(since);
+    if notes.is_empty() {
+        s.push_str("no notes\n");
+    }
+    let mut w = Writers { me, names: HashMap::new() };
+    for n in notes {
+        let _ = writeln!(s, "{}{}", note_line_at(n, &minute(n)), w.mark(n));
+    }
+    s
+}
+
+/// `list --since` for the MCP tool, same marks as `rows`.
+pub fn recent_rows(notes: &[Note], total: usize, current: Option<&str>, since: Option<&DateTime<Utc>>, me: Option<&str>) -> String {
+    let mut s = since_head(since);
+    if notes.is_empty() {
+        s.push_str("no notes\n");
+    }
+    let mut w = Writers { me, names: HashMap::new() };
+    for n in notes {
+        let _ = writeln!(s, "{} {}{}", row_marked(n, "", current, false), minute(n), w.mark(n));
+    }
+    if total > notes.len() {
+        let _ = writeln!(s, "{} more, narrow with filters", total - notes.len());
+    }
+    s
 }
 
 pub fn notes_text(notes: &[Note]) -> String {

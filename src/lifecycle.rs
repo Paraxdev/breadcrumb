@@ -58,14 +58,19 @@ pub fn expiry(n: &Note) -> Option<Expiry> {
     (!raw.trim().is_empty()).then(|| parse_expiry(&raw))
 }
 
+/// `3d`, `12h` or `30m` as a span.
+pub fn relative(r: &str) -> Option<Duration> {
+    let rel = |suffix: char, unit: fn(i64) -> Duration| r.strip_suffix(suffix).and_then(|x| x.trim().parse::<i64>().ok()).filter(|x| *x > 0).map(unit);
+    rel('d', Duration::days).or_else(|| rel('h', Duration::hours)).or_else(|| rel('m', Duration::minutes))
+}
+
 /// What a writer may pass as `expires`: a date, an RFC3339 time, `3d` or `12h` from now, or `until:<id>`.
 pub fn normalize_expires(v: &Vault, raw: &str) -> Result<String> {
     let r = raw.trim();
     if let Some(id) = r.strip_prefix(UNTIL).or_else(|| r.strip_prefix("until ")) {
         return Ok(format!("{UNTIL}{}", v.resolve_id(id.trim())?));
     }
-    let rel = |suffix: char, unit: fn(i64) -> Duration| r.strip_suffix(suffix).and_then(|x| x.trim().parse::<i64>().ok()).filter(|x| *x > 0).map(unit);
-    if let Some(d) = rel('d', Duration::days).or_else(|| rel('h', Duration::hours)) {
+    if let Some(d) = relative(r) {
         return Ok(fmt_time(&(now() + d)));
     }
     match parse_expiry(r) {
