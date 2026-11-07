@@ -239,13 +239,15 @@ impl Server {
             }
             "get" => {
                 let n = v.get(&req_s(a, "id")?)?;
+                let all = v.load_notes();
+                let lead = crate::merge::notice(&n, &all).map(|m| format!("{m}\n")).unwrap_or_default();
                 if b(a, "body") {
                     let (text, cut) = format::body_only(&n, u(a, "tail"));
-                    return Ok(cut.map_or(text.clone(), |c| format!("{c}\n{text}")));
+                    return Ok(format!("{lead}{}", cut.map_or(text.clone(), |c| format!("{c}\n{text}"))));
                 }
                 let shown = u(a, "tail").map(|t| format::tailed(&n, t));
                 let note = format::note_compact(shown.as_ref().unwrap_or(&n), b(a, "full"));
-                Ok(format!("{note}{}{}", format::inbound_text(&n, &v.load_notes()), question::notice(&n)))
+                Ok(format!("{lead}{note}{}{}", format::inbound_text(&n, &all), question::notice(&n)))
             }
             "add" => {
                 let project = self.target_project(&v, a)?;
@@ -327,6 +329,13 @@ impl Server {
                 let to = v.resolve_id(&req_s(a, "to")?).unwrap_or_else(|_| s(a, "to").unwrap_or_default());
                 let rel = rel.unwrap_or_else(|| crate::note::DEFAULT_REL.into());
                 Ok(if remove { format!("unlinked {} -> {to}", n.id) } else { format!("linked {} {rel} {to}", n.id) })
+            }
+            "merge" => {
+                let id = req_s(a, "id")?;
+                if b(a, "undo") {
+                    return Ok(crate::merge::unmerged_text(&crate::merge::unmerge(&v, &id)?));
+                }
+                Ok(crate::merge::merged_text(&crate::merge::merge(&v, &id, &req_s(a, "into")?)?))
             }
             "delete" => {
                 if !b(a, "confirm") {
@@ -715,6 +724,7 @@ pub fn tool_defs() -> Vec<Value> {
             "rel": {"type": "string", "description": "relates (default), blocks, depends-on, supersedes"},
             "remove": bl(),
         }), &["from", "to"])),
+        tool("merge", "Merge a duplicate note into another, undo restores it.", obj(with(id(), json!({"into": st(), "undo": bl()})), &["id"])),
         tool("delete", "Delete a note, prefer archiving.", obj(with(id(), json!({"confirm": bl()})), &["id", "confirm"])),
         tool("move", "Change a backlog item's state.", obj(with(id(), json!({
             "state": {"type": "string", "enum": backlog::STATES},

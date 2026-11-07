@@ -178,6 +178,15 @@ pub enum Cmd {
         #[arg(long)]
         remove: bool,
     },
+    /// Merge a duplicate note into the one that stays, nothing is lost, --undo restores it
+    Merge {
+        /// The duplicate and the note that stays, like `merge DUP KEEP` or `merge DUP into KEEP`, with --undo only the duplicate
+        #[arg(required = true, num_args = 1..=3)]
+        notes: Vec<String>,
+        /// Take the merge back: both notes return as they were
+        #[arg(long)]
+        undo: bool,
+    },
     /// Archive a note
     Archive {
         /// Note id or slug
@@ -1276,7 +1285,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             if let Json::Object(o) = &mut data {
                 o.entry("inbound").or_insert(format::inbound_json(&n, &all));
             }
+            let merged = crate::merge::notice(&n, &all);
             let text = if body {
+                if let Some(m) = merged.as_ref().filter(|_| !out.json) {
+                    eprintln!("{m}");
+                }
                 let (text, cut) = format::body_only(&n, tail);
                 if let Some(c) = cut.filter(|_| !out.json) {
                     eprintln!("{c}");
@@ -1288,7 +1301,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 let notice = question::notice(&n);
                 let written = crate::session::written_line(&n).map(|w| format!("\n{w}\n")).unwrap_or_default();
                 let note = if full { format::note_full(shown) } else { format::note_reading(shown) };
-                format!("{note}{written}{}{}{notice}", format::inbound_text(&n, &all), if notice.is_empty() { "" } else { "\n" })
+                let lead = merged.map(|m| format!("{m}\n\n")).unwrap_or_default();
+                format!("{lead}{note}{written}{}{}{notice}", format::inbound_text(&n, &all), if notice.is_empty() { "" } else { "\n" })
             };
             out.emit(text, data);
         }
@@ -1347,6 +1361,22 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(text.join("\n"), Json::Array(ns.iter().map(|n| n.to_json()).collect()));
         }
         Cmd::Link { from, to, rel, remove } => link_cmd(&out, &open()?, &from, &to, rel.as_deref(), remove)?,
+        Cmd::Merge { notes, undo } => {
+            let v = open()?;
+            let ids: Vec<&String> = notes.iter().filter(|n| !n.eq_ignore_ascii_case("into")).collect();
+            match (undo, ids.as_slice()) {
+                (true, [dup]) => {
+                    let u = crate::merge::unmerge(&v, dup)?;
+                    out.emit(crate::merge::unmerged_text(&u), json!({"restored": u.dup.id, "from": u.keep.as_ref().map(|k| k.id.clone()), "left": u.left}));
+                }
+                (false, [dup, keep]) => {
+                    let m = crate::merge::merge(&v, dup, keep)?;
+                    out.emit(crate::merge::merged_text(&m), json!({"merged": m.dup.id, "into": m.keep.id}));
+                }
+                (true, _) => bail!("merge --undo takes the merged note only, like `breadcrumb merge --undo DUP`"),
+                (false, _) => bail!("merge takes the duplicate and the note that stays, like `breadcrumb merge DUP KEEP`, or --undo DUP"),
+            }
+        }
         Cmd::Unlink { from, to, rel } => link_cmd(&out, &open()?, &from, &to, rel.as_deref(), true)?,
         Cmd::Archive { id } => {
             let n = ops::set_status(&open()?, &id, "archived")?;

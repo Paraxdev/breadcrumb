@@ -166,6 +166,9 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
         if key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY {
             bail!("'{key}' is set by breadcrumb from the session that writes");
         }
+        if crate::merge::KEYS.contains(&key.as_str()) {
+            bail!("'{key}' is set by merge, use the merge tool or `breadcrumb merge`");
+        }
         if RESERVED_KEYS.contains(&key.as_str()) {
             bail!("'{key}' is note metadata, not a field, use the dedicated option (title, kind, tags, links, status, pin)");
         }
@@ -237,7 +240,7 @@ pub fn with_said(mut fields: Vec<(String, FieldInput)>, said: Option<String>, on
     with_field(fields, crate::note::SAID_ON_KEY, on)
 }
 
-fn set_paths(note: &mut Note, globs: Vec<String>) {
+pub(crate) fn set_paths(note: &mut Note, globs: Vec<String>) {
     if globs.is_empty() {
         note.unset_field(crate::note::PATHS_KEY);
     } else {
@@ -264,7 +267,7 @@ pub fn edit_refs(note: &mut Note, edits: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn push_tag(tags: &mut Vec<String>, t: &str) {
+pub(crate) fn push_tag(tags: &mut Vec<String>, t: &str) {
     let t = t.trim();
     if !t.is_empty() && !tags.iter().any(|x| x.eq_ignore_ascii_case(t)) {
         tags.push(t.to_string());
@@ -384,7 +387,7 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
 
 pub const SIMILAR_MAX: usize = 2;
 
-fn title_terms(title: &str) -> Vec<String> {
+pub(crate) fn title_terms(title: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for t in search::tokenize(title) {
         if !crate::recall::STOPWORDS.contains(&t.as_str()) && !out.contains(&t) {
@@ -412,19 +415,21 @@ pub fn similar(v: &Vault, n: &Note) -> Vec<Note> {
     let mut hits: Vec<(bool, f64, Note)> = all
         .into_iter()
         .filter(|x| x.id != n.id && x.kind != HANDOFF && !x.is_archived() && !lapsed.hides(x) && (x.project == n.project || x.project.is_none()))
-        .filter_map(|x| {
-            let exact = crate::util::one_line(&x.title).to_lowercase() == title;
-            let theirs = title_terms(&x.title);
-            let shared = mine.iter().filter(|a| theirs.iter().any(|b| same_term(a, b))).count();
-            let tags = n.tags.iter().filter(|t| x.has_tag(t)).count().min(3);
-            let cover = shared as f64 / mine.len().max(theirs.len()).max(1) as f64;
-            let alike = exact || (shared >= 2 && (cover >= 0.5 || (cover >= 0.34 && tags > 0)));
-            let kind = if x.kind == n.kind { 0.05 } else { 0.0 };
-            alike.then_some((exact, cover + 0.1 * tags as f64 + kind, x))
-        })
+        .filter_map(|x| look_alike(n, &mine, &title, &x, &title_terms(&x.title)).map(|(exact, score)| (exact, score, x)))
         .collect();
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)).then(b.2.updated.cmp(&a.2.updated)));
     hits.into_iter().take(SIMILAR_MAX).map(|h| h.2).collect()
+}
+
+/// `(equal title, score)` when `x` reads like the same fact as `n`. `mine` and `theirs` are title_terms, `title` is n's lowercase title.
+pub(crate) fn look_alike(n: &Note, mine: &[String], title: &str, x: &Note, theirs: &[String]) -> Option<(bool, f64)> {
+    let exact = crate::util::one_line(&x.title).to_lowercase() == title;
+    let shared = mine.iter().filter(|a| theirs.iter().any(|b| same_term(a, b))).count();
+    let tags = n.tags.iter().filter(|t| x.has_tag(t)).count().min(3);
+    let cover = shared as f64 / mine.len().max(theirs.len()).max(1) as f64;
+    let alike = exact || (shared >= 2 && (cover >= 0.5 || (cover >= 0.34 && tags > 0)));
+    let kind = if x.kind == n.kind { 0.05 } else { 0.0 };
+    alike.then_some((exact, cover + 0.1 * tags as f64 + kind))
 }
 
 pub fn similar_hint(xs: &[Note]) -> Option<String> {
@@ -487,6 +492,7 @@ fn check_status(s: &str) -> Result<String> {
 pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
     let _g = v.lock()?;
     let mut note = v.get(id)?;
+    crate::merge::refuse_merged(&note)?;
     if let Some(want) = &req.expected_version
         && *want != version(&note)
     {
@@ -617,6 +623,7 @@ pub fn append(v: &Vault, id: &str, text: &str) -> Result<Note> {
     let text = format!("{}\n{text}", crate::session::append_head());
     let _g = v.lock()?;
     let mut note = v.get(id)?;
+    crate::merge::refuse_merged(&note)?;
     note.body = if crate::backlog::is_item(&note) {
         crate::backlog::insert_before_history(&note.body, &text)
     } else if note.body.trim().is_empty() {
@@ -659,6 +666,7 @@ pub fn verify(v: &Vault, ids: &[String]) -> Result<Vec<Note>> {
 pub fn link(v: &Vault, from: &str, to: &str, rel: Option<&str>, remove: bool) -> Result<Note> {
     let _g = v.lock()?;
     let mut note = v.get(from)?;
+    crate::merge::refuse_merged(&note)?;
     let to_id = match v.resolve_id(to) {
         Ok(id) => id,
         // Links to deleted notes can still be removed, matched with the same rules as note ids.
@@ -667,6 +675,9 @@ pub fn link(v: &Vault, from: &str, to: &str, rel: Option<&str>, remove: bool) ->
     };
     if to_id == note.id && !remove {
         bail!("a note cannot link to itself");
+    }
+    if !remove {
+        crate::merge::refuse_merged(&v.get(&to_id)?)?;
     }
     if remove {
         let before = note.links.len();
@@ -861,7 +872,7 @@ pub fn filter_notes(notes: Vec<Note>, scope: &Scope, f: &Filter) -> Result<Vec<N
             continue;
         }
         match f.status {
-            StatusFilter::Active if n.is_archived() => continue,
+            StatusFilter::Active if n.is_archived() || crate::merge::merged_into(&n).is_some() => continue,
             StatusFilter::Archived if !n.is_archived() => continue,
             _ => {}
         }

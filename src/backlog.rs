@@ -709,6 +709,7 @@ pub fn capture_idea(v: &Vault, title: &str, body: Option<String>, project: Optio
 
 pub(crate) fn get_item(v: &Vault, id: &str) -> Result<Note> {
     let n = v.get(id)?;
+    crate::merge::refuse_merged(&n)?;
     if !is_item(&n) {
         bail!(
             "{} is a '{}' note, not a backlog item (kinds: {}). Change its kind to one of those first: update with kind (MCP or `breadcrumb update --kind`), or `breadcrumb promote {} --to feature` on the CLI",
