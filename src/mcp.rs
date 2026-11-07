@@ -275,6 +275,9 @@ impl Server {
                 if ops::lacks_quote(&n) {
                     out.push_str(&format!("\n{}", ops::SAID_HINT));
                 }
+                if let Some(h) = crate::kind::kind_hint(&n) {
+                    out.push_str(&format!("\n{h}"));
+                }
                 if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                     out.push_str(&format!("\n{h}"));
                 }
@@ -361,6 +364,9 @@ impl Server {
             }
             "claim" => {
                 let id = req_s(a, "id")?;
+                if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, self.current(&v, a).as_deref(), s(a, "by").as_deref(), b(a, "release"))? {
+                    return Ok(crate::lifecycle::take_text(&h, b(a, "release")));
+                }
                 let by = backlog::session_name(s(a, "by").as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.into());
                 if b(a, "release") {
                     return Ok(match backlog::release(&v, &id, &by, b(a, "force"))? {
@@ -421,7 +427,7 @@ impl Server {
                     Ok(format!("{} kind {}", if created { "defined" } else { "updated" }, format::kind_text(&k).trim_end()))
                 }
                 Some(_) => bail!("define must be an object with at least a name"),
-                None => Ok(format::kinds_compact(&v.load_kinds())),
+                None => Ok(format!("{}{}\n", format::kinds_compact(&v.load_kinds()), crate::kind::WHICH_KIND)),
             },
             "workflow" => {
                 let cwd = self.cwd_of(a);
@@ -695,7 +701,7 @@ pub fn tool_defs() -> Vec<Value> {
             "refs": refs(),
             "verify": {"type": "boolean", "description": "alone: mark accurate"},
         })), &["id"])),
-        tool("append", "Append a paragraph to a note.", obj(with(id(), json!({"text": st()})), &["id", "text"])),
+        tool("append", "Append a paragraph, date and session stamped.", obj(with(id(), json!({"text": st()})), &["id", "text"])),
         tool("link", "Add or remove a link between notes.", obj(json!({
             "from": st(),
             "to": st(),
@@ -715,7 +721,7 @@ pub fn tool_defs() -> Vec<Value> {
             "by": st(),
         })), &["id", "state"])),
         tool("next", "Top free queued item, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
-        tool("claim", "Claim an item, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": bl()})), &["id"])),
+        tool("claim", "Claim an item, a handoff or track:name, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": bl()})), &["id"])),
         tool("question", "Ask the user about an item (locks it), or act on an answer.", obj(json!({
             "action": {"type": "string", "enum": ["ask", "list", "answer", "ack", "withdraw"]},
             "id": {"type": "string", "description": "item id, abc123.1 to answer"},

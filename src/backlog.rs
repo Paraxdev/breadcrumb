@@ -1160,6 +1160,9 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     }
     let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
     record_state_change(&mut n, &from, &to, req.by.as_deref());
+    if from != to && crate::question::acts_on_answers(&to) {
+        crate::question::ack_in(&mut n, &actor(req.by.as_deref()));
+    }
     if to == "queued" {
         let keep = crate::note::normalize_refs(&req.refs.iter().filter(|r| !r.trim().starts_with('-')).map(|r| r.trim().trim_start_matches('+').to_string()).collect::<Vec<_>>())?;
         end_build_refs(&mut n, &from, &keep, req.by.as_deref());

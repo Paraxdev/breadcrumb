@@ -4,6 +4,7 @@
 use crate::backlog::{self, event_line, get_item, save, state};
 use crate::note::Note;
 use crate::util::{fmt_time, now, one_line, truncate_chars};
+use chrono::Timelike;
 use crate::vault::Vault;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -99,9 +100,36 @@ pub fn locked(n: &Note) -> bool {
     backlog::is_item(n) && questions(n).iter().any(Question::open)
 }
 
-/// Answered and not yet acknowledged by an agent.
+/// Answered and not yet acknowledged by an agent, nor acted on by a move to review or a closed state since.
 pub fn answered_unseen(n: &Note) -> bool {
-    backlog::is_item(n) && questions(n).iter().any(Question::unseen)
+    backlog::is_item(n) && pending(n).next().is_some()
+}
+
+/// The unseen answers an agent still has to act on.
+pub fn pending(n: &Note) -> impl Iterator<Item = Question> + '_ {
+    let moved = acted_since(n);
+    questions(n).into_iter().filter(move |q| q.unseen() && !moved.is_some_and(|t| q.answer.as_ref().and_then(|a| crate::util::parse_time(&a.at)).is_some_and(|at| t >= at.with_second(0).unwrap_or(at))))
+}
+
+/// When the item last moved to review, done, shipped or rejected, if it is in one of them now. Old binaries never
+/// acknowledged on a move, so an answer older than that move was acted on.
+fn acted_since(n: &Note) -> Option<chrono::DateTime<chrono::Utc>> {
+    if !matches!(state(n).as_str(), "review" | "done" | "shipped" | "rejected") {
+        return None;
+    }
+    let (_, history) = backlog::split_history(&n.body);
+    history?
+        .lines()
+        .filter_map(|l| {
+            let (t, what) = l.trim().strip_prefix("- ")?.split_once(": ")?;
+            what.starts_with("state ").then(|| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%MZ").ok().map(|t| t.and_utc()))?
+        })
+        .max()
+}
+
+/// A move to review or a closed state means the agent acted on what the user said.
+pub fn acts_on_answers(to: &str) -> bool {
+    matches!(to, "review" | "done" | "shipped" | "rejected")
 }
 
 fn built(n: &Note) -> bool {
@@ -287,7 +315,7 @@ pub fn notice(n: &Note) -> String {
     for q in open_questions(n) {
         let _ = writeln!(s, "waiting on the user, question {}: {}", qid(n, &q), q.text);
     }
-    let unseen: Vec<Question> = questions(n).into_iter().filter(Question::unseen).collect();
+    let unseen: Vec<Question> = pending(n).collect();
     for q in &unseen {
         let _ = writeln!(s, "answer arrived on {}: {} -> {}", qid(n, q), q.text, q.answer_text());
     }
@@ -329,11 +357,13 @@ pub fn digest_lines(items: &[&Note]) -> String {
     let mut ans = vec![];
     let mut open = vec![];
     for n in items.iter().filter(|n| !n.is_archived()) {
+        let pending: Vec<u32> = pending(n).map(|q| q.q).collect();
         for q in questions(n) {
-            if q.unseen() {
+            if pending.contains(&q.q) {
                 let hint = if built(n) { "built, adjust" } else { "not built, build with it" };
+                let age = q.answer.as_ref().and_then(|a| crate::util::parse_time(&a.at)).map(|t| format!(", {} ago", crate::util::short_age(&t))).unwrap_or_default();
                 let t = truncate_chars(&format!("{} -> {}", one_line(&q.text), one_line(&q.answer_text())), 150);
-                ans.push(format!("answer arrived on {}: {t} ({hint})", qid(n, &q)));
+                ans.push(format!("answer arrived on {} [{}{age}]: {t} ({hint})", qid(n, &q), state(n)));
             } else if q.open() {
                 open.push(format!("waiting on user {}: {}", qid(n, &q), truncate_chars(&one_line(&q.text), 80)));
             }

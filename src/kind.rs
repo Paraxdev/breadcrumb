@@ -442,6 +442,20 @@ pub fn parse_field_spec(spec: &str) -> Result<FieldDef> {
 
 pub const ENV: &str = "env";
 
+/// One way to file work, so agents filtering by kind or state find all of it.
+pub const WHICH_KIND: &str = "Which kind: a raw idea nobody committed to is kind idea. Work to build is feature, bug or task (an epic groups them), its state says how far it got. todo is a personal checkbox with no states, project work is a task.";
+
+/// A hint when a note was filed the other way.
+pub fn kind_hint(n: &crate::note::Note) -> Option<&'static str> {
+    if crate::backlog::is_item(n) && n.kind != "idea" && crate::backlog::state(n) == "idea" {
+        Some("a raw idea is kind idea, a feature, bug or task in state idea is easy to miss when filtering by kind")
+    } else if n.kind == "todo" && n.project.is_some() {
+        Some("todo has no states and stays off the board, project work is kind task")
+    } else {
+        None
+    }
+}
+
 pub fn seed_kinds() -> Vec<KindDef> {
     let enum_field = |name: &str, values: &[&str], default: &str, desc: &str| FieldDef {
         name: name.into(),
@@ -457,7 +471,7 @@ pub fn seed_kinds() -> Vec<KindDef> {
     decision.fields = vec![enum_field("decision_status", &["proposed", "accepted", "superseded"], "accepted", "lifecycle of the decision")];
     decision.template = Some("## Context\n\n## Decision\n\n## Consequences\n".into());
     let gotcha = KindDef::new("gotcha", "A trap, quirk or non-obvious behavior worth remembering");
-    let mut todo = KindDef::new("todo", "Actionable item");
+    let mut todo = KindDef::new("todo", "A personal checkbox with no states, project work is kind task");
     todo.fields = vec![
         FieldDef {
             name: "done".into(),

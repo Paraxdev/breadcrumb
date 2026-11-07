@@ -100,11 +100,11 @@ fn pins_section(notes: &[Note], project: Option<&str>, stale_days: u64, max: usi
     s
 }
 
-/// Body lines without blank lines, headings as `Heading:`, cut to `max` chars.
-fn compact_body(n: &Note, max: usize) -> String {
-    let more = format!("... (get {} for more)", n.id);
+/// Text lines without blank lines, headings as `Heading:`, cut to `max` chars at a sentence end where one is close.
+fn compact_text(text: &str, id: &str, max: usize) -> String {
+    let more = format!(" ... (get {id} for more)");
     let mut out = String::new();
-    for l in n.body.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
+    for l in text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
         let l = match l.trim_start().strip_prefix('#') {
             Some(h) => format!("{}:", h.trim_start_matches('#').trim()),
             None => l.to_string(),
@@ -117,7 +117,7 @@ fn compact_body(n: &Note, max: usize) -> String {
         }
         let room = max.saturating_sub(used + more.chars().count());
         if room >= 40 {
-            out.push_str(l.chars().take(room).collect::<String>().trim_end());
+            out.push_str(&cut_at_sentence(&l, room));
         }
         out = out.trim_end().to_string();
         out.push_str(&more);
@@ -127,31 +127,86 @@ fn compact_body(n: &Note, max: usize) -> String {
     out
 }
 
+/// The first `room` chars of a line, ending after the last full sentence in them or else at a word.
+fn cut_at_sentence(l: &str, room: usize) -> String {
+    let head: String = l.chars().take(room).collect();
+    let sentence = head.char_indices().filter(|&(i, c)| matches!(c, '.' | '!' | '?') && head[i + 1..].starts_with(' ')).map(|(i, _)| i + 1).next_back();
+    let cut = match sentence {
+        Some(i) if i >= head.len() / 2 => i,
+        _ => head.rfind(' ').filter(|&i| i >= head.len() / 2).unwrap_or(head.len()),
+    };
+    head[..cut].trim_end().to_string()
+}
+
+/// A line append writes above its paragraph, `2026-11-07 neocad-cb 8e60d517:`.
+fn is_stamp(l: &str) -> bool {
+    let l = l.trim();
+    l.len() >= 11 && l.len() <= 90 && l.ends_with(':') && l.is_char_boundary(10) && chrono::NaiveDate::parse_from_str(&l[..10], "%Y-%m-%d").is_ok() && (l.len() == 11 || l[10..].starts_with(' '))
+}
+
+/// The handoff's text for the digest: the writer's summary, then appended updates newest first, then what it first said,
+/// so a cut drops the oldest state and not the newest.
+fn handoff_text(h: &Note) -> String {
+    let mut blocks: Vec<String> = vec![String::new()];
+    for l in h.body.lines() {
+        if is_stamp(l) {
+            blocks.push(String::new());
+        }
+        let b = blocks.last_mut().expect("starts with one");
+        b.push_str(l);
+        b.push('\n');
+    }
+    let first = blocks.remove(0);
+    let mut out = String::new();
+    if let Some(s) = h.field(SUMMARY_KEY).and_then(yaml_scalar_string).map(|s| one_line(&s)).filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "Summary: {s}");
+    }
+    for b in blocks.iter().rev() {
+        out.push_str(b);
+    }
+    if !blocks.is_empty() && !first.trim().is_empty() {
+        out.push_str("First written:
+");
+    }
+    out.push_str(&first);
+    out
+}
+
 fn handoff_section(h: &Note, stale_days: u64, max: usize) -> String {
     let prev = h.links.iter().find(|l| l.rel == SUPERSEDES).map(|l| format!(", previous {}", l.to)).unwrap_or_default();
-    let by = crate::session::created_by(h).map(|id| format!(", {}", crate::session::label(&id))).unwrap_or_default();
-    let by = lifecycle::track(h).map_or(by.clone(), |t| format!("{by}, track {t}"));
+    let quiet = crate::util::now() - h.updated;
+    let fresh = if quiet > chrono::Duration::hours(lifecycle::HANDOFF_FRESH_HOURS) {
+        format!(", last written {} ago, check it still holds before resuming", crate::util::short_age(&h.updated))
+    } else {
+        String::new()
+    };
     let head = format!(
-        "Latest handoff {} ({}{by}{prev}): {}{}\n",
+        "Latest handoff {} ({}{}{prev}{fresh}): {}{}
+",
         h.handle(),
         crate::util::fmt_date(&h.created),
+        lifecycle::handoff_who(h),
         short_title(&h.title),
         crate::recall::stale_mark(h, stale_days)
     );
-    let body = compact_body(h, max.saturating_sub(head.chars().count()));
+    let body = compact_text(&handoff_text(h), &h.id, max.saturating_sub(head.chars().count()));
     format!("{head}{body}")
 }
 
 /// The live handoffs beside the latest, one line each. Old ones leave unless pinned, or legacy notes would pile up.
-fn other_handoffs(others: &[&Note]) -> String {
+fn other_handoffs(others: &[&Note], all: &[Note]) -> String {
     let cutoff = crate::util::now() - chrono::Duration::days(lifecycle::HANDOFF_DIGEST_DAYS);
     let shown: Vec<&&Note> = others.iter().filter(|n| n.pinned || n.created >= cutoff).collect();
     if shown.is_empty() {
         return String::new();
     }
-    let mut s = "Other live handoffs:\n".to_string();
+    let mut s = "Other live handoffs:
+".to_string();
     for n in shown.iter().take(OTHER_HANDOFFS_MAX) {
         s.push_str(&lifecycle::handoff_line(n));
+        if let Some(k) = lifecycle::settled(n, all) {
+            let _ = write!(s, " [settled, the {k} items it names landed]");
+        }
         s.push('\n');
     }
     if shown.len() > OTHER_HANDOFFS_MAX {
@@ -241,11 +296,17 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     let want = opts.recent.saturating_sub(prefs.len().min(opts.recent / 2));
     let recent_rows: Vec<String> = rest.iter().take(want).map(|n| format!("{}{}\n", row(n, project, false), crate::recall::stale_mark(n, days))).collect();
 
-    let live = lifecycle::live_handoffs(&notes, project, &lapsed);
-    let others = other_handoffs(live.get(1..).unwrap_or_default());
+    // A handoff whose items all landed has nothing left to resume, so the newest one with open work leads.
+    let mut live = lifecycle::live_handoffs(&notes, project, &lapsed);
+    if let Some(i) = live.iter().position(|h| lifecycle::settled(h, &all).is_none()) {
+        let lead = live.remove(i);
+        live.insert(0, lead);
+    }
+    let lead_settled = live.first().is_some_and(|h| lifecycle::settled(h, &all).is_some());
+    let others = other_handoffs(if lead_settled { &live[..] } else { live.get(1..).unwrap_or_default() }, &all);
     let fixed = chars(&head) + chars(&pins) + chars(&others) + chars(&prefs_text) + chars(&todos) + chars(&backlog);
     let mut left = opts.budget.saturating_sub(fixed);
-    let handoff = match live.first() {
+    let handoff = match live.first().filter(|_| !lead_settled) {
         Some(h) => {
             let reserve = RECENT_RESERVE.min(recent_rows.iter().map(|r| chars(r)).sum());
             handoff_section(h, days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX))

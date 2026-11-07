@@ -212,6 +212,44 @@ pub fn append_head() -> String {
     }
 }
 
+/// Whether `who` (the words between a date and its colon) names this writer, so the line repeats the stamp append adds.
+fn names_me(who: &str) -> bool {
+    let words: Vec<String> = who.split_whitespace().map(|w| w.trim_matches(|c| c == '(' || c == ')').to_string()).collect();
+    if words.is_empty() {
+        return true;
+    }
+    let mut me: Vec<String> = vec![];
+    if let Some(id) = current() {
+        me.push(short(&id));
+        me.push(label(&id));
+        me.push(id);
+    }
+    if let Ok(env) = std::env::var(crate::backlog::SESSION_ENV) {
+        me.push(env.trim().to_string());
+    }
+    me.retain(|m| !m.is_empty());
+    words.iter().all(|w| me.iter().any(|m| m.eq_ignore_ascii_case(w)))
+}
+
+/// Text an agent starts with its own `2026-11-07 neocad-cb:` line, which append adds anyway. Dates a day off count,
+/// agents write their local date.
+pub fn strip_own_stamp(text: &str) -> String {
+    let today = crate::util::now().date_naive();
+    let mut text = text.trim().to_string();
+    for _ in 0..2 {
+        let Some((date, rest)) = text.split_at_checked(10) else { break };
+        let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else { break };
+        let first = rest.lines().next().unwrap_or("");
+        let Some((who, after)) = first.split_once(':') else { break };
+        if (d - today).num_days().abs() > 1 || who.chars().count() > 80 || !names_me(who) {
+            break;
+        }
+        let tail = &rest[first.len()..];
+        text = format!("{}{tail}", after.trim()).trim().to_string();
+    }
+    text
+}
+
 pub fn stamp_new(n: &mut Note) {
     if let Some(id) = current() {
         n.set_field(SESSION_KEY, Value::String(id));

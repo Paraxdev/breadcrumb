@@ -78,7 +78,7 @@ fn answering_unlocks_the_item_and_next_returns_it_first() {
     assert!(question::answered_unseen(&v.get(&a).unwrap()), "next without claim leaves the flag");
 
     let ctx = ops::context(&v, Some("app"), 15).unwrap();
-    assert!(ctx.contains(&format!("answer arrived on {qid}: Which colour? -> blue, but darker")), "{ctx}");
+    assert!(ctx.contains(&format!("answer arrived on {qid} [queued, 0m ago]: Which colour? -> blue, but darker")), "{ctx}");
 
     backlog::next_notice(&v, &app(), None, Some("agent-2"), Some("agent-2")).unwrap();
     let after = v.get(&a).unwrap();

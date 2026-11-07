@@ -119,7 +119,7 @@ pub enum Cmd {
     },
     /// Change a note
     Update(UpdateArgs),
-    /// Append a paragraph to a note body ("-" reads stdin)
+    /// Append a paragraph to a note body ("-" reads stdin), the date and session line is added for you
     Append {
         /// Note id or slug
         id: String,
@@ -368,9 +368,10 @@ pub enum Cmd {
     },
     /// The leases that hold on this machine
     Leases,
-    /// Claim an item for this session, `next` in other sessions skips it until the claim is a day without activity
+    /// Claim an item for this session, `next` in other sessions skips it until the claim is a day without activity.
+    /// A handoff id or `track:<name>` takes over the work that handoff hands on instead
     Claim {
-        /// Item id or slug
+        /// Item id or slug, a handoff, or track:<name>
         id: String,
         /// Session name (default: $BREADCRUMB_SESSION, else the Claude Code session id)
         #[arg(long)]
@@ -1232,6 +1233,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             if ops::lacks_quote(&n) {
                 created.push_str(&format!("\n{}", ops::SAID_HINT));
             }
+            if let Some(h) = crate::kind::kind_hint(&n) {
+                created.push_str(&format!("\n{h}"));
+            }
             if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                 created.push_str(&format!("\n{h}"));
             }
@@ -1535,13 +1539,17 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text = if all.is_empty() { "no leases on this machine".to_string() } else { all.iter().map(crate::lease::line).collect::<Vec<_>>().join("\n") };
             out.emit(text, serde_json::to_value(&all)?);
         }
-        Cmd::Claim { id, by, force, release: true } => release_cmd(&out, &open()?, &id, by.as_deref(), force)?,
+        Cmd::Claim { id, by, force, release: true } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force)?,
         Cmd::Claim { id, by, force, release: false } => {
-            let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
             let v = open()?;
-            let notice = question::notice(&v.get(&id)?);
-            let n = backlog::claim(&v, &id, &by, force)?;
-            out.emit(format!("claimed {}\n{notice}", backlog::item_summary(&n)), n.to_json());
+            if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, v.detect_project(&cwd).as_deref(), by.as_deref(), false)? {
+                out.emit(crate::lifecycle::take_text(&h, false), h.to_json());
+            } else {
+                let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
+                let notice = question::notice(&v.get(&id)?);
+                let n = backlog::claim(&v, &id, &by, force)?;
+                out.emit(format!("claimed {}\n{notice}", backlog::item_summary(&n)), n.to_json());
+            }
         }
         Cmd::Ask { id, text, options, multi, free, by } => {
             let req = question::AskReq { id, text, options: question::parse_options(&options), multi, free, by };
@@ -1592,7 +1600,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let n = question::withdraw(&open()?, &qid, &by)?;
             out.emit(format!("withdrew the question on {}", backlog::item_summary(&n)), n.to_json());
         }
-        Cmd::Release { id, by, force } => release_cmd(&out, &open()?, &id, by.as_deref(), force)?,
+        Cmd::Release { id, by, force } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force)?,
         Cmd::Move { ids, state, position, resolution, shipped_in, by, check, steps, release_note, refs } => {
             if let Some(pos) = backlog::queue_position(&state, position.as_deref())? {
                 let [id] = ids.as_slice() else {
@@ -1738,7 +1746,11 @@ running MCP and serve processes keep the old version until their client restarts
     Ok(0)
 }
 
-fn release_cmd(out: &Out, v: &Vault, id: &str, by: Option<&str>, force: bool) -> Result<()> {
+fn release_cmd(out: &Out, v: &Vault, cwd: &Path, id: &str, by: Option<&str>, force: bool) -> Result<()> {
+    if let Some(h) = crate::lifecycle::claim_handoff(v, id, v.detect_project(cwd).as_deref(), by, true)? {
+        out.emit(crate::lifecycle::take_text(&h, true), h.to_json());
+        return Ok(());
+    }
     let by = backlog::session_name(by).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
     match backlog::release(v, id, &by, force)? {
         Some(n) => out.emit(format!("released {}", backlog::item_summary(&n)), n.to_json()),
@@ -1942,7 +1954,8 @@ fn kind_cmd(out: &Out, v: &Vault, kc: KindCmd) -> Result<()> {
     match kc {
         KindCmd::List => {
             let ks = v.load_kinds();
-            let text = ks.iter().map(|k| format!("{:<14} {}", k.name, k.description)).collect::<Vec<_>>().join("\n");
+            let mut text = ks.iter().map(|k| format!("{:<14} {}", k.name, k.description)).collect::<Vec<_>>().join("\n");
+            text.push_str(&format!("\n\n{}", crate::kind::WHICH_KIND));
             out.emit(text, Json::Array(ks.iter().map(format::kind_json).collect()));
         }
         KindCmd::Show { name } => {

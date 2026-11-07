@@ -17,6 +17,12 @@ pub const HANDOFF: &str = "handoff";
 pub const DECISION_STATUS: &str = "decision_status";
 pub const UNTIL: &str = "until:";
 pub const TRACK_KEY: &str = "track";
+pub const WRITTEN_AS_KEY: &str = "written_as";
+pub const HELD_BY_KEY: &str = "held_by";
+pub const HELD_AS_KEY: &str = "held_as";
+pub const HELD_SINCE_KEY: &str = "held_since";
+/// A handoff with no write for this long says so in the digest, the state it describes may have moved on.
+pub const HANDOFF_FRESH_HOURS: i64 = 12;
 /// Past this age a live handoff that is not the newest leaves the digest unless pinned.
 pub const HANDOFF_DIGEST_DAYS: i64 = 7;
 /// Doctor keeps naming an expired note for this long after it expired.
@@ -169,11 +175,147 @@ pub fn same_track(new: &Note, old: &Note) -> bool {
     }
 }
 
+/// Keeps the writer's session name as it was, names change across restarts and the digest should not credit the new one.
+pub fn stamp_writer_name(n: &mut Note) {
+    if let Some(name) = crate::session::current().and_then(|id| crate::session::find(&id)).and_then(|s| s.name) {
+        n.set_field(WRITTEN_AS_KEY, Value::String(name));
+    }
+}
+
+/// The writer as named when writing, with today's name beside it when that changed: `neocad-91 (now neocad-50)`.
+pub fn writer(n: &Note) -> Option<String> {
+    let id = crate::session::created_by(n);
+    let then = n.field(WRITTEN_AS_KEY).and_then(yaml_scalar_string).filter(|s| !s.trim().is_empty());
+    let now_name = id.as_deref().and_then(crate::session::find).and_then(|s| s.name);
+    match (then, now_name) {
+        (Some(t), Some(c)) if t != c => Some(format!("{t} (now {c})")),
+        (Some(t), _) => Some(t),
+        (None, _) => id.map(|id| crate::session::label(&id)),
+    }
+}
+
+/// Who holds the handoff's work now: the session that took it with `claim`, by its current name, `(gone)` once it ended.
+pub fn holder(n: &Note) -> Option<String> {
+    let who = n.field(HELD_BY_KEY).and_then(yaml_scalar_string).filter(|s| !s.trim().is_empty())?;
+    let then = n.field(HELD_AS_KEY).and_then(yaml_scalar_string).filter(|s| !s.trim().is_empty());
+    Some(match crate::session::find(&who) {
+        Some(s) => s.name.unwrap_or_else(|| crate::session::short(&s.id)),
+        None if crate::session::known_dead(&who) => format!("{} (gone)", then.unwrap_or_else(|| crate::session::short(&who))),
+        None => then.unwrap_or(who),
+    })
+}
+
+/// `track main-worker held by neocad-cb` or `held by ...`, empty when nobody took it and it has no track.
+fn holding(n: &Note) -> String {
+    match (track(n), holder(n)) {
+        (Some(t), Some(h)) => format!(" track {t} held by {h}"),
+        (Some(t), None) => format!(" track {t} not taken"),
+        (None, Some(h)) => format!(" held by {h}"),
+        (None, None) => String::new(),
+    }
+}
+
+/// Backlog items a handoff names by id or slug in its title or body.
+pub fn named_items<'a>(h: &Note, all: &'a [Note]) -> Vec<&'a Note> {
+    let by_id: HashMap<&str, &Note> = all.iter().map(|n| (n.id.as_str(), n)).collect();
+    let by_slug: HashMap<String, &Note> = all.iter().filter_map(|n| n.slug().map(|s| (s, n))).collect();
+    let text = format!("{}\n{}", h.title, h.body).to_ascii_lowercase();
+    let mut out: Vec<&Note> = vec![];
+    for word in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).map(|w| w.trim_matches('-')) {
+        let hit = by_id.get(word).copied().or_else(|| word.contains('-').then(|| by_slug.get(word).copied()).flatten());
+        if let Some(n) = hit.filter(|n| is_item(n) && n.id != h.id)
+            && !out.iter().any(|o| o.id == n.id)
+        {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// How many items the handoff names when every one of them landed (review, done, shipped, rejected or archived), so the
+/// work it hands over is finished and it no longer leads the digest.
+pub fn settled(h: &Note, all: &[Note]) -> Option<usize> {
+    let named = named_items(h, all);
+    let landed = |n: &&Note| n.is_archived() || matches!(state(n).as_str(), "review" | "done" | "shipped" | "rejected");
+    (!named.is_empty() && named.iter().all(landed)).then_some(named.len())
+}
+
 /// `slug id who track age: title`, the one line form of a handoff.
 pub fn handoff_line(n: &Note) -> String {
-    let who = crate::session::created_by(n).map(|id| format!(" {}", crate::session::label(&id))).unwrap_or_default();
-    let track = track(n).map(|t| format!(" track {t}")).unwrap_or_default();
-    format!("{}{who}{track} {}: {}", n.handle(), crate::util::short_age(&n.created), crate::format::fit_title(&n.title, n.slug().as_deref()))
+    let who = writer(n).map(|w| format!(" {w}")).unwrap_or_default();
+    format!("{}{who}{} {}: {}", n.handle(), holding(n), crate::util::short_age(&n.created), crate::format::fit_title(&n.title, n.slug().as_deref()))
+}
+
+/// The head line's who part: `, neocad-91 (now neocad-50), track main-worker held by neocad-cb`.
+pub fn handoff_who(n: &Note) -> String {
+    let who = writer(n).map(|w| format!(", {w}")).unwrap_or_default();
+    let hold = holding(n);
+    if hold.is_empty() { who } else { format!("{who},{hold}") }
+}
+
+/// The live handoff `claim` takes: a handoff id or slug, or `track:<name>` for the newest live handoff on that track.
+pub fn find_handoff(v: &Vault, target: &str, project: Option<&str>) -> Result<Option<Note>> {
+    if let Some(t) = target.trim().strip_prefix("track:") {
+        let t = t.trim().to_lowercase();
+        let all = v.load_notes();
+        let lapsed = Lapsed::of(&all);
+        let live = live_handoffs(&all, project, &lapsed);
+        return match live.into_iter().find(|n| track(n).as_deref() == Some(t.as_str())) {
+            Some(n) => Ok(Some(n.clone())),
+            None => bail!("no live handoff on track {t} in {}", project.unwrap_or("global")),
+        };
+    }
+    match v.resolve_id(target) {
+        Ok(id) => {
+            let n = v.get(&id)?;
+            Ok((n.kind == HANDOFF).then_some(n))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// `claim` and `release` on a handoff or `track:<name>`, None when the target is no handoff and an item claim applies.
+pub fn claim_handoff(v: &Vault, target: &str, project: Option<&str>, by: Option<&str>, release: bool) -> Result<Option<Note>> {
+    match find_handoff(v, target, project)? {
+        Some(h) => take_handoff(v, &h.id, by, release).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// What claim prints for a handoff.
+pub fn take_text(h: &Note, release: bool) -> String {
+    let verb = if release { "released" } else { "took" };
+    format!("{verb} {}\n{}", handoff_line(h), if release { "nobody holds it now" } else { "the digest names you as its holder, write a new handoff on the track when you hand it on" })
+}
+
+/// The session `by` takes over the work a handoff hands on, or with `release` lets it go. Returns the handoff.
+pub fn take_handoff(v: &Vault, id: &str, by: Option<&str>, release: bool) -> Result<Note> {
+    let _g = v.lock()?;
+    let mut n = v.get(id)?;
+    if release {
+        for k in [HELD_BY_KEY, HELD_AS_KEY, HELD_SINCE_KEY] {
+            n.unset_field(k);
+        }
+    } else {
+        let me = crate::session::current();
+        let who = by.map(str::trim).filter(|b| !b.is_empty()).map(str::to_string).or_else(|| me.clone()).unwrap_or_else(|| crate::backlog::DEFAULT_ACTOR.to_string());
+        let (who, name) = match crate::session::find(&who) {
+            Some(s) => (s.id, s.name),
+            None => (who, None),
+        };
+        n.set_field(HELD_BY_KEY, Value::String(who));
+        match name {
+            Some(name) => n.set_field(HELD_AS_KEY, Value::String(name)),
+            None => {
+                n.unset_field(HELD_AS_KEY);
+            }
+        }
+        n.set_field(HELD_SINCE_KEY, Value::String(fmt_time(&now())));
+    }
+    crate::session::stamp_write(&mut n);
+    let p = v.write_note(&mut n)?;
+    v.commit(&[p], &format!("breadcrumb: {} {} {}", if release { "release" } else { "take" }, n.id, n.title))?;
+    Ok(n)
 }
 
 /// What `add` tells the writer about a new handoff: what it superseded, or that it left the others alone and which they are.

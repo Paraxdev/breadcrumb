@@ -341,6 +341,9 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     }
     note.mark_verified();
     crate::session::stamp_new(&mut note);
+    if note.kind == HANDOFF {
+        crate::lifecycle::stamp_writer_name(&mut note);
+    }
     k.validate(&mut note.extra)?;
     if note.kind == crate::map::MAP {
         crate::map::check_new(v, &note)?;
@@ -600,8 +603,7 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
 }
 
 pub fn append(v: &Vault, id: &str, text: &str) -> Result<Note> {
-    let text = crate::util::normalize_newlines(text);
-    let text = text.trim();
+    let text = crate::session::strip_own_stamp(&crate::util::normalize_newlines(text));
     if text.is_empty() {
         bail!("nothing to append");
     }
