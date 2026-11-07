@@ -80,10 +80,10 @@ pub fn body_only(n: &Note, tail: Option<usize>) -> (String, Option<String>) {
 const INBOUND_MAX: usize = 20;
 
 /// The notes that link to this one, `(rel, note)`, superseding ones first. An archived note supersedes nothing,
-/// as in `Lapsed`, so it reads as a plain link.
+/// as in `Lapsed`, so it reads as a plain link. A merged note is hidden, its links went to the kept note.
 pub fn inbound<'a>(n: &Note, all: &'a [Note]) -> Vec<(String, &'a Note)> {
     let mut out: Vec<(String, &Note)> = vec![];
-    for o in all.iter().filter(|o| o.id != n.id) {
+    for o in all.iter().filter(|o| o.id != n.id && crate::merge::merged_into(o).is_none()) {
         out.extend(o.links.iter().filter(|l| l.to == n.id).map(|l| (l.rel.clone(), o)));
     }
     let live_super = |(rel, o): &(String, &Note)| rel == crate::lifecycle::SUPERSEDES && !o.is_archived();

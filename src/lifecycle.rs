@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 pub const SUPERSEDES: &str = "supersedes";
 pub const SUPERSEDED: &str = "superseded";
 pub const EXPIRED: &str = "expired";
+pub const MERGED: &str = "merged";
 pub const HANDOFF: &str = "handoff";
 pub const DECISION_STATUS: &str = "decision_status";
 pub const UNTIL: &str = "until:";
@@ -99,6 +100,7 @@ pub fn expired(n: &Note, by_id: &HashMap<&str, &Note>) -> Option<Expired> {
 #[derive(Debug, Default, Clone)]
 pub struct Lapsed {
     superseded: HashSet<String>,
+    merged: HashSet<String>,
     expired: HashMap<String, Expired>,
 }
 
@@ -109,6 +111,9 @@ impl Lapsed {
         for n in all {
             if n.has_tag(SUPERSEDED) || decision_superseded(n) {
                 out.superseded.insert(n.id.clone());
+            }
+            if crate::merge::merged_into(n).is_some() {
+                out.merged.insert(n.id.clone());
             }
             if let Some(e) = expired(n, &by_id) {
                 out.expired.insert(n.id.clone(), e);
@@ -133,7 +138,9 @@ impl Lapsed {
 
     /// Why the note no longer holds, None while it does.
     pub fn label(&self, n: &Note) -> Option<&'static str> {
-        if self.expired.contains_key(&n.id) {
+        if self.merged.contains(&n.id) {
+            Some(MERGED)
+        } else if self.expired.contains_key(&n.id) {
             Some(EXPIRED)
         } else if self.is_superseded(n) {
             Some(SUPERSEDED)

@@ -175,6 +175,13 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
                 err(path.clone(), id.clone(), "info", format!("{}, hidden from the digest and ranked last in search", e.why));
             }
         }
+        if let Some(to) = crate::merge::merged_into(n) {
+            if !ids.contains_key(&to) {
+                err(path.clone(), id.clone(), "warning", format!("merged into '{to}', which is gone, `breadcrumb merge --undo {}` restores it", n.id));
+            } else if !n.is_archived() {
+                err(path.clone(), id.clone(), "info", format!("merged into {to} but not archived, it stays hidden, `breadcrumb merge --undo {}` restores it", n.id));
+            }
+        }
         if ops_pref_unpinned(n) {
             err(path.clone(), id.clone(), "info", format!("unpinned {}, a new session sees only its title, `breadcrumb update {} --pin` if every session needs it", n.kind, n.id));
         }
@@ -197,6 +204,10 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
                 }
             }
         }
+    }
+    for (i, msg) in crate::merge::likely_lines(&notes, &lapsed) {
+        let n = &notes[i];
+        err(n.path.as_ref().map(|p| v.rel(p)).unwrap_or_default(), Some(n.id.clone()), "info", msg);
     }
     if let Some(cdir) = claude_dir {
         let dirs = crate::importer::memory_dirs(notes.iter().filter(|n| !n.is_archived()).filter_map(|n| n.source.as_deref()));
