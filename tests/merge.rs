@@ -257,11 +257,20 @@ fn writing_to_a_merged_note_is_refused_with_a_pointer() {
 #[test]
 fn doctor_lists_likely_duplicates_with_the_merge_command_and_changes_nothing() {
     let (_d, v) = common::vault();
-    let old = note(&v, "HDRI size limits on Linux", "gotcha", "a", &["render"], &[]);
-    let new = note(&v, "HDRI limit for big files on Linux", "gotcha", "b", &["render"], &[]);
+    let hdri = "The native tracer refuses HDRI files above 8192 pixels wide on Linux, because the Mesa driver caps texture size there, so large environment maps fail to load and the scene renders black.";
+    let other = "Plugins read their manifest from the bundle root, a manifest in a subfolder is ignored and the plugin never shows in the list, which looks like a broken install to users.";
+    let old = note(&v, "HDRI size limits on Linux", "gotcha", hdri, &["render"], &[]);
+    let new = note(&v, "HDRI limit for big files on Linux", "gotcha", &format!("{hdri} Seen again today."), &["render"], &[]);
     let globs_a = note(&v, "Cache invalidation order", "note", "c", &[], &["src/cache/**"]);
     let globs_b = note(&v, "Order of cache eviction", "note", "d", &[], &["src/cache/**"]);
     let unrelated = note(&v, "Packaging needs a desktop file", "note", "e", &[], &["src/cache/**"]);
+    let apart = note(&v, "HDRI limit for big plugin files on Linux", "gotcha", other, &["render"], &[]);
+    let linked_a = note(&v, "Shader cache path on Linux builds", "gotcha", hdri, &[], &[]);
+    let linked_b = note(&v, "Shader cache path for Linux builds", "gotcha", hdri, &[], &[]);
+    ops::link(&v, &linked_b.id, &linked_a.id, Some("relates"), false).unwrap();
+    let told = note(&v, "Packaging step", "note", &format!("Duplicate of {}, read that one.", unrelated.id), &[], &[]);
+    let map_a = common::add(&v, "docs translations de batch", "map", Some("app"), &[("area", "docs")]);
+    let map_b = common::add(&v, "docs translations fr batch", "map", Some("app"), &[("area", "docs-fr")]);
     for (older, newer) in [(&old, &new), (&globs_a, &globs_b)] {
         let mut n = v.get(&older.id).unwrap();
         n.created = newer.created - chrono::Duration::days(1);
@@ -276,6 +285,11 @@ fn doctor_lists_likely_duplicates_with_the_merge_command_and_changes_nothing() {
     assert!(lines.iter().all(|p| p.severity == "info"));
     assert!(for_id(&globs_b.id).is_some_and(|m| m.contains(&globs_a.id)), "same globs and a shared title word");
     assert!(for_id(&unrelated.id).is_none(), "same globs alone are not enough");
+    assert!(for_id(&apart.id).is_none(), "a lookalike title with a different text is a separate fact");
+    assert!(for_id(&linked_a.id).is_none() && for_id(&linked_b.id).is_none(), "a linked pair was looked at and kept");
+    assert!(for_id(&told.id).is_some_and(|m| m.contains(&unrelated.id)), "a note that says it duplicates another is listed");
+    assert!(for_id(&map_a.id).is_none() && for_id(&map_b.id).is_none(), "code maps are not listed");
+    assert_eq!(lines[0].id.as_deref(), Some(told.id.as_str()), "strongest first");
     let after: Vec<String> = [&old, &new, &globs_a, &globs_b, &unrelated].iter().map(|n| file(&v, &n.id)).collect();
     assert_eq!(before, after);
 

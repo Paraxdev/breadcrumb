@@ -331,30 +331,78 @@ pub fn unmerged_text(u: &Unmerged) -> String {
     s
 }
 
-/// Pairs of active notes that read like one fact, `(dup, keep)` with the newer note as the one to merge away.
-/// Same path globs together with a shared title word, or titles `add` would name as lookalikes.
+/// Share of body words two notes have in common, below which lookalike titles are taken as separate facts.
+const BODY_ALIKE: f64 = 0.3;
+/// Bodies shorter than this many words say too little to tell notes apart, the title decides.
+const BODY_MIN_WORDS: usize = 12;
+
+/// Pairs of active notes that read like one fact, `(dup, keep)`, strongest first.
+/// A note that says it is a duplicate of the other always counts. Otherwise the titles look alike (or the path globs
+/// match with a shared title word) and the bodies share enough words. Code maps, workflows, and pairs linked to each
+/// other (someone looked and kept both), are left out.
 pub fn likely_duplicates(all: &[Note], lapsed: &crate::lifecycle::Lapsed) -> Vec<(usize, usize)> {
-    let live: Vec<usize> = (0..all.len()).filter(|&i| all[i].kind != crate::lifecycle::HANDOFF && !all[i].is_archived() && !lapsed.hides(&all[i])).collect();
+    let live: Vec<usize> = (0..all.len())
+        .filter(|&i| !matches!(all[i].kind.as_str(), crate::lifecycle::HANDOFF | "map" | "workflow") && !all[i].is_archived() && !lapsed.hides(&all[i]))
+        .collect();
     let terms: Vec<Vec<String>> = all.iter().map(|n| crate::ops::title_terms(&n.title)).collect();
-    let mut out = vec![];
+    let words: Vec<std::collections::HashSet<String>> = all.iter().map(|n| body_words(&n.body)).collect();
+    let mut out: Vec<(f64, usize, usize)> = vec![];
     for (a, &i) in live.iter().enumerate() {
         for &j in &live[a + 1..] {
             let (x, y) = (&all[i], &all[j]);
             if x.project != y.project {
                 continue;
             }
+            if says_duplicate_of(x, y) {
+                out.push((2.0, i, j));
+                continue;
+            }
+            if says_duplicate_of(y, x) {
+                out.push((2.0, j, i));
+                continue;
+            }
+            if x.links.iter().any(|l| l.to == y.id) || y.links.iter().any(|l| l.to == x.id) {
+                continue;
+            }
             let (gx, gy) = (sorted(x.path_globs()), sorted(y.path_globs()));
             let shared_title = terms[i].iter().any(|t| terms[j].contains(t));
             let same_paths = !gx.is_empty() && gx == gy && shared_title;
             let title = one_line(&x.title).to_lowercase();
-            let alike = crate::ops::look_alike(x, &terms[i], &title, y, &terms[j]).is_some();
-            if same_paths || alike {
+            let alike = crate::ops::look_alike(x, &terms[i], &title, y, &terms[j]);
+            if !(same_paths || alike.is_some()) {
+                continue;
+            }
+            let exact = alike.is_some_and(|(e, _)| e);
+            let body = overlap(&words[i], &words[j]);
+            let short = words[i].len().min(words[j].len()) < BODY_MIN_WORDS;
+            if exact || short || body >= BODY_ALIKE {
                 let (dup, keep) = if (x.created, &x.id) > (y.created, &y.id) { (i, j) } else { (j, i) };
-                out.push((dup, keep));
+                out.push((if exact { 1.5 } else { body }, dup, keep));
             }
         }
     }
-    out
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.into_iter().map(|(_, d, k)| (d, k)).collect()
+}
+
+fn body_words(body: &str) -> std::collections::HashSet<String> {
+    body.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 4).map(str::to_lowercase).collect()
+}
+
+fn overlap(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    let union = a.union(b).count();
+    if union == 0 { 0.0 } else { a.intersection(b).count() as f64 / union as f64 }
+}
+
+/// Whether `x`'s text or resolution says "duplicate of" naming `y` by id or slug.
+fn says_duplicate_of(x: &Note, y: &Note) -> bool {
+    let resolution = x.field("resolution").and_then(yaml_scalar_string).unwrap_or_default();
+    let text = format!("{}\n{}", x.body, resolution).to_lowercase();
+    let names: Vec<String> = std::iter::once(y.id.clone()).chain(y.slug()).collect();
+    text.match_indices("duplicate of ").any(|(at, m)| {
+        let after: String = text[at + m.len()..].chars().take(60).collect();
+        names.iter().any(|name| after.contains(name.as_str()))
+    })
 }
 
 fn sorted(mut v: Vec<String>) -> Vec<String> {
@@ -370,7 +418,7 @@ pub fn likely_lines(all: &[Note], lapsed: &crate::lifecycle::Lapsed) -> Vec<(usi
         .take(LIKELY_MAX)
         .map(|&(d, k)| {
             let keep = &all[k];
-            (d, format!("may duplicate {} \"{}\", if it is the same fact run `breadcrumb merge {} {}`", keep.handle(), truncate_chars(&one_line(&keep.title), 50), all[d].id, keep.id))
+            (d, format!("may duplicate {} \"{}\", if it is the same fact run `breadcrumb merge {} {}`, if not link them", keep.handle(), truncate_chars(&one_line(&keep.title), 50), all[d].id, keep.id))
         })
         .collect();
     if pairs.len() > LIKELY_MAX
