@@ -116,6 +116,8 @@ pub fn assignee(n: &Note) -> Option<String> {
 }
 
 pub const CLAIMED_KEY: &str = "claimed";
+/// Who moved the item to review, the reviewer has to be someone else when agents review.
+pub const BUILT_BY_KEY: &str = "built_by";
 pub const RELEASE_NOTE_KEY: &str = "release_note";
 /// `<machine> <assignee> <pid>`, a claim's session can only be judged dead on the machine it ran on. The assignee is in
 /// the value because an old binary claiming over it leaves this key behind, a value for another assignee means nothing.
@@ -851,8 +853,12 @@ pub struct MoveReq {
     pub refs: Vec<String>,
     /// What the user should try, added to the acceptance criteria when moving to review.
     pub steps: Vec<String>,
-    /// The user's check of an item in review, refused for items in any other state.
+    /// The check of an item in review, refused for items in any other state.
     pub verdict: Option<Verdict>,
+    /// What the reviewer ran and saw, a pass needs it when agents review.
+    pub evidence: Option<String>,
+    /// The user gave the verdict (the web page), agent review rules do not apply.
+    pub by_user: bool,
     pub release_note: Option<String>,
 }
 
@@ -989,6 +995,20 @@ pub fn review_steps(n: &Note) -> Vec<String> {
     unmet_acceptance(n).iter().map(|c| criterion_text(c).to_string()).collect()
 }
 
+/// When agents review, the one who built an item cannot pass or fail it: a builder checking its own work finds what it
+/// meant to build. A subagent of the same session counts as another reviewer when it names itself with `by`.
+fn check_reviewer(n: &Note, by: Option<&str>) -> Result<()> {
+    let Some(me) = session_name(by) else { return Ok(()) };
+    let builder = str_field(n, BUILT_BY_KEY).or_else(|| assignee(n));
+    if builder.is_some_and(|b| crate::session::same_holder(&b, &me)) {
+        bail!(
+            "{} was built by {me}, and agents review here (review_by = agent), so another session checks it, or a reviewer subagent that passes --by <its own name> (MCP by)",
+            n.id
+        );
+    }
+    Ok(())
+}
+
 fn move_warnings(n: &Note, from: &str, to: &str) -> Vec<String> {
     let mut w = vec![];
     if from == "queued" && to == "review" && assignee(n).is_none() {
@@ -1045,11 +1065,18 @@ pub fn review_items(v: &Vault, scope: &Scope) -> Result<Vec<ReviewItem>> {
         .collect())
 }
 
-pub fn review_text(items: &[ReviewItem], scope_label: &str) -> String {
+pub fn review_text(items: &[ReviewItem], scope_label: &str, agents: bool) -> String {
     if items.is_empty() {
         return format!("nothing in review in {scope_label}, --all shows every project\n");
     }
-    let mut s = format!("{} in review in {scope_label}, try each, then `breadcrumb review pass <id>` or `breadcrumb review fail <id> --reason \"...\"`\n", items.len());
+    let mut s = if agents {
+        format!(
+            "{} in review in {scope_label}, agents review here: a session or subagent that did not build an item runs each step, then `breadcrumb review pass <id> --evidence \"what you ran and saw\"` or `breadcrumb review fail <id> --reason \"...\"`\n",
+            items.len()
+        )
+    } else {
+        format!("{} in review in {scope_label}, try each, then `breadcrumb review pass <id>` or `breadcrumb review fail <id> --reason \"...\"`\n", items.len())
+    };
     for it in items {
         let name = it.slug.as_ref().map(|x| format!("{x} ")).unwrap_or_default();
         let _ = writeln!(s, "\n{} {name}{} {}", it.priority, it.id, it.title);
@@ -1063,14 +1090,21 @@ pub fn review_text(items: &[ReviewItem], scope_label: &str) -> String {
     s
 }
 
-/// The user's check passed: on to done, with the criteria marked met.
-pub fn review_pass(v: &Vault, id: &str, by: Option<String>) -> Result<MoveResult> {
-    move_item(v, id, MoveReq { state: "done".into(), by, verdict: Some(Verdict::Pass), ..Default::default() })
+#[derive(Debug, Clone, Default)]
+pub struct ReviewBy {
+    pub by: Option<String>,
+    pub evidence: Option<String>,
+    pub by_user: bool,
 }
 
-/// The user's check failed: back to queued, with the reason in the body and the claim gone so the queue can hand it out.
-pub fn review_fail(v: &Vault, id: &str, reason: &str, by: Option<String>) -> Result<MoveResult> {
-    move_item(v, id, MoveReq { state: "queued".into(), by, verdict: Some(Verdict::Fail(reason.to_string())), ..Default::default() })
+/// The check passed: on to done, with the criteria marked met and the evidence in the body.
+pub fn review_pass(v: &Vault, id: &str, r: ReviewBy) -> Result<MoveResult> {
+    move_item(v, id, MoveReq { state: "done".into(), by: r.by, evidence: r.evidence, by_user: r.by_user, verdict: Some(Verdict::Pass), ..Default::default() })
+}
+
+/// The check failed: back to queued, with the reason in the body and the claim gone so the queue can hand it out.
+pub fn review_fail(v: &Vault, id: &str, reason: &str, r: ReviewBy) -> Result<MoveResult> {
+    move_item(v, id, MoveReq { state: "queued".into(), by: r.by, evidence: r.evidence, by_user: r.by_user, verdict: Some(Verdict::Fail(reason.to_string())), ..Default::default() })
 }
 
 pub fn check_text(n: &Note, changed: usize) -> String {
@@ -1110,6 +1144,13 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     if req.verdict.is_some() && from != "review" {
         bail!("{} is {from}, not in review", n.id);
     }
+    let evidence = req.evidence.as_deref().map(str::trim).filter(|e| !e.is_empty()).map(crate::util::normalize_newlines);
+    if req.verdict.is_some() && !req.by_user && crate::config::agent_review(v) {
+        check_reviewer(&n, req.by.as_deref())?;
+        if req.verdict == Some(Verdict::Pass) && evidence.is_none() {
+            bail!("agents review here (review_by = agent), a pass needs --evidence \"what you ran and what you saw\" (MCP evidence)");
+        }
+    }
     if to == "rejected" && resolution.is_none() && (from != "rejected" || str_field(&n, "resolution").is_none()) {
         bail!("moving to rejected requires a resolution explaining why");
     }
@@ -1134,16 +1175,34 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
         return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings, hints, touched: vec![] });
     }
     match &req.verdict {
-        Some(Verdict::Pass) if n.field("acceptance").is_some() => {
-            apply_check(&mut n, &Check::All)?;
+        Some(Verdict::Pass) => {
+            if n.field("acceptance").is_some() {
+                apply_check(&mut n, &Check::All)?;
+            }
+            if let Some(e) = &evidence {
+                let who = crate::session::attribute(req.by.as_deref());
+                let date = crate::util::fmt_date(&now());
+                n.body = insert_before_history(&n.body, &format!("{date} {who}:\nreview passed: {e}"));
+            }
         }
         Some(Verdict::Fail(reason)) => {
             let who = crate::session::attribute(req.by.as_deref());
             let date = crate::util::fmt_date(&now());
-            n.body = insert_before_history(&n.body, &format!("{date} {who}:\nreview failed: {}", crate::util::normalize_newlines(reason.trim())));
+            let ran = evidence.as_deref().map(|e| format!("\nchecked: {e}")).unwrap_or_default();
+            n.body = insert_before_history(&n.body, &format!("{date} {who}:\nreview failed: {}{ran}", crate::util::normalize_newlines(reason.trim())));
             clear_claim(&mut n);
         }
         _ => {}
+    }
+    if to == "review" && from != "review" {
+        match session_name(req.by.as_deref()) {
+            Some(b) => {
+                n.set_field(BUILT_BY_KEY, Value::String(b));
+            }
+            None => {
+                n.unset_field(BUILT_BY_KEY);
+            }
+        }
     }
     n.set_field("state", Value::String(to.clone()));
     if let Some(r) = &resolution {

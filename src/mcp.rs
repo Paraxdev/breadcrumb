@@ -351,7 +351,15 @@ impl Server {
                     return Ok(format::ack("queued", &n));
                 }
                 let check = s(a, "check").map(|c| backlog::Check::parse(&c)).transpose()?;
-                let r = backlog::move_item(&v, &id, MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict: None, release_note: s(a, "release_note") })?;
+                let evidence = s(a, "evidence");
+                let (state, verdict) = match s(a, "verdict").as_deref() {
+                    None => (state, None),
+                    Some("pass") => ("done".to_string(), Some(backlog::Verdict::Pass)),
+                    Some("fail") => ("queued".to_string(), Some(backlog::Verdict::Fail(evidence.clone().unwrap_or_default()))),
+                    Some(other) => bail!("verdict is pass or fail, got '{other}'"),
+                };
+                let req = MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note") };
+                let r = backlog::move_item(&v, &id, req)?;
                 let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.handle(), r.to) };
                 if !r.unmet.is_empty() {
                     let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
@@ -400,7 +408,7 @@ impl Server {
                 }
                 "review" => {
                     let sc = self.scope(&v, a)?;
-                    Ok(backlog::review_text(&backlog::review_items(&v, &sc)?, &sc.label()))
+                    Ok(backlog::review_text(&backlog::review_items(&v, &sc)?, &sc.label(), crate::config::agent_review(&v)))
                 }
                 "tree" => backlog::tree(&v, &req_s(a, "id")?),
                 "deps" => {
@@ -734,6 +742,8 @@ pub fn tool_defs() -> Vec<Value> {
             "shipped_in": st(),
             "check": {"type": "string", "description": "tick: all or 2,3"},
             "steps": {"type": "array", "items": st(), "description": "review: what to try"},
+            "verdict": {"type": "string", "enum": ["pass", "fail"]},
+            "evidence": st(),
             "release_note": st(),
             "refs": refs(),
             "by": st(),

@@ -386,10 +386,11 @@ impl App {
         let v = self.vault()?;
         let b = body_obj(req)?;
         let by = Some(str_of(&b, "by").unwrap_or_else(|| "web".to_string()));
+        let rb = backlog::ReviewBy { by, evidence: str_of(&b, "evidence"), by_user: true };
         let r = if verdict == "pass" {
-            backlog::review_pass(&v, id, by)?
+            backlog::review_pass(&v, id, rb)?
         } else {
-            backlog::review_fail(&v, id, &str_of(&b, "reason").unwrap_or_default(), by)?
+            backlog::review_fail(&v, id, &str_of(&b, "reason").unwrap_or_default(), rb)?
         };
         Ok(Response::json(200, &json!({"id": r.note.id, "key": backlog::key(&r.note), "from": r.from, "to": r.to})))
     }

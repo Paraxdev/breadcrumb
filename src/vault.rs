@@ -32,6 +32,12 @@ fn default_stale_days() -> u64 {
 fn default_pin_review_days() -> u64 {
     30
 }
+fn default_review_by() -> String {
+    "user".into()
+}
+fn default_feedback_remind_days() -> u64 {
+    0
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -51,11 +57,17 @@ pub struct Config {
     /// `doctor` and `pins` flag a pin not verified for this many days, 0 turns it off.
     #[serde(default = "default_pin_review_days")]
     pub pin_review_days: u64,
+    /// Who checks items in review: `user`, or `agent`, a session or subagent that did not build the item.
+    #[serde(default = "default_review_by")]
+    pub review_by: String,
+    /// The digest asks agents to collect the user's feedback when the newest feedback note is this many days old, 0 turns it off.
+    #[serde(default = "default_feedback_remind_days")]
+    pub feedback_remind_days: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days() }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), feedback_remind_days: default_feedback_remind_days() }
     }
 }
 

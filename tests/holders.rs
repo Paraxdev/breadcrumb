@@ -434,7 +434,7 @@ fn release_and_failed_review_drop_the_machine_key() {
     assert!(e.v.get(&a).unwrap().field("claim_machine").is_none());
     crumb(&e, LIVE, "pc-a", &["claim", &a]);
     backlog::move_item(&e.v, &a, MoveReq { state: "review".into(), ..Default::default() }).unwrap();
-    backlog::review_fail(&e.v, &a, "no", None).unwrap();
+    backlog::review_fail(&e.v, &a, "no", Default::default()).unwrap();
     assert!(e.v.get(&a).unwrap().field("claim_machine").is_none());
 }
 

@@ -274,6 +274,11 @@ pub enum Cmd {
     Mcp,
     /// Print the command that registers the MCP server with Claude Code
     McpConfig,
+    /// The vault's settings with what each does, `config set <key> <value>` changes one (review_by, feedback_remind_days, ...)
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigCmd>,
+    },
     /// Validate every note and report problems
     Doctor {
         /// Propose fixes: rewrite moved file paths, drop or mark gone ones, mark expired notes (dry run without --yes)
@@ -532,7 +537,7 @@ pub enum Cmd {
         #[arg(long)]
         by: Option<String>,
     },
-    /// What waits for your check, and the verdict: pass moves to done, fail back to queued
+    /// What waits for a check, and the verdict: pass moves to done, fail back to queued (review_by says who checks)
     Review {
         #[command(flatten)]
         scope: ScopeArgs,
@@ -619,14 +624,33 @@ pub enum Cmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ConfigCmd {
+    /// Change one setting, saved to breadcrumb.toml and committed
+    Set {
+        /// Setting name, `breadcrumb config` lists them
+        key: String,
+        /// New value, empty unsets remote
+        value: String,
+    },
+    /// Print one setting's value
+    Get {
+        /// Setting name
+        key: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ReviewCmd {
     /// It works: move to done and mark its steps met
     Pass {
         /// Item id or slug
         id: String,
-        /// Who did it, for the history (default: this session)
+        /// Who did it, for the history (default: this session), a reviewer subagent names itself here
         #[arg(long)]
         by: Option<String>,
+        /// What you ran and what you saw, added to the body, required when review_by is agent
+        #[arg(long, allow_hyphen_values = true)]
+        evidence: Option<String>,
     },
     /// It does not: back to queued with the reason, keeping its priority
     Fail {
@@ -635,9 +659,12 @@ pub enum ReviewCmd {
         /// What did not work, added to the body
         #[arg(long)]
         reason: String,
-        /// Who did it, for the history (default: this session)
+        /// Who did it, for the history (default: this session), a reviewer subagent names itself here
         #[arg(long)]
         by: Option<String>,
+        /// What you ran, kept for the next builder (optional, the reason usually says it)
+        #[arg(long, allow_hyphen_values = true)]
+        evidence: Option<String>,
     },
 }
 
@@ -1688,7 +1715,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, verdict: None, release_note };
+            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, ..Default::default() };
             let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "hints": r.hints, "note": r.note.to_json()});
             if let [id] = ids.as_slice() {
                 let r = backlog::move_item(&open()?, id, req)?;
@@ -1753,17 +1780,38 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
             out.emit(text, data);
         }
+        Cmd::Config { action } => {
+            let mut v = open()?;
+            match action {
+                None => {
+                    let list = crate::config::settings(&v)?;
+                    out.emit(crate::config::text(&list), json!({"settings": list}));
+                }
+                Some(ConfigCmd::Get { key }) => {
+                    let list = crate::config::settings(&v)?;
+                    let it = list.iter().find(|s| s.key == key).ok_or_else(|| anyhow::anyhow!("unknown setting '{key}', `breadcrumb config` lists them"))?;
+                    out.emit(format!("{}\n", it.value), json!({"key": it.key, "value": it.value}));
+                }
+                Some(ConfigCmd::Set { key, value }) => {
+                    let before = crate::config::set(&mut v, &key, &value)?;
+                    let after = crate::config::settings(&v)?.into_iter().find(|s| s.key == key).map(|s| s.value).unwrap_or_default();
+                    let shown = if before.is_empty() { "unset" } else { before.as_str() };
+                    out.emit(format!("{key}: {shown} -> {after}\n"), json!({"key": key, "before": before, "value": after}));
+                }
+            }
+        }
         Cmd::Review { scope, verdict } => {
             let v = open()?;
             let r = match verdict {
                 None => {
                     let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
                     let items = backlog::review_items(&v, &sc)?;
-                    out.emit(backlog::review_text(&items, &sc.label()), json!({"scope": sc.label(), "items": items}));
+                    let agents = crate::config::agent_review(&v);
+                    out.emit(backlog::review_text(&items, &sc.label(), agents), json!({"scope": sc.label(), "review_by": v.config.review_by, "items": items}));
                     return Ok(0);
                 }
-                Some(ReviewCmd::Pass { id, by }) => backlog::review_pass(&v, &id, by)?,
-                Some(ReviewCmd::Fail { id, reason, by }) => backlog::review_fail(&v, &id, &reason, by)?,
+                Some(ReviewCmd::Pass { id, by, evidence }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by, evidence, by_user: false })?,
+                Some(ReviewCmd::Fail { id, reason, by, evidence }) => backlog::review_fail(&v, &id, &reason, backlog::ReviewBy { by, evidence, by_user: false })?,
             };
             out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "note": r.note.to_json()}));
         }

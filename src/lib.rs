@@ -2,6 +2,7 @@
 
 pub mod backlog;
 pub mod cli;
+pub mod config;
 pub mod digest;
 pub mod doctor;
 pub mod export;

@@ -220,6 +220,40 @@ fn chars(s: &str) -> usize {
 }
 
 /// Compact digest agents read at session start.
+fn nudge_file(v: &Vault) -> std::path::PathBuf {
+    v.root.join(".local").join("feedback-nudge")
+}
+
+/// One line asking for the user's feedback when none came in `feedback_remind_days`, shown in one digest a day so it
+/// stays occasional, the date it was last shown is kept in .local.
+fn feedback_reminder(v: &Vault, all: &[Note]) -> Option<String> {
+    let days = v.config.feedback_remind_days;
+    if days == 0 {
+        return None;
+    }
+    let newest = all.iter().filter(|n| matches!(n.kind.as_str(), "feedback" | "user") && !n.is_archived()).map(|n| n.created).max();
+    let age = newest.map(|c| (crate::util::now() - c).num_days());
+    if age.is_some_and(|a| a < days as i64) {
+        return None;
+    }
+    let today = crate::util::fmt_date(&crate::util::now());
+    let file = nudge_file(v);
+    if std::fs::read_to_string(&file).is_ok_and(|s| s.trim() == today) {
+        return None;
+    }
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&file, &today);
+    let since = match age {
+        Some(a) => format!("no feedback from the user in {a} days"),
+        None => "no feedback from the user yet".to_string(),
+    };
+    Some(format!(
+        "Feedback: {since}. When your task is done and the user is there, ask one short question about how the agents or breadcrumb worked for them, and save the answer as kind feedback with their words in --said"
+    ))
+}
+
 pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String> {
     context_with(v, project, ContextOpts { recent: limit, ..Default::default() })
 }
@@ -289,7 +323,16 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         let prio = n.field("priority").map(yaml_display).map(|p| format!(" {p}")).unwrap_or_default();
         writeln!(todos, "{} {}{prio}{}", n.handle(), crate::format::fit_title(&n.title, n.slug().as_deref()), scope_suffix(n, project))?;
     }
-    let backlog = crate::backlog::context_section(&notes, &all);
+    let mut backlog = crate::backlog::context_section(&notes, &all);
+    if crate::config::agent_review(v) {
+        let waiting = notes.iter().filter(|n| crate::backlog::is_item(n) && crate::backlog::state(n) == "review").count();
+        if waiting > 0 {
+            writeln!(backlog, "Review: {waiting} waiting for an agent check (review_by = agent), `breadcrumb review` lists the steps, check only what you did not build")?;
+        }
+    }
+    if let Some(l) = feedback_reminder(v, &all) {
+        writeln!(prefs_text, "{l}")?;
+    }
 
     let rest: Vec<&Note> = notes
         .iter()
