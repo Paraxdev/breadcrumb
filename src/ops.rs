@@ -432,6 +432,12 @@ pub fn similar_hint(xs: &[Note]) -> Option<String> {
     Some(format!("possible duplicates, update one instead if it holds the same fact: {}", items.join(", ")))
 }
 
+/// A project gotcha or decision with no path glob, which `brief` and the file hook can only find by glob.
+pub fn paths_hint(n: &Note) -> Option<String> {
+    let unreachable = matches!(n.kind.as_str(), "gotcha" | "decision") && n.project.is_some() && n.path_globs().is_empty();
+    unreachable.then(|| format!("no path glob, so `brief` and the file hook cannot find this {} when its files are edited, `breadcrumb update {} --path-glob 'src/x/**'` adds one", n.kind, n.id))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UpdateReq {
     pub title: Option<String>,

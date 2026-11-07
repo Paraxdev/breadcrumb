@@ -278,6 +278,9 @@ impl Server {
                 if ops::lacks_quote(&n) {
                     out.push_str(&format!("\n{}", ops::SAID_HINT));
                 }
+                if let Some(h) = ops::paths_hint(&n) {
+                    out.push_str(&format!("\n{h}"));
+                }
                 if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                     out.push_str(&format!("\n{h}"));
                 }

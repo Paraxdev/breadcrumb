@@ -106,3 +106,37 @@ fn no_map_means_no_brief_pointer_and_a_plain_gotcha_line_stays_short() {
     let line = touch(&v, &root, "src/a.ts", "s1").unwrap();
     assert_eq!(line, format!("breadcrumb notes for src/a.ts: {} gotcha Never rename the cache dir. It is hashed into ids", gotcha.id));
 }
+
+fn crumb(v: &Vault, args: &[&str]) -> String {
+    let o = Command::new(env!("CARGO_BIN_EXE_crumb")).args(args).env("BREADCRUMB_HOME", &v.root).env("BREADCRUMB_CLAUDE_DIR", v.root.with_extension("no-claude")).output().unwrap();
+    assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    String::from_utf8_lossy(&o.stdout).to_string()
+}
+
+#[test]
+fn adding_a_project_gotcha_or_decision_without_a_path_glob_hints_and_still_saves() {
+    let (_d, v, _root) = setup();
+    for kind in ["gotcha", "decision"] {
+        let out = crumb(&v, &["add", "-k", kind, "-t", "Cache dir is hashed into ids", "-p", "app"]);
+        assert!(out.starts_with("added "), "{out}");
+        assert!(out.contains(&format!("no path glob, so `brief` and the file hook cannot find this {kind}")), "{out}");
+    }
+
+    let with_glob = crumb(&v, &["add", "-k", "gotcha", "-t", "Scoped gotcha", "-p", "app", "--path-glob", "src/**"]);
+    assert!(!with_glob.contains("no path glob"), "{with_glob}");
+    let plain = crumb(&v, &["add", "-k", "note", "-t", "Plain note", "-p", "app"]);
+    assert!(!plain.contains("no path glob"), "{plain}");
+    let global = crumb(&v, &["add", "-k", "gotcha", "-t", "Global gotcha", "--global"]);
+    assert!(!global.contains("no path glob"), "a global note has no files to match: {global}");
+}
+
+#[test]
+fn the_mcp_add_result_carries_the_path_glob_hint() {
+    let (d, v, _root) = setup();
+    let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let add = |args: Value| srv.call_tool("add", args.as_object().unwrap()).unwrap();
+    let out = add(json!({"title": "Loader deadlocks", "kind": "gotcha", "project": "app"}));
+    assert!(out.starts_with("saved ") && out.contains("\nno path glob, so `brief` and the file hook cannot find this gotcha"), "{out}");
+    let out = add(json!({"title": "Loader deadlocks twice", "kind": "gotcha", "project": "app", "paths": ["src/**"]}));
+    assert!(!out.contains("no path glob"), "{out}");
+}

@@ -1255,6 +1255,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             if ops::lacks_quote(&n) {
                 created.push_str(&format!("\n{}", ops::SAID_HINT));
             }
+            if let Some(h) = ops::paths_hint(&n) {
+                created.push_str(&format!("\n{h}"));
+            }
             if let Some(h) = ops::similar_hint(&ops::similar(&v, &n)) {
                 created.push_str(&format!("\n{h}"));
             }
