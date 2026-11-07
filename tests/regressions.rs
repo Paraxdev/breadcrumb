@@ -466,10 +466,11 @@ fn unpinned_prefs_get_one_line_and_doctor_info() {
 
     let probs = breadcrumb::doctor::check(&v);
     let info: Vec<_> = probs.iter().filter(|p| p.severity == "info").collect();
-    assert_eq!(info.len(), 32);
-    assert!(info.iter().all(|p| p.message.contains("--pin")));
+    let (pins, dups): (Vec<&&breadcrumb::doctor::Problem>, Vec<_>) = info.iter().partition(|p| p.message.contains("--pin"));
+    assert_eq!(pins.len(), 32);
+    assert!(dups.iter().all(|p| p.message.contains("may duplicate") || p.message.contains("more")), "the alike titles are listed as likely duplicates");
     assert!(!probs.iter().any(|p| p.severity == "warning" && p.id.as_deref() == Some(old.id.as_str())));
-    assert!(breadcrumb::doctor::text(&probs, 35).contains("32 info"));
+    assert!(breadcrumb::doctor::text(&probs, 35).contains(&format!("{} info", info.len())));
 
     let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: v.root.clone() };
     let mut a = serde_json::Map::new();
