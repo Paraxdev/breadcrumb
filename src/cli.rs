@@ -368,6 +368,8 @@ pub enum Cmd {
     },
     /// The leases that hold on this machine
     Leases,
+    /// The landing queue of merges two sessions push in order: add, approve, verify, pushed, read, list, drop, move
+    Land(crate::land::LandArgs),
     /// Claim an item for this session, `next` in other sessions skips it until the claim is a day without activity
     Claim {
         /// Item id or slug
@@ -1529,6 +1531,12 @@ pub fn run(cli: Cli) -> Result<i32> {
             let verb = if t.renewed { "renewed" } else { "leased" };
             let from = t.took_from.as_deref().map(|w| format!(", taken over from {w}")).unwrap_or_default();
             out.emit(format!("{verb} {}{from}", crate::lease::line(&t.lease)), json!({"lease": t.lease, "renewed": t.renewed, "took_from": t.took_from}));
+        }
+        Cmd::Land(args) => {
+            let v = open()?;
+            let project = ops::target_project(&v, args.project.as_deref(), false, &cwd)?;
+            let o = crate::land::run(&v, project.as_deref(), args.into_req()?)?;
+            out.emit(o.text, o.data);
         }
         Cmd::Leases => {
             let all = crate::lease::active(&root)?;

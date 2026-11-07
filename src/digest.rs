@@ -223,6 +223,9 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     if let Some(l) = crate::lease::digest_line(&v.root) {
         writeln!(prefs_text, "{l}")?;
     }
+    if let Some(l) = crate::land::digest_lines(v, project) {
+        prefs_text.push_str(&l);
+    }
     let mut todos = String::new();
     for n in notes.iter().filter(|n| !n.pinned && is_open_todo(n)) {
         if todos.is_empty() {
