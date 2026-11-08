@@ -13,6 +13,7 @@ pub mod guide;
 pub mod hooks;
 pub mod id;
 pub mod importer;
+pub mod judge;
 pub mod kind;
 pub mod land;
 pub mod lease;

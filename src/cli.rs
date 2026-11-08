@@ -537,6 +537,26 @@ pub enum Cmd {
         #[arg(long)]
         by: Option<String>,
     },
+    /// Judge breadcrumb itself: one line on what got in your way, confused you, was missing or helped, filed in judge_project
+    Judge {
+        /// What happened, in a sentence or two
+        text: Option<String>,
+        /// hindered, confusing, missing or helped
+        #[arg(long, short = 'v', default_value = "hindered")]
+        verdict: String,
+        /// The command, tool or part of breadcrumb it is about, like search or the digest
+        #[arg(long, short = 'a')]
+        about: Option<String>,
+        /// List the judgments left to triage instead, grouped by what they are about
+        #[arg(long)]
+        list: bool,
+        /// With --list, the triaged ones too
+        #[arg(long)]
+        all: bool,
+        /// With --list, only those filed since a date, an RFC3339 time, or 3d, 2h ago
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// What waits for a check, and the verdict: pass moves to done, fail back to queued (review_by says who checks)
     Review {
         #[command(flatten)]
@@ -1779,6 +1799,18 @@ pub fn run(cli: Cli) -> Result<i32> {
                 data["moved"] = json!(0);
             }
             out.emit(text, data);
+        }
+        Cmd::Judge { text, verdict, about, list, all, since } => {
+            let v = open()?;
+            if list || text.is_none() {
+                let since = since.as_deref().map(ops::parse_since).transpose()?;
+                let rows = crate::judge::list(&v, since, all);
+                out.emit(crate::judge::list_text(&rows), json!({"judgments": rows}));
+                return Ok(0);
+            }
+            let text = read_body_arg(text, None)?.unwrap_or_default();
+            let n = crate::judge::judge(&v, &text, &verdict, about.as_deref(), v.detect_project(&cwd).as_deref())?;
+            out.emit(format!("{}\n", format::ack("judged", &n)), n.to_json());
         }
         Cmd::Config { action } => {
             let mut v = open()?;

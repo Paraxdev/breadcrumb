@@ -306,6 +306,13 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     }
     let kind_name = req.kind.clone().filter(|k| !k.trim().is_empty()).unwrap_or_else(|| v.config.default_kind.clone());
     let k = v.require_kind(kind_name.trim())?;
+    let mut req = req;
+    if k.name == crate::judge::JUDGMENT && crate::judge::home(v).is_some() && req.project != crate::judge::home(v) {
+        if let Some(p) = req.project.take().filter(|_| !req.fields.iter().any(|(f, _)| f == "seen_in")) {
+            req.fields.push(("seen_in".into(), FieldInput::Raw(p)));
+        }
+        req.project = crate::judge::home(v);
+    }
     let project = match &req.project {
         Some(p) => Some(check_slug(p)?),
         None => None,

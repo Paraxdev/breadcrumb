@@ -35,8 +35,11 @@ fn default_pin_review_days() -> u64 {
 fn default_review_by() -> String {
     "user".into()
 }
-fn default_feedback_remind_days() -> u64 {
-    0
+fn default_judge_nudge() -> String {
+    "off".into()
+}
+fn default_judge_project() -> String {
+    "breadcrumb".into()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,14 +63,17 @@ pub struct Config {
     /// Who checks items in review: `user`, or `agent`, a session or subagent that did not build the item.
     #[serde(default = "default_review_by")]
     pub review_by: String,
-    /// The digest asks agents to collect the user's feedback when the newest feedback note is this many days old, 0 turns it off.
-    #[serde(default = "default_feedback_remind_days")]
-    pub feedback_remind_days: u64,
+    /// How often the digest asks agents to judge breadcrumb itself: off, session (every digest) or daily.
+    #[serde(default = "default_judge_nudge")]
+    pub judge_nudge: String,
+    /// The project judgments of breadcrumb are filed in, wherever the agent works.
+    #[serde(default = "default_judge_project")]
+    pub judge_project: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), feedback_remind_days: default_feedback_remind_days() }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project() }
     }
 }
 

@@ -87,7 +87,7 @@ fn moving_back_to_review_records_the_new_builder() {
 fn config_lists_sets_validates_and_commits() {
     let (_d, v) = common::vault();
     let (ok, out, _) = crumb(&v, &["config"]);
-    assert!(ok && out.contains("review_by = user") && out.contains("feedback_remind_days = 0"), "{out}");
+    assert!(ok && out.contains("review_by = user") && out.contains("judge_nudge = off"), "{out}");
 
     let (ok, out, err) = crumb(&v, &["config", "set", "review_by", "agent"]);
     assert!(ok, "{err}");
@@ -98,7 +98,7 @@ fn config_lists_sets_validates_and_commits() {
     assert!(Vault::open(&v.root).unwrap().config.review_by == "agent", "saved to breadcrumb.toml");
 
     let (ok, _, err) = crumb(&v, &["config", "set", "review_by", "robot"]);
-    assert!(!ok && err.contains("user or agent"), "{err}");
+    assert!(!ok && err.contains("user, agent"), "{err}");
     let (ok, _, err) = crumb(&v, &["config", "set", "stale_days", "soon"]);
     assert!(!ok && err.contains("whole number"), "{err}");
     let (ok, _, err) = crumb(&v, &["config", "set", "auto_commit", "maybe"]);
@@ -128,23 +128,13 @@ fn cli_review_pass_takes_evidence_and_review_lists_the_agent_rules() {
 }
 
 #[test]
-fn digest_names_review_work_for_agents_and_nudges_for_feedback_once_a_day() {
+fn digest_names_review_work_for_agents() {
     let (_d, mut v) = common::vault();
     let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
     built_by(&v, &a.id, "builder");
     let d = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
-    assert!(!d.contains("Review:") && !d.contains("Feedback:"), "both are off by default:\n{d}");
-
+    assert!(!d.contains("Review:"), "off with review_by user: {d}");
     agents(&mut v);
-    breadcrumb::config::set(&mut v, "feedback_remind_days", "7").unwrap();
     let d = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
     assert!(d.contains("Review: 1 waiting for an agent check"), "{d}");
-    assert!(d.contains("Feedback: no feedback from the user yet"), "{d}");
-    let d = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
-    assert!(!d.contains("Feedback:"), "once a day:\n{d}");
-
-    std::fs::remove_file(v.root.join(".local").join("feedback-nudge")).unwrap();
-    common::add(&v, "Likes short answers", "feedback", None, &[]);
-    let d = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
-    assert!(!d.contains("Feedback:"), "recent feedback quiets it:\n{d}");
 }

@@ -7,17 +7,19 @@ use serde::Serialize;
 use std::fmt::Write;
 
 pub const REVIEW_BY: [&str; 2] = ["user", "agent"];
+pub const JUDGE_NUDGE: [&str; 3] = ["off", "session", "daily"];
 
-/// Every setting `config set` accepts, with the line `config` shows for it.
-const SETTINGS: [(&str, &str); 8] = [
-    ("review_by", "who checks items in review: user, or agent (a session or subagent that did not build the item, a pass needs evidence)"),
-    ("feedback_remind_days", "the digest asks agents to collect the user's feedback when the newest feedback note is this many days old, 0 is off"),
-    ("stale_days", "notes not verified or updated for this many days are marked possibly stale"),
-    ("pin_review_days", "doctor and pins flag a pin not verified for this many days, 0 is off"),
-    ("default_kind", "kind of a note added without --kind"),
-    ("auto_commit", "commit every write to git"),
-    ("lock_timeout_secs", "seconds a write waits for the vault lock"),
-    ("remote", "git remote sync pushes to, empty to unset"),
+/// Every setting `config set` accepts: its key, the line `config` shows, and the words it takes when it is a choice.
+const SETTINGS: [(&str, &str, &[&str]); 9] = [
+    ("review_by", "who checks items in review: user, or agent (a session or subagent that did not build the item, a pass needs evidence)", &REVIEW_BY),
+    ("judge_nudge", "how often the digest asks agents to judge breadcrumb itself with `breadcrumb judge`: off, session or daily", &JUDGE_NUDGE),
+    ("judge_project", "project that judgments of breadcrumb are filed in, wherever the agent works", &[]),
+    ("stale_days", "notes not verified or updated for this many days are marked possibly stale", &[]),
+    ("pin_review_days", "doctor and pins flag a pin not verified for this many days, 0 is off", &[]),
+    ("default_kind", "kind of a note added without --kind", &[]),
+    ("auto_commit", "commit every write to git", &[]),
+    ("lock_timeout_secs", "seconds a write waits for the vault lock", &[]),
+    ("remote", "git remote sync pushes to, empty to unset", &[]),
 ];
 
 #[derive(Debug, Serialize)]
@@ -44,7 +46,7 @@ pub fn settings(v: &Vault) -> Result<Vec<Setting>> {
     let (now, def) = (table(&v.config)?, table(&Config::default())?);
     Ok(SETTINGS
         .iter()
-        .map(|(k, about)| Setting { key: k.to_string(), value: shown(now.get(*k)), default: shown(def.get(*k)), about: about.to_string() })
+        .map(|(k, about, _)| Setting { key: k.to_string(), value: shown(now.get(*k)), default: shown(def.get(*k)), about: about.to_string() })
         .collect())
 }
 
@@ -75,9 +77,12 @@ fn parse_like(old: Option<&toml::Value>, key: &str, raw: &str) -> Result<Option<
 /// Sets one setting, saves breadcrumb.toml and commits it. Returns the value before.
 pub fn set(v: &mut Vault, key: &str, raw: &str) -> Result<String> {
     let key = key.trim();
-    if !SETTINGS.iter().any(|(k, _)| *k == key) {
-        let keys: Vec<&str> = SETTINGS.iter().map(|(k, _)| *k).collect();
+    let Some((_, _, words)) = SETTINGS.iter().find(|(k, _, _)| *k == key) else {
+        let keys: Vec<&str> = SETTINGS.iter().map(|(k, _, _)| *k).collect();
         bail!("unknown setting '{key}', settings are: {}", keys.join(", "));
+    };
+    if !words.is_empty() && !words.contains(&raw.trim()) {
+        bail!("{key} is one of {}, got '{}'", words.join(", "), raw.trim());
     }
     let mut t = table(&v.config)?;
     let def = table(&Config::default())?;
@@ -92,8 +97,8 @@ pub fn set(v: &mut Vault, key: &str, raw: &str) -> Result<String> {
         None => bail!("{key} cannot be empty"),
     }
     let cfg: Config = t.try_into().with_context(|| format!("'{raw}' is not a valid {key}"))?;
-    if !REVIEW_BY.contains(&cfg.review_by.as_str()) {
-        bail!("review_by is user or agent, got '{}'", cfg.review_by);
+    if key == "judge_project" {
+        crate::ops::check_slug(&cfg.judge_project)?;
     }
     let _g = v.lock()?;
     v.config = cfg;
