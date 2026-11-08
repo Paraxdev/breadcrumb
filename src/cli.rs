@@ -274,7 +274,7 @@ pub enum Cmd {
     Mcp,
     /// Print the command that registers the MCP server with Claude Code
     McpConfig,
-    /// The vault's settings with what each does, `config set <key> <value>` changes one (review_by, feedback_remind_days, ...)
+    /// The vault's settings with what each does, `config set <key> <value>` changes one (review_by, judge_nudge, ...)
     Config {
         #[command(subcommand)]
         action: Option<ConfigCmd>,
