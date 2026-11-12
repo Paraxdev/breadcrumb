@@ -1420,7 +1420,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 }
                 (false, [dup, keep]) => {
                     let m = crate::merge::merge(&v, dup, keep)?;
-                    out.emit(crate::merge::merged_text(&m), json!({"merged": m.dup.id, "into": m.keep.id}));
+                    out.emit(crate::merge::merged_text(&m), json!({"merged": m.dup.id, "into": m.keep.id, "body_skipped": m.skipped}));
                 }
                 (true, _) => bail!("merge --undo takes the merged note only, like `breadcrumb merge --undo DUP`"),
                 (false, _) => bail!("merge takes the duplicate and the note that stays, like `breadcrumb merge DUP KEEP`, or --undo DUP"),
