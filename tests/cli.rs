@@ -86,3 +86,18 @@ fn cli_end_to_end() {
     assert_eq!(w["exists"], true);
     assert_eq!(w["dirty"], false);
 }
+
+#[test]
+fn add_line_keeps_its_start_and_names_state_priority_and_a_repaired_slug() {
+    let d = tempfile::tempdir().unwrap();
+    let v = d.path().join("vault");
+    ok(&v, &["init"]);
+    let out = ok(&v, &["add", "--global", "--title", "Doctor scope", "--kind", "bug", "--slug", "doctor-mcp-no-project-scope", "--field", "priority=p1"]);
+    let first = out.lines().next().unwrap();
+    assert!(first.starts_with("added ") && first.contains("  [doctor-mcp-no-project]  state=backlog priority=p1"), "{out}");
+    assert!(out.contains("\nslug shortened to doctor-mcp-no-project"), "{out}");
+    let out = ok(&v, &["add", "--global", "--title", "Plain fact", "--kind", "note"]);
+    assert!(!out.contains("state=") && !out.contains("slug "), "{out}");
+    let o = breadcrumb(&v, &["add", "--global", "--title", "x", "--kind", "done"], None);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("'done' is a backlog state, not a kind, use kind bug, feature or task with field state=done"));
+}

@@ -64,7 +64,7 @@ fn handshake_list_add_search() {
         names,
         ["add", "append", "backlog", "claim", "context", "delete", "doctor", "get", "kinds", "land", "link", "list", "map", "merge", "move", "next", "project", "question", "search", "sync", "update", "workflow"]
     );
-    assert!(serde_json::to_string(&out[1]["result"]).unwrap().len() < 8900);
+    assert!(serde_json::to_string(&out[1]["result"]).unwrap().len() < 8980);
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
         assert!(t["inputSchema"]["properties"].is_object(), "{}", t["name"]);
@@ -249,4 +249,32 @@ fn move_and_update_set_a_release_note_and_review_says_when_it_is_missing() {
     assert!(text(&out[2]).contains("no commit: ref") && !text(&out[2]).contains("hint:"), "{}", text(&out[2]));
     assert_eq!(v.get(&a.id).unwrap().field("release_note").and_then(|x| x.as_str()), Some("From update"));
     assert_eq!(v.get(&b.id).unwrap().field("release_note").and_then(|x| x.as_str()), Some("From move"));
+}
+
+#[test]
+fn add_repairs_the_slug_shows_backlog_values_and_explains_a_state_kind() {
+    let (d, v) = common::vault();
+    let srv = Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let out = run(
+        &srv,
+        &[
+            call(1, "add", json!({"title": "Doctor scope", "kind": "bug", "slug": "doctor-mcp-no-project-scope", "fields": {"priority": "p1"}})),
+            call(2, "add", json!({"title": "Plain note", "slug": "oneword"})),
+            call(3, "add", json!({"title": "Queued thing", "kind": "queued"})),
+            call(4, "add", json!({"title": "Idea thing", "kind": "idea"})),
+            call(5, "add", json!({"title": "Status thing", "kind": "task", "fields": {"status": "queued"}})),
+            call(6, "add", json!({"title": "Queued task", "kind": "task", "fields": {"state": "queued"}})),
+        ],
+        &[],
+    );
+    assert_eq!(out[0]["result"]["isError"], false, "{}", text(&out[0]));
+    assert!(text(&out[0]).starts_with("saved ") && text(&out[0]).contains("state=backlog priority=p1\nslug shortened to doctor-mcp-no-project"), "{}", text(&out[0]));
+    assert_eq!(out[1]["result"]["isError"], false, "{}", text(&out[1]));
+    assert!(text(&out[1]).contains("slug made from the title: plain-note") && !text(&out[1]).contains("state="), "{}", text(&out[1]));
+    assert_eq!(out[2]["result"]["isError"], true);
+    assert!(text(&out[2]).contains("'queued' is a backlog state, not a kind, use kind bug, feature or task with field state=queued"), "{}", text(&out[2]));
+    assert!(text(&out[3]).contains("state=idea priority=p2"), "{}", text(&out[3]));
+    assert_eq!(out[4]["result"]["isError"], true);
+    assert!(text(&out[4]).contains("field state"), "{}", text(&out[4]));
+    assert!(text(&out[5]).contains("state=queued priority=p2"), "{}", text(&out[5]));
 }
