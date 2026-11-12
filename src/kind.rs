@@ -529,7 +529,7 @@ pub fn seed_kinds() -> Vec<KindDef> {
     map.fields = vec![FieldDef { required: true, ..str_field(crate::map::AREA_KEY, "area name, one map per area and project") }];
     let mut judgment = KindDef::new(crate::judge::JUDGMENT, "An agent's verdict on breadcrumb itself, filed with `breadcrumb judge` in the judge_project");
     judgment.fields = vec![
-        enum_field("verdict", &crate::judge::VERDICTS, "hindered", "what breadcrumb did for the agent"),
+        enum_field("verdict", &crate::judge::STORED, crate::judge::UNRATED, "what breadcrumb did for the agent, unrated when not given"),
         str_field("about", "the command, tool or part of breadcrumb it is about"),
         str_field("seen_in", "project the agent was working in"),
     ];

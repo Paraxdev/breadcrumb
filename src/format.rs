@@ -19,7 +19,7 @@ fn note_line_at(n: &Note, when: &str) -> String {
     if n.is_archived() {
         flags.push_str(" [archived]");
     }
-    format!("{}  {:<12} {:<14} {}{}  ({})", n.handle(), n.kind, n.scope_label(), n.title, flags, when)
+    format!("{}  {:<12} {:<14} {}{}{}  ({})", n.handle(), n.kind, n.scope_label(), judged(n), n.title, flags, when)
 }
 
 fn minute(n: &Note) -> String {
@@ -183,7 +183,7 @@ pub fn search_text(r: &SearchResult, scope_label: &str) -> String {
         return s;
     }
     for h in &r.hits {
-        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}{}", h.note.handle(), h.note.kind, h.note.scope_label(), state_mark(&h.note), h.note.title, hit_flags(r, h));
+        let _ = writeln!(s, "{}  {:<12} {:<14} {}{}{}{}", h.note.handle(), h.note.kind, h.note.scope_label(), state_mark(&h.note), judged(&h.note), h.note.title, hit_flags(r, h));
         if !h.snippet.is_empty() {
             let _ = writeln!(s, "    {}", h.snippet);
         }
@@ -211,13 +211,18 @@ fn state_mark(n: &Note) -> String {
     if crate::backlog::is_item(n) { format!("[{}] ", crate::backlog::state(n)) } else { String::new() }
 }
 
+/// `[hindered: search] ` for a judgment, nothing for other notes.
+fn judged(n: &Note) -> String {
+    crate::judge::mark(n).map(|m| format!("[{m}] ")).unwrap_or_default()
+}
+
 /// `id kind title`, plus the project when it is not `current`, plus flags and optionally the date.
 pub fn row(n: &Note, current: Option<&str>, date: bool) -> String {
     row_marked(n, "", current, date)
 }
 
 fn row_marked(n: &Note, mark: &str, current: Option<&str>, date: bool) -> String {
-    let mut s = format!("{} {} {mark}{}", n.handle(), n.kind, fit_title(&n.title, n.slug().as_deref()));
+    let mut s = format!("{} {} {mark}{}{}", n.handle(), n.kind, judged(n), fit_title(&n.title, n.slug().as_deref()));
     if let Some(p) = env_path(n) {
         let _ = write!(s, ": {p}");
     }
