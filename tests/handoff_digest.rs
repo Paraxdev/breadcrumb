@@ -204,3 +204,35 @@ fn kinds_say_which_to_use_and_add_hints_at_the_other_way() {
     let out = crumb(&e, A, &["add", "-k", "todo", "-t", "Fix the build", "-p", "app"]);
     assert!(out.contains("project work is kind task"), "{out}");
 }
+
+#[test]
+fn claiming_a_handoff_takes_the_name_from_by_then_breadcrumb_session_then_the_session() {
+    let e = setup(&[(B, "app-b")]);
+    let id = added_id(&crumb(&e, A, &["add", "-k", "handoff", "-t", "Main worker state", "-p", "app", "--track", "main-worker"]));
+    let held = |e: &Env| e.v.get(&id).unwrap().field("held_by").and_then(breadcrumb::note::yaml_scalar_string);
+    let as_named = |named: &str, session: &str, args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_crumb"))
+            .args(args)
+            .current_dir(&e.work)
+            .env("BREADCRUMB_HOME", &e.v.root)
+            .env("BREADCRUMB_CLAUDE_DIR", &e.claude)
+            .env("CLAUDE_CODE_SESSION_ID", session)
+            .env("BREADCRUMB_SESSION", named)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+
+    as_named("night-shift", "", &["claim", "track:main-worker"]);
+    assert_eq!(held(&e).as_deref(), Some("night-shift"));
+    as_named("night-shift", "", &["release", "track:main-worker"]);
+    assert_eq!(held(&e), None);
+
+    as_named("night-shift", B, &["claim", &id]);
+    assert_eq!(held(&e).as_deref(), Some("night-shift"), "the name beats the session id");
+    as_named("night-shift", B, &["claim", &id, "--by", "lead"]);
+    assert_eq!(held(&e).as_deref(), Some("lead"), "--by beats both");
+
+    as_named("", B, &["claim", &id]);
+    assert_eq!(held(&e).as_deref(), Some(B), "with no name the live session holds it");
+}

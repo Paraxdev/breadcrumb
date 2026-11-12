@@ -309,8 +309,11 @@ pub fn take_handoff(v: &Vault, id: &str, by: Option<&str>, release: bool) -> Res
             n.unset_field(k);
         }
     } else {
-        let me = crate::session::current();
-        let who = by.map(str::trim).filter(|b| !b.is_empty()).map(str::to_string).or_else(|| me.clone()).unwrap_or_else(|| crate::backlog::DEFAULT_ACTOR.to_string());
+        let named = |s: Option<String>| s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        let who = named(by.map(str::to_string))
+            .or_else(|| named(std::env::var(crate::backlog::SESSION_ENV).ok()))
+            .or_else(crate::session::current)
+            .unwrap_or_else(|| crate::backlog::DEFAULT_ACTOR.to_string());
         let (who, name) = match crate::session::find(&who) {
             Some(s) => (s.id, s.name),
             None => (who, None),
