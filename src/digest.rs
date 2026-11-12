@@ -9,7 +9,9 @@ use crate::ops::{Filter, Scope, SortKey, filter_notes, is_pref, prefs_line, sort
 use crate::util::{one_line, truncate_chars};
 use crate::vault::Vault;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
 
 /// Chars the whole digest may take. The SessionStart hook injects it as is.
 pub const DIGEST_BUDGET: usize = 6000;
@@ -25,16 +27,21 @@ const SAID_SINCE: &str = "2026-11-01";
 const OTHER_HANDOFFS_MAX: usize = 3;
 const PINS_HEAD: &str = "Pinned (get an id for its body):\n";
 
-#[derive(Clone, Copy, Debug)]
+/// How long the digest waits for git to count commits since a handoff, a slower answer shows no count.
+const GIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[derive(Clone, Debug)]
 pub struct ContextOpts {
     pub recent: usize,
     pub kinds: bool,
     pub budget: usize,
+    /// Where the session runs, it picks the project checkout commits are counted on. None is the process's cwd.
+    pub cwd: Option<PathBuf>,
 }
 
 impl Default for ContextOpts {
     fn default() -> Self {
-        ContextOpts { recent: 15, kinds: false, budget: DIGEST_BUDGET }
+        ContextOpts { recent: 15, kinds: false, budget: DIGEST_BUDGET, cwd: None }
     }
 }
 
@@ -172,13 +179,13 @@ fn handoff_text(h: &Note) -> String {
     out
 }
 
-fn handoff_section(h: &Note, stale_days: u64, max: usize) -> String {
+fn handoff_section(h: &Note, commits: &str, stale_days: u64, max: usize) -> String {
     let prev = h.links.iter().find(|l| l.rel == SUPERSEDES).map(|l| format!(", previous {}", l.to)).unwrap_or_default();
     let quiet = crate::util::now() - h.updated;
     let fresh = if quiet > chrono::Duration::hours(lifecycle::HANDOFF_FRESH_HOURS) {
-        format!(", last written {} ago, check it still holds before resuming", crate::util::short_age(&h.updated))
+        format!(", last written {} ago{commits}, check it still holds before resuming", crate::util::short_age(&h.updated))
     } else {
-        String::new()
+        commits.to_string()
     };
     let head = format!(
         "Latest handoff {} ({}{}{prev}{fresh}): {}{}
@@ -193,19 +200,23 @@ fn handoff_section(h: &Note, stale_days: u64, max: usize) -> String {
     format!("{head}{body}")
 }
 
-/// The live handoffs beside the latest, one line each. Old ones leave unless pinned, or legacy notes would pile up.
-fn other_handoffs(others: &[&Note], all: &[Note]) -> String {
+/// The live handoffs beside the latest that the digest names. Old ones leave unless pinned, or legacy notes would pile up.
+fn shown_others<'a>(others: &[&'a Note]) -> Vec<&'a Note> {
     let cutoff = crate::util::now() - chrono::Duration::days(lifecycle::HANDOFF_DIGEST_DAYS);
-    let shown: Vec<&&Note> = others.iter().filter(|n| n.pinned || n.created >= cutoff).collect();
+    others.iter().copied().filter(|n| n.pinned || n.created >= cutoff).collect()
+}
+
+/// One line each, with the commits since it was written and why it does not lead.
+fn other_handoffs(shown: &[&Note], commits: &dyn Fn(&Note) -> String, mark: &dyn Fn(&Note) -> Option<String>) -> String {
     if shown.is_empty() {
         return String::new();
     }
     let mut s = "Other live handoffs:
 ".to_string();
     for n in shown.iter().take(OTHER_HANDOFFS_MAX) {
-        s.push_str(&lifecycle::handoff_line(n));
-        if let Some(k) = lifecycle::settled(n, all) {
-            let _ = write!(s, " [settled, the {k} items it names landed]");
+        s.push_str(&lifecycle::handoff_line_with(n, &commits(n)));
+        if let Some(m) = mark(n) {
+            let _ = write!(s, " [{m}]");
         }
         s.push('\n');
     }
@@ -213,6 +224,22 @@ fn other_handoffs(others: &[&Note], all: &[Note]) -> String {
         let _ = writeln!(s, "+{} more", shown.len() - OTHER_HANDOFFS_MAX);
     }
     s
+}
+
+/// The project's checkout on this machine: its path holding `cwd`, else the first path inside a git checkout.
+fn checkout(p: &crate::project::Project, cwd: Option<&Path>) -> Option<PathBuf> {
+    use crate::project::{normalize_path, path_has_prefix};
+    let in_git = |x: &&String| Path::new(x.as_str()).is_dir() && Path::new(x.as_str()).ancestors().any(|d| d.join(".git").exists());
+    let here = cwd.map(|c| normalize_path(&c.to_string_lossy()));
+    let holding = here.and_then(|c| p.paths.iter().filter(|x| path_has_prefix(&c, &normalize_path(x))).max_by_key(|x| x.len())).filter(in_git);
+    holding.or_else(|| p.paths.iter().find(in_git)).map(PathBuf::from)
+}
+
+/// Commits on the checkout since each handoff was last written, one git call for all of them. Empty when unknown.
+fn commits_since(dir: Option<PathBuf>, hs: &[&Note]) -> HashMap<String, usize> {
+    let (Some(dir), Some(oldest)) = (dir, hs.iter().map(|h| h.updated).min()) else { return HashMap::new() };
+    let Some(times) = crate::git::commit_times(&dir, oldest, &[], GIT_LIMIT) else { return HashMap::new() };
+    hs.iter().map(|h| (h.id.clone(), times.iter().filter(|&&t| t > h.updated.timestamp()).count())).collect()
 }
 
 fn chars(s: &str) -> usize {
@@ -261,7 +288,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     };
     let all = v.load_notes();
     let lapsed = Lapsed::of(&all);
-    let mut notes: Vec<Note> = filter_notes(all.clone(), &scope, &Filter::default())?.into_iter().filter(|n| !lapsed.hides(n)).collect();
+    let mut notes: Vec<Note> = filter_notes(all.clone(), &scope, &Filter::default())?.into_iter().filter(|n| !lapsed.hides(n) && !crate::recall::scope_hides(n, project)).collect();
     sort_notes(&mut notes, SortKey::Updated);
     if notes.is_empty() {
         writeln!(head, "No notes yet.")?;
@@ -271,8 +298,10 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     notes.retain(|n| n.kind != ENV);
     let days = v.config.stale_days;
     let pins = pins_section(&notes, project, days, opts.budget / 2);
-    let prefs: Vec<&Note> = notes.iter().filter(|n| !n.pinned && is_pref(n)).collect();
-    let mut prefs_text = if prefs.is_empty() { String::new() } else { format!("{}\n", prefs_line(&prefs)) };
+    // An unpinned global note without a scope is about no project in particular, a project digest only counts it.
+    let foreign = |n: &Note| project.is_some() && n.project.is_none() && !n.pinned && crate::recall::scope_of(n).is_empty();
+    let (prefs, global_prefs): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| !n.pinned && is_pref(n)).partition(|n| !foreign(n));
+    let mut prefs_text = if prefs.is_empty() && global_prefs.is_empty() { String::new() } else { format!("{}\n", prefs_line(&prefs, global_prefs.len())) };
     if env > 0 {
         writeln!(prefs_text, "Machine facts: {env} for {machine}, `breadcrumb env` or list kind env")?;
     }
@@ -301,53 +330,59 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         writeln!(prefs_text, "{l}")?;
     }
 
-    let rest: Vec<&Note> = notes
+    let (rest, global_rest): (Vec<&Note>, Vec<&Note>) = notes
         .iter()
         .filter(|n| !n.pinned && !is_pref(n) && !is_open_todo(n) && !crate::backlog::in_digest(n) && n.kind != HANDOFF)
-        .collect();
+        .partition(|n| !foreign(n));
+    let global_more = match global_rest.len() {
+        0 => String::new(),
+        1 => "Global: 1 more note, breadcrumb list -p global\n".to_string(),
+        k => format!("Global: {k} more notes, breadcrumb list -p global\n"),
+    };
     // Prefs used to sit in Recent, so they still count against it and the digest does not grow.
     let want = opts.recent.saturating_sub(prefs.len().min(opts.recent / 2));
     let recent_rows: Vec<String> = rest.iter().take(want).map(|n| format!("{}{}\n", row(n, project, false), crate::recall::stale_mark(n, days))).collect();
 
-    // A handoff whose items all landed has nothing left to resume, so the newest one with open work leads.
+    // A handoff a newer one covers, or whose items all landed, has nothing left to resume, so the newest other one leads.
     let mut live = lifecycle::live_handoffs(&notes, project, &lapsed);
-    if let Some(i) = live.iter().position(|h| lifecycle::settled(h, &all).is_none()) {
+    let marks: HashMap<String, String> = live.iter().filter_map(|h| lifecycle::handoff_mark(h, &live, &all).map(|m| (h.id.clone(), m))).collect();
+    if let Some(i) = live.iter().position(|h| !marks.contains_key(&h.id)) {
         let lead = live.remove(i);
         live.insert(0, lead);
     }
-    let lead_settled = live.first().is_some_and(|h| lifecycle::settled(h, &all).is_some());
-    let others = other_handoffs(if lead_settled { &live[..] } else { live.get(1..).unwrap_or_default() }, &all);
-    let fixed = chars(&head) + chars(&pins) + chars(&others) + chars(&prefs_text) + chars(&todos) + chars(&backlog);
+    let lead_marked = live.first().is_some_and(|h| marks.contains_key(&h.id));
+    let shown = shown_others(if lead_marked { &live[..] } else { live.get(1..).unwrap_or_default() });
+    let counted: Vec<&Note> = live.first().filter(|_| !lead_marked).into_iter().copied().chain(shown.iter().take(OTHER_HANDOFFS_MAX).copied()).collect();
+    let cwd = opts.cwd.clone().or_else(|| std::env::current_dir().ok());
+    let counts = if counted.is_empty() { HashMap::new() } else { commits_since(proj.as_ref().and_then(|p| checkout(p, cwd.as_deref())), &counted) };
+    let commits = |n: &Note| counts.get(&n.id).map(|&k| lifecycle::commits_since_text(k)).filter(|t| !t.is_empty()).map(|t| format!(", {t}")).unwrap_or_default();
+    let others = other_handoffs(&shown, &commits, &|n: &Note| marks.get(&n.id).cloned());
+    let fixed = chars(&head) + chars(&pins) + chars(&others) + chars(&prefs_text) + chars(&todos) + chars(&backlog) + chars(&global_more);
     let mut left = opts.budget.saturating_sub(fixed);
-    let handoff = match live.first().filter(|_| !lead_settled) {
+    let handoff = match live.first().filter(|_| !lead_marked) {
         Some(h) => {
             let reserve = RECENT_RESERVE.min(recent_rows.iter().map(|r| chars(r)).sum());
-            handoff_section(h, days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX))
+            handoff_section(h, &commits(h), days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX))
         }
         None => String::new(),
     };
     left = left.saturating_sub(chars(&handoff));
-    let mut recent = String::new();
+    let mut rows = String::new();
     let mut shown = 0;
     for r in &recent_rows {
-        if chars(&recent) + chars(r) + 24 > left {
+        if chars(&rows) + chars(r) + 24 > left {
             break;
         }
-        recent.push_str(r);
+        rows.push_str(r);
         shown += 1;
     }
-    let mut out = format!("{head}{pins}{handoff}{others}{prefs_text}{todos}{backlog}");
-    if shown > 0 {
-        if rest.len() > shown {
-            writeln!(out, "Recent ({shown} of {}):", rest.len())?;
-        } else {
-            writeln!(out, "Recent:")?;
-        }
-        out.push_str(&recent);
-    }
-    if opts.kinds {
-        writeln!(out, "Kinds:")?;
-        out.push_str(&crate::format::kinds_compact(&v.load_kinds()));
-    }
-    Ok(out)
+    let mut recent = match shown {
+        0 => String::new(),
+        _ if rest.len() > shown => format!("Recent ({shown} of {}):\n{rows}", rest.len()),
+        _ => format!("Recent:\n{rows}"),
+    };
+    recent.push_str(&global_more);
+    let kinds = if opts.kinds { format!("Kinds:\n{}", crate::format::kinds_compact(&v.load_kinds())) } else { String::new() };
+    let sections = [("pins", pins), ("handoff", handoff), ("handoffs", others), ("prefs", prefs_text), ("todos", todos), ("backlog", backlog), ("recent", recent), ("kinds", kinds)];
+    Ok(sections.into_iter().fold(head, |out, (_, s)| out + &s))
 }

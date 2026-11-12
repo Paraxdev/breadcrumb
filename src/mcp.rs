@@ -219,7 +219,7 @@ impl Server {
         match name {
             "context" => {
                 let p = self.target_project(&v, a)?;
-                ops::context_with(&v, p.as_deref(), ContextOpts { recent: u(a, "limit").unwrap_or(15), kinds: b(a, "kinds"), ..Default::default() })
+                ops::context_with(&v, p.as_deref(), ContextOpts { recent: u(a, "limit").unwrap_or(15), kinds: b(a, "kinds"), cwd: Some(self.cwd_of(a)), ..Default::default() })
             }
             "search" => {
                 let q = req_s(a, "query")?;
@@ -299,7 +299,7 @@ impl Server {
                     out.push_str(&format!("\n{h}"));
                 }
                 if n.kind == ops::HANDOFF {
-                    out.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n)));
+                    out.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n, true)));
                 }
                 if let Some(h) = crate::judge::unrated_hint(&n, true) {
                     out.push_str(&format!("\n{h}"));
@@ -331,10 +331,12 @@ impl Server {
                         set_paths: if a.contains_key("paths") { Some(strs(a, "paths")) } else { None },
                         refs: strs(a, "refs"),
                         slug: s(a, "slug"),
+                        supersedes: strs(a, "supersedes"),
                         ..Default::default()
                     },
                 )?;
-                Ok(format::ack(if n.is_archived() && s(a, "status").is_some() { "archived" } else { "updated" }, &n))
+                let gone = crate::lifecycle::superseded_text(&v, &strs(a, "supersedes"));
+                Ok(format!("{}{gone}", format::ack(if n.is_archived() && s(a, "status").is_some() { "archived" } else { "updated" }, &n)))
             }
             "append" => Ok(format::ack("appended", &ops::append(&v, &req_s(a, "id")?, &req_s(a, "text")?)?)),
             "link" => {
@@ -703,7 +705,7 @@ pub fn tool_defs() -> Vec<Value> {
     let scope = || json!({"project": {"type": "string", "description": "slug, global or all"}});
     let target = || json!({"project": {"type": "string", "description": "slug or global"}});
     let filters = || json!({"kind": st(), "tags": arr(), "limit": int()});
-    let fields = || json!({"type": "object", "description": "summary: pin's digest line, expires: date, 3d or until:id, said: user's quote"});
+    let fields = || json!({"type": "object", "description": "summary: pin's digest line, expires: date, 3d or until:id, said: user's quote, scope: projects"});
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
     let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});
@@ -743,6 +745,7 @@ pub fn tool_defs() -> Vec<Value> {
             "release_note": st(),
             "unset": {"type": "array", "items": {"type": "string"}, "description": "removes"},
             "links": {"type": "array", "items": {"type": ["string", "object"]}, "description": "replaces"},
+            "supersedes": arr(),
             "pinned": bl(),
             "status": {"type": "string", "enum": ["active", "archived"]},
             "paths": paths(),

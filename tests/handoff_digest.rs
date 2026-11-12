@@ -236,3 +236,71 @@ fn claiming_a_handoff_takes_the_name_from_by_then_breadcrumb_session_then_the_se
     as_named("", B, &["claim", &id]);
     assert_eq!(held(&e).as_deref(), Some(B), "with no name the live session holds it");
 }
+
+#[test]
+fn a_handoff_a_newer_one_names_is_covered_and_never_leads() {
+    let e = setup(&[(A, "app-a"), (B, "app-b")]);
+    let ui = common::add(&e.v, "Toolbar icons", "feature", Some("app"), &[]);
+    let palette = common::add(&e.v, "Palette", "feature", Some("app"), &[]);
+    let older = added_id(&crumb(&e, A, &["add", "-k", "handoff", "-t", "Engine state", "-p", "app", "--body", &format!("Toolbar is {}.", ui.id)]));
+    let older_slug = e.v.get(&older).unwrap().slug().unwrap();
+    tick();
+    let newer = added_id(&crumb(&e, B, &["add", "-k", "handoff", "-t", "UI state", "-p", "app", "--body", &format!("Carries on from {older_slug}, then {}.", palette.id)]));
+    let newer_h = e.v.get(&newer).unwrap().handle();
+    let d = digest(&e);
+    assert!(d.contains(&format!("Latest handoff {newer_h} (")), "{d}");
+    assert!(d.contains(&format!(": Engine state [covered by {newer_h}]\n")), "{d}");
+
+    mv(&e.v, &ui.id, "review");
+    let d = digest(&e);
+    assert!(d.contains(&format!(": Engine state [covered by {newer_h}]\n")), "covered and settled show one mark: {d}");
+
+    mv(&e.v, &palette.id, "done");
+    let d = digest(&e);
+    assert!(!d.contains("Latest handoff"), "a covered handoff never leads, like a settled one: {d}");
+    assert!(d.contains(&format!(": Engine state [covered by {newer_h}]\n")) && d.contains(": UI state [settled, the 1 items it names landed]\n"), "{d}");
+}
+
+#[test]
+fn the_digest_counts_commits_on_the_checkout_since_each_handoff() {
+    let e = setup(&[(A, "app-a"), (B, "app-b")]);
+    let commit = |m: &str| common::git(&e.work, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", m]);
+    common::git(&e.work, &["init", "-q"]);
+    added_id(&crumb(&e, B, &["add", "-k", "handoff", "-t", "UI state", "-p", "app"]));
+    assert!(!digest(&e).contains("since"), "a repo with no commits yet counts nothing: {}", digest(&e));
+    tick();
+    commit("base");
+    tick();
+    let lead = added_id(&crumb(&e, A, &["add", "-k", "handoff", "-t", "Engine state", "-p", "app"]));
+    let head = format!("Latest handoff {} ({}, app-a", e.v.get(&lead).unwrap().handle(), breadcrumb::util::fmt_date(&breadcrumb::util::now()));
+    let d = digest(&e);
+    assert!(d.contains(&format!("{head}): Engine state\n")), "0 commits shows nothing: {d}");
+    assert!(d.contains(", 1 commit since: UI state\n"), "{d}");
+    tick();
+    commit("one");
+    commit("two");
+    let d = digest(&e);
+    assert!(d.contains(&format!("{head}, 2 commits since): Engine state\n")) && d.contains(", 3 commits since: UI state\n"), "{d}");
+    common::git(&e.work, &["checkout", "-q", "--detach"]);
+    assert!(digest(&e).contains(", 3 commits since: UI state\n"), "a detached HEAD counts the same: {}", digest(&e));
+
+    let mut n = e.v.get(&lead).unwrap();
+    n.updated = breadcrumb::util::now() - chrono::Duration::hours(30);
+    e.v.write_note(&mut n).unwrap();
+    assert!(digest(&e).contains("last written 30h ago, 3 commits since, check it still holds before resuming"), "{}", digest(&e));
+
+    // A second checkout of the project, the one holding the session's cwd is counted.
+    let wt = e.work.parent().unwrap().join("wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    common::git(&wt, &["init", "-q"]);
+    common::git(&wt, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "wt"]);
+    breadcrumb::ops::project_link(&e.v, "app", &wt, None).unwrap();
+    let at = |cwd: &std::path::Path| breadcrumb::ops::context_with(&e.v, Some("app"), breadcrumb::ops::ContextOpts { cwd: Some(cwd.to_path_buf()), ..Default::default() }).unwrap();
+    assert!(at(&wt.join("sub")).contains(", 1 commit since: UI state\n"), "{}", at(&wt));
+    assert!(at(&e.work).contains(", 3 commits since: UI state\n") && at(e.work.parent().unwrap()).contains(", 3 commits since: UI state\n"));
+
+    std::fs::rename(e.work.join(".git"), e.work.join("git-off")).unwrap();
+    assert!(digest(&e).contains(", 1 commit since: UI state\n"), "a project path that is no checkout falls back to one that is: {}", digest(&e));
+    std::fs::rename(wt.join(".git"), wt.join("git-off")).unwrap();
+    assert!(!digest(&e).contains("since"), "no checkout, no count");
+}

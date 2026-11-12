@@ -194,3 +194,43 @@ fn the_mcp_add_takes_track_and_supersedes() {
     let t = v.load_notes().into_iter().find(|n| n.title == "Third").unwrap();
     assert!(t.links.iter().any(|l| l.to == n.id && l.rel == SUPERSEDES));
 }
+
+const C: &str = "cccccccc-0000-4000-8000-000000000003";
+
+#[test]
+fn add_lists_the_others_with_their_marks_and_update_supersedes_retires_one_after_the_fact() {
+    let (_d, v) = common::vault();
+    let (old, _) = handoff(&v, A, "Engine state", &["--pin"]);
+    tick();
+    let (mid, _) = handoff(&v, B, "Engine follow up", &["--body", &format!("Continues {old}.")]);
+    tick();
+    let (new, out) = handoff(&v, C, "UI state", &[]);
+    let (old_h, mid_h) = (v.get(&old).unwrap().handle(), v.get(&mid).unwrap().handle());
+    assert!(out.contains(&format!("superseded nothing, other live handoffs, each with the command that retires it if this handoff replaces it:\n  {mid_h} bbbbbbbb ")), "{out}");
+    assert!(out.contains(&format!(": Engine follow up\n    breadcrumb update {new} --supersedes {mid}\n  {old_h} aaaaaaaa ")), "{out}");
+    assert!(out.trim_end().ends_with(&format!(": Engine state [covered by {mid_h}]\n    breadcrumb update {new} --supersedes {old}")), "{out}");
+
+    let out = crumb(&v, C, &["update", &new, "--supersedes", &old]);
+    assert!(out.contains(&format!("\nsuperseded {old_h} aaaaaaaa ")), "{out}");
+    assert_eq!(superseded(&v, &new), vec![old.clone()]);
+    assert!(!v.get(&old).unwrap().pinned);
+    let d = digest(&v);
+    assert!(!d.contains(": Engine state") && d.contains(&mid), "{d}");
+    assert!(breadcrumb::ops::update(&v, &new, breadcrumb::ops::UpdateReq { supersedes: vec![new.clone()], ..Default::default() }).is_err());
+}
+
+#[test]
+fn the_mcp_add_names_the_retire_call_and_update_takes_supersedes() {
+    let (d, v) = common::vault();
+    let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let call = |tool: &str, args: serde_json::Value| srv.call_tool(tool, args.as_object().unwrap()).unwrap();
+    breadcrumb::ops::project_link(&v, "app", d.path(), None).unwrap();
+    call("add", serde_json::json!({"title": "First", "kind": "handoff", "track": "engine", "pinned": true}));
+    let out = call("add", serde_json::json!({"title": "Second", "kind": "handoff", "track": "ui"}));
+    let first = v.load_notes().into_iter().find(|n| n.title == "First").unwrap();
+    let second = v.load_notes().into_iter().find(|n| n.title == "Second").unwrap();
+    assert!(out.ends_with(&format!(": First\n    update {{\"id\": \"{}\", \"supersedes\": [\"{}\"]}}", second.id, first.id)), "{out}");
+    let out = call("update", serde_json::json!({"id": second.id, "supersedes": [first.id]}));
+    assert!(out.contains("\nsuperseded ") && out.contains("First"), "{out}");
+    assert!(superseded(&v, &second.id) == vec![first.id.clone()] && !v.get(&first.id).unwrap().pinned);
+}

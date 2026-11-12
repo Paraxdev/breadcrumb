@@ -503,3 +503,29 @@ fn placeholder_paths_are_not_file_refs() {
     let names: Vec<&str> = refs.iter().map(|(_, _, r)| r.as_str()).collect();
     assert_eq!(names, vec!["src/real.rs"]);
 }
+
+#[test]
+fn a_global_notes_scope_decides_the_projects_its_hooks_reach() {
+    let (_d, v, proj) = project_vault();
+    let scoped = |title: &str, scope: &str, paths: &[&str]| {
+        let mut n = add_scoped(&v, title, "gotcha", None, paths);
+        n = ops::update(&v, &n.id, UpdateReq { fields: vec![("scope".into(), ops::FieldInput::Raw(scope.into()))], ..Default::default() }).unwrap();
+        n
+    };
+    let here = scoped("Shader cache invalidation on driver update", "dem*, web", &["src/engine/**"]);
+    let away = scoped("Shader cache breaks after a driver update on consoles", "console-*", &["src/engine/**"]);
+    let anywhere = add_scoped(&v, "Engine headers need include guards", "gotcha", None, &["src/engine/**"]);
+
+    let line = prompt(&v, &proj, "Why does the shader cache break after a driver update?", "s1").expect("recall");
+    assert!(line.contains(&here.id) && !line.contains(&away.id), "{line}");
+
+    let file = proj.join("src").join("engine").join("loop.cpp");
+    let line = touch(&v, &proj, &file.to_string_lossy(), Some("s2")).expect("file notes");
+    assert!(line.contains(&here.id) && line.contains(&anywhere.id) && !line.contains(&away.id), "{line}");
+
+    let o = breadcrumb(&v.root, &["add", "-t", "Console builds strip symbols", "-k", "gotcha", "-p", "global", "--field", "scope=console-*,demo"], "", &proj);
+    let id = stdout(&o).split_whitespace().nth(1).unwrap().to_string();
+    assert_eq!(breadcrumb::recall::scope_of(&v.get(&id).unwrap()), vec!["console-*", "demo"]);
+    stdout(&breadcrumb(&v.root, &["update", &id, "--field", "scope=web"], "", &proj));
+    assert_eq!(breadcrumb::recall::scope_of(&v.get(&id).unwrap()), vec!["web"]);
+}

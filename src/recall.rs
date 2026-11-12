@@ -123,6 +123,32 @@ fn seg_match(p: &str, s: &str) -> bool {
     p[pi..].iter().all(|c| *c == '*')
 }
 
+/// A global note's `scope`: project slugs or globs like `create-*`, comma separated or a YAML list.
+pub const SCOPE_KEY: &str = "scope";
+
+pub fn scope_of(n: &Note) -> Vec<String> {
+    let raw: Vec<String> = match n.field(SCOPE_KEY) {
+        Some(serde_yaml::Value::Sequence(xs)) => xs.iter().filter_map(crate::note::yaml_scalar_string).collect(),
+        Some(x) => crate::note::yaml_scalar_string(x).into_iter().collect(),
+        None => vec![],
+    };
+    raw.iter().flat_map(|s| s.split(',')).map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect()
+}
+
+/// Whether project `slug` is in `scope`, an empty scope holds everywhere.
+pub fn scope_matches(scope: &[String], slug: &str) -> bool {
+    let slug = slug.to_ascii_lowercase();
+    scope.is_empty() || scope.iter().any(|p| seg_match(p, &slug))
+}
+
+/// A global note whose scope leaves out `project`. The global view (None) and project notes are never hidden.
+pub fn scope_hides(n: &Note, project: Option<&str>) -> bool {
+    match project {
+        Some(p) if n.project.is_none() => !scope_matches(&scope_of(n), p),
+        _ => false,
+    }
+}
+
 fn norm_path(p: &str) -> String {
     let s = crate::util::strip_verbatim(&p.trim().replace('\\', "/"));
     let t = s.trim_end_matches('/');
@@ -195,6 +221,9 @@ pub struct IndexEntry {
     /// A backlog item, whatever its state.
     #[serde(default)]
     pub item: bool,
+    /// A global note's projects, see scope_of.
+    #[serde(default)]
+    pub scope: Vec<String>,
 }
 
 impl IndexEntry {
@@ -217,7 +246,7 @@ struct PathIndex {
 /// so this costs no file reads.
 fn notes_signature(v: &Vault) -> String {
     // The version rebuilds an index written by an older binary, which lacks newer entry fields.
-    let mut parts: Vec<String> = vec!["v3".into()];
+    let mut parts: Vec<String> = vec!["v4".into()];
     for d in v.notes_dirs() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
@@ -271,6 +300,7 @@ pub fn path_index(v: &Vault) -> Vec<IndexEntry> {
                 summary: crate::digest::summary(n),
                 closed: crate::backlog::is_item(n) && crate::backlog::is_closed(&crate::backlog::state(n)),
                 item: crate::backlog::is_item(n),
+                scope: scope_of(n),
             })
         })
         .collect();
@@ -340,7 +370,7 @@ pub fn file_notes(v: &Vault, cwd: &Path, file: &Path, exclude: &HashSet<String>)
     }
     let hits: Vec<IndexEntry> = path_index(v)
         .into_iter()
-        .filter(|e| e.project.as_deref().is_none_or(|p| p == slug))
+        .filter(|e| e.project.as_deref().map_or_else(|| scope_matches(&e.scope, &slug), |p| p == slug))
         .filter(|e| !exclude.contains(&e.id) && e.holds())
         .filter(|e| e.paths.iter().any(|g| glob_match(g, &rel)))
         .collect();
@@ -420,7 +450,7 @@ pub fn recall(v: &Vault, project: Option<&str>, prompt: &str, exclude: &HashSet<
     let all = v.load_notes();
     let lapsed = crate::lifecycle::Lapsed::of(&all);
     let Ok(notes) = crate::ops::filter_notes(all, &scope, &Filter::default()) else { return vec![] };
-    let notes: Vec<Note> = notes.into_iter().filter(|n| !exclude.contains(&n.id) && !lapsed.hides(n)).collect();
+    let notes: Vec<Note> = notes.into_iter().filter(|n| !exclude.contains(&n.id) && !lapsed.hides(n) && !scope_hides(n, project)).collect();
     let need = terms.len().min(2);
     crate::search::search(notes, &terms.join(" "))
         .hits

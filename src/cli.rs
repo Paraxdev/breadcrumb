@@ -1167,6 +1167,9 @@ pub struct UpdateArgs {
     /// One line for the release notes, `ship` prints it
     #[arg(long, value_name = "LINE", allow_hyphen_values = true)]
     pub release_note: Option<String>,
+    /// Id or slug this note replaces (repeatable), a handoff also unpins it and the digest stops showing it
+    #[arg(long, value_name = "ID")]
+    pub supersedes: Vec<String>,
 }
 
 struct Out {
@@ -1373,7 +1376,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 created.push_str(&format!("\n{h}"));
             }
             if n.kind == ops::HANDOFF {
-                created.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n)));
+                created.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n, false)));
             }
             if let Some(h) = crate::judge::unrated_hint(&n, false) {
                 created.push_str(&format!("\n{h}"));
@@ -1439,10 +1442,11 @@ pub fn run(cli: Cli) -> Result<i32> {
                     paths: u.paths,
                     refs: u.refs,
                     slug: u.slug,
+                    supersedes: u.supersedes.clone(),
                     ..Default::default()
                 },
             )?;
-            out.emit(format!("updated {}  {}", n.id, n.title), n.to_json());
+            out.emit(format!("updated {}  {}{}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
         }
         Cmd::Append { id, text } => {
             let text = read_body_arg(Some(text), None)?.unwrap_or_default();

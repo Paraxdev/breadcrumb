@@ -394,16 +394,15 @@ pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
         }
     }
     // A new handoff replaces only its own track's, parallel sessions keep theirs. What it replaces stops being pinned.
-    let mut unpin: Vec<Note> = vec![];
+    let mut all = vec![];
     if note.kind == HANDOFF {
-        let all = v.load_notes();
+        all = v.load_notes();
         let lapsed = crate::lifecycle::Lapsed::of(&all);
         for p in crate::lifecycle::live_handoffs(&all, note.project.as_deref(), &lapsed) {
             if crate::lifecycle::same_track(&note, p) && !note.links.iter().any(|l| l.to == p.id && l.rel == SUPERSEDES) {
                 note.links.push(Link { to: p.id.clone(), rel: SUPERSEDES.into() });
             }
         }
-        unpin = all.into_iter().filter(|n| n.kind == HANDOFF && n.pinned && note.links.iter().any(|l| l.to == n.id && l.rel == SUPERSEDES)).collect();
     }
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
     if note.kind == crate::judge::JUDGMENT {
@@ -413,11 +412,7 @@ pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
         && let Some(created) = ensure_project(v, p)? {
             touched.push(created);
         }
-    for n in &mut unpin {
-        n.pinned = false;
-        n.clear_kept("pinned");
-        touched.push(v.write_note(n)?);
-    }
+    touched.extend(crate::lifecycle::unpin_superseded(v, &note, all)?);
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("add", &note))?;
     Ok((note, slug_note))
@@ -506,6 +501,8 @@ pub struct UpdateReq {
     pub status: Option<String>,
     /// Replaces all links when set.
     pub links: Option<Vec<Link>>,
+    /// Ids or slugs this note replaces, added as `supersedes` links after `links`. A handoff unpins pinned handoffs among them.
+    pub supersedes: Vec<String>,
     /// `glob` or `+glob` adds, `-glob` removes.
     pub paths: Vec<String>,
     /// Replaces all path globs when set, before `paths`.
@@ -639,6 +636,15 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         }
         note.links = out;
     }
+    for s in &req.supersedes {
+        let to = v.resolve_id(s)?;
+        if to == note.id {
+            bail!("a note cannot supersede itself");
+        }
+        if !note.links.iter().any(|l| l.to == to && l.rel == SUPERSEDES) {
+            note.links.push(Link { to, rel: SUPERSEDES.into() });
+        }
+    }
     k.validate(&mut note.extra)?;
     if crate::backlog::is_item(&note) {
         let new_state = crate::backlog::state(&note);
@@ -653,6 +659,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
     crate::session::stamp_write(&mut note);
     note.updated = now();
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
+    if !req.supersedes.is_empty() {
+        touched.extend(crate::lifecycle::unpin_superseded(v, &note, v.load_notes())?);
+    }
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("update", &note))?;
     Ok(note)
@@ -1023,18 +1032,22 @@ pub fn is_pref(n: &Note) -> bool {
     n.kind == "feedback" || n.kind == "user"
 }
 
-pub fn prefs_line(prefs: &[&Note]) -> String {
+/// `global` counts unpinned global prefs a project digest leaves out, named only as `+N global` at the end.
+pub fn prefs_line(prefs: &[&Note], global: usize) -> String {
     let mut s = "Prefs (unpinned):".to_string();
+    let tail = if global > 0 { format!(", +{global} global") } else { String::new() };
+    let room = PREFS_LINE_MAX - 12 - tail.chars().count();
     for (i, n) in prefs.iter().enumerate() {
         let item = format!(" {} {};", n.id, crate::util::truncate_chars(&crate::util::one_line(&n.title), PREF_TITLE_MAX));
         let more = prefs.len() - i;
-        if s.chars().count() + item.chars().count() > PREFS_LINE_MAX - 12 && more > 1 {
+        if s.chars().count() + item.chars().count() > room && more > 1 {
             s.push_str(&format!(" +{more} more"));
-            return s;
+            break;
         }
         s.push_str(&item);
     }
-    s.trim_end_matches(';').to_string()
+    let s = s.trim_end_matches(';');
+    if prefs.is_empty() { format!("{s}{}", tail.trim_start_matches(',')) } else { format!("{s}{tail}") }
 }
 
 pub fn project_add(v: &Vault, slug: &str, name: Option<&str>, description: Option<&str>, paths: &[String]) -> Result<(Project, bool)> {

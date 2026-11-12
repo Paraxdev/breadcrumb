@@ -65,7 +65,7 @@ fn handshake_list_add_search() {
         ["add", "append", "backlog", "claim", "context", "delete", "doctor", "get", "kinds", "land", "link", "list", "map", "merge", "move", "next", "project", "question", "search", "sync", "update", "workflow"]
     );
     let size = serde_json::to_string(&out[1]["result"]).unwrap().len();
-    assert!(size < 9200, "tools/list is {size} chars");
+    assert!(size < 9300, "tools/list is {size} chars");
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
         assert!(t["inputSchema"]["properties"].is_object(), "{}", t["name"]);
@@ -226,7 +226,7 @@ fn compact_rows_and_write_acks() {
     assert!(text(&out[4]).starts_with("updated "));
     assert_eq!(v.get(&a.id).unwrap().tags, vec!["y".to_string()]);
     let ctx = text(&out[6]);
-    assert!(ctx.starts_with("breadcrumb context: app\n") && ctx.contains("\nKinds:\n") && ctx.contains("Recent (14 of "), "{ctx}");
+    assert!(ctx.starts_with("breadcrumb context: app\n") && ctx.contains("\nKinds:\n") && ctx.contains("Recent (15 of "), "{ctx}");
     assert!(!ctx.contains("\n\n") && !ctx.contains('#'), "{ctx}");
 }
 
