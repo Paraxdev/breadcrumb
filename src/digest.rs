@@ -291,9 +291,12 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     }
     let mut backlog = crate::backlog::context_section(&notes, &all);
     if crate::config::agent_review(v) {
-        let waiting = notes.iter().filter(|n| crate::backlog::is_item(n) && crate::backlog::state(n) == "review").count();
-        if waiting > 0 {
-            writeln!(backlog, "Review: {waiting} waiting for an agent check (review_by = agent), `breadcrumb review` lists the steps, check only what you did not build")?;
+        let (users, waiting): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| crate::backlog::is_item(n) && crate::backlog::state(n) == "review").partition(|n| crate::backlog::only_user_steps_open(n));
+        let user = if users.is_empty() { String::new() } else { format!(", {} waiting for the user", users.len()) };
+        if !waiting.is_empty() {
+            writeln!(backlog, "Review: {} waiting for an agent check{user} (review_by = agent), `breadcrumb review` lists the steps, check only what you did not build", waiting.len())?;
+        } else if !users.is_empty() {
+            writeln!(backlog, "Review: 0 waiting for an agent check{user} (review_by = agent), the user passes them on the Review page of `breadcrumb serve`")?;
         }
     }
     for l in crate::judge::digest_lines(v, project, &all) {

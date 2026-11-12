@@ -507,7 +507,7 @@ pub enum Cmd {
         /// Also mark acceptance criteria met: all, or positions like 2,3
         #[arg(long, value_name = "WHICH")]
         check: Option<String>,
-        /// Moving to review, what the user should try (repeatable)
+        /// Moving to review, what the reviewer should try (repeatable). A step starting with user: is for the user alone, agents never run it. On an item already in review the steps given replace its open ones
         #[arg(long = "step", alias = "steps", value_name = "TEXT", allow_hyphen_values = true)]
         steps: Vec<String>,
         /// One line for the release notes, `ship` prints it
@@ -661,11 +661,11 @@ pub enum ConfigCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum ReviewCmd {
-    /// It works: move to done and mark its steps met
+    /// It works: move to done and mark its steps met. When agents review, an agent's pass leaves open user: steps for the user
     Pass {
         /// Item id or slug
         id: String,
-        /// Who did it, for the history (default: this session), a reviewer subagent names itself here
+        /// Who did it, for the history (default: this session), a reviewer subagent names itself here, user is the user's own pass
         #[arg(long)]
         by: Option<String>,
         /// What you ran and what you saw, added to the body, required when review_by is agent
@@ -1736,7 +1736,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
             let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, ..Default::default() };
-            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "hints": r.hints, "note": r.note.to_json()});
+            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "replaced_steps": r.replaced, "waiting_for_user": waiting_json(r), "note": r.note.to_json()});
             if let [id] = ids.as_slice() {
                 let r = backlog::move_item(&open()?, id, req)?;
                 out.emit(backlog::move_text(&r), moved_json(&r));
@@ -1845,7 +1845,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 Some(ReviewCmd::Pass { id, by, evidence }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by, evidence, by_user: false })?,
                 Some(ReviewCmd::Fail { id, reason, by, evidence }) => backlog::review_fail(&v, &id, &reason, backlog::ReviewBy { by, evidence, by_user: false })?,
             };
-            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "note": r.note.to_json()}));
+            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "waiting_for_user": waiting_json(&r), "note": r.note.to_json()}));
         }
         Cmd::Check { id, which } => {
             let (n, changed) = backlog::check(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?)?;
@@ -1901,6 +1901,10 @@ running MCP and serve processes keep the old version until their client restarts
         }
     }
     Ok(0)
+}
+
+fn waiting_json(r: &backlog::MoveResult) -> Json {
+    Json::Array(r.waiting_for_user.iter().map(|(i, c)| json!({"step": i, "text": c})).collect())
 }
 
 fn release_cmd(out: &Out, v: &Vault, cwd: &Path, id: &str, by: Option<&str>, force: bool) -> Result<()> {

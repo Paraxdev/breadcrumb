@@ -360,16 +360,19 @@ impl Server {
                 };
                 let req = MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note") };
                 let r = backlog::move_item(&v, &id, req)?;
+                if let Some(w) = backlog::user_wait_text(&r) {
+                    return Ok(w.trim_end().to_string());
+                }
                 let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.handle(), r.to) };
                 if !r.unmet.is_empty() {
                     let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
                     out.push_str(&format!("\nwarning, acceptance criteria not marked [x], tick with move check \"all\" or \"2,3\": {}", unmet.join("; ")));
                 }
+                if r.replaced > 0 {
+                    out.push_str(&format!("\nreplaced {} open steps with the ones given, ticked ones stay", r.replaced));
+                }
                 for w in &r.warnings {
                     out.push_str(&format!("\nwarning: {w}"));
-                }
-                for h in &r.hints {
-                    out.push_str(&format!("\nhint: {h}"));
                 }
                 Ok(out)
             }
@@ -741,7 +744,7 @@ pub fn tool_defs() -> Vec<Value> {
             "resolution": {"type": "string", "description": "for rejected"},
             "shipped_in": st(),
             "check": {"type": "string", "description": "tick: all or 2,3"},
-            "steps": {"type": "array", "items": st(), "description": "review: what to try"},
+            "steps": {"type": "array", "items": st(), "description": "review: what to try, user: prefix = user only"},
             "verdict": {"type": "string", "enum": ["pass", "fail"]},
             "evidence": st(),
             "release_note": st(),
