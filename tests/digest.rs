@@ -139,7 +139,7 @@ fn the_digest_fits_its_budget_with_every_pin_and_a_cut_handoff() {
     assert!(ctx.contains(&format!("... (get {} for more)\n", h.id)) && ctx.contains("- step 0 of"), "{ctx}");
     assert!(ctx.contains("Recent (") && ctx.contains("Fact 29"), "recent notes still get room: {ctx}");
 
-    let small = ops::context_with(&v, Some("app"), ContextOpts { budget: 2000, ..Default::default() }).unwrap();
+    let small = ops::context_with(&v, Some("app"), ContextOpts { budget: Some(2000), ..Default::default() }).unwrap();
     assert!(small.contains("more pinned: ") && small.contains(&h.id), "{small}");
 }
 
