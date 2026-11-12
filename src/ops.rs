@@ -168,7 +168,7 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
             }
             continue;
         }
-        if key == crate::note::VERIFIED_KEY || key == crate::note::PIN_VERIFIED_KEY {
+        if key == crate::note::VERIFIED_KEY || key == crate::note::VERIFIED_AT_KEY || key == crate::note::PIN_VERIFIED_KEY {
             bail!("'{key}' is set by breadcrumb, use verify to mark a note as still accurate");
         }
         if key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY {
@@ -1134,7 +1134,7 @@ pub fn define_kind(v: &Vault, def: KindDef, replace: bool, remove_fields: &[Stri
         bail!("invalid kind name '{}', use lowercase letters, digits, '-' or '_'", def.name);
     }
     for f in &def.fields {
-        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY, crate::note::PIN_VERIFIED_KEY, crate::note::REFS_KEY, crate::note::EXPIRES_KEY].contains(&f.name.as_str()) {
+        if RESERVED_KEYS.contains(&f.name.as_str()) || [crate::note::PATHS_KEY, crate::note::VERIFIED_KEY, crate::note::VERIFIED_AT_KEY, crate::note::PIN_VERIFIED_KEY, crate::note::REFS_KEY, crate::note::EXPIRES_KEY].contains(&f.name.as_str()) {
             bail!("field name '{}' is reserved for note metadata", f.name);
         }
         if f.ty == kind::FieldType::Enum && f.values.is_empty() {

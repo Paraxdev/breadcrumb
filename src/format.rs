@@ -344,6 +344,7 @@ pub fn note_compact(n: &Note, full: bool) -> String {
     }
     let updated = fmt_date(&n.updated);
     drop(&mut m, crate::note::VERIFIED_KEY, &|v: &Y| v.as_str() == Some(updated.as_str()));
+    drop(&mut m, crate::note::VERIFIED_AT_KEY, &|_: &Y| true);
     let refs = Y::String(crate::note::REFS_KEY.into());
     if let Some(Y::Sequence(_)) = m.get(&refs) {
         m.insert(refs, Y::String(n.refs().join(" ")));

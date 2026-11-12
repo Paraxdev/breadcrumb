@@ -17,6 +17,8 @@ pub const DEFAULT_REL: &str = "relates";
 /// Optional fields breadcrumb itself maintains: file globs a note applies to, and the date it was last confirmed.
 pub const PATHS_KEY: &str = "paths";
 pub const VERIFIED_KEY: &str = "verified";
+/// The time of the last verify or write, beside the `verified` day that older binaries and the stale check read.
+pub const VERIFIED_AT_KEY: &str = "verified_at";
 /// The date only `verify` sets, `verified` moves on every write so it says nothing about a pin's age.
 pub const PIN_VERIFIED_KEY: &str = "pin_verified";
 /// Typed pointers to things outside the vault, `type:value` like commit:abc123, run:wf_1, branch:fix/x, pr:12.
@@ -447,7 +449,16 @@ impl Note {
     }
 
     pub fn mark_verified(&mut self) {
-        self.set_field(VERIFIED_KEY, Value::String(crate::util::fmt_date(&now())));
+        let t = now();
+        self.set_field(VERIFIED_KEY, Value::String(crate::util::fmt_date(&t)));
+        self.set_field(VERIFIED_AT_KEY, Value::String(fmt_time(&t)));
+    }
+
+    /// `verified_at` only while it falls on the `verified` day, so a day set by hand, or by an older binary that
+    /// keeps the key without stamping it, wins.
+    pub fn verified_at(&self) -> Option<DateTime<Utc>> {
+        let t = self.field(VERIFIED_AT_KEY).and_then(yaml_scalar_string).and_then(|s| parse_time(&s))?;
+        (t.date_naive() == self.verified()?.date_naive()).then_some(t)
     }
 
     /// When someone last checked this pin on purpose, a note never verified counts from its creation.

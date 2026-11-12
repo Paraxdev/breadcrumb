@@ -46,15 +46,31 @@ fn commit(dir: &Path, file: &str, msg: &str, at: DateTime<Utc>) -> String {
     common::git(dir, &["rev-parse", "--short", "HEAD"])
 }
 
-/// A gotcha with `globs`, created, written and verified `age` days ago.
+/// A gotcha with `globs`, created, written and verified `age` days ago, with only the `verified` day older binaries write.
 fn note(v: &Vault, project: Option<&str>, title: &str, globs: &[&str], age: i64) -> Note {
     let req = breadcrumb::ops::AddReq { title: title.into(), kind: Some("gotcha".into()), project: project.map(Into::into), body: Some(format!("{title} body")), paths: globs.iter().map(|g| g.to_string()).collect(), ..Default::default() };
     let mut n = breadcrumb::ops::add(v, req).unwrap();
     n.created = days_ago(age);
     n.updated = days_ago(age);
     n.set_field("verified", serde_yaml::Value::String(breadcrumb::util::fmt_date(&days_ago(age))));
+    n.unset_field("verified_at");
     v.write_note(&mut n).unwrap();
     v.get(&n.id).unwrap()
+}
+
+fn tick() {
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+}
+
+fn today_start() -> DateTime<Utc> {
+    breadcrumb::util::now().date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc()
+}
+
+/// The rules are about the UTC day, keep clear of midnight so `today` is the day writes stamp.
+fn away_from_midnight() {
+    if breadcrumb::util::now() - today_start() < Duration::seconds(30) {
+        std::thread::sleep(std::time::Duration::from_secs(31));
+    }
 }
 
 fn crumb(e: &Env, args: &[&str]) -> String {
@@ -106,33 +122,64 @@ fn get_counts_commits_touching_the_globs_since_the_note_was_verified() {
 }
 
 #[test]
-fn verify_resets_the_count_and_its_day_counts_from_the_start() {
+fn verify_clears_the_line_at_once_and_a_later_commit_brings_it_back() {
+    away_from_midnight();
     let e = setup();
-    // The rule is about the UTC day, keep clear of midnight so `today` below is the day verify stamps.
-    let now = breadcrumb::util::now();
-    let start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-    if now - start < Duration::seconds(30) {
-        std::thread::sleep(std::time::Duration::from_secs(31));
-    }
-    let start = breadcrumb::util::now().date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let today = breadcrumb::util::fmt_date(&today_start());
     commit(&e.work, "src/a.rs", "base", days_ago(20));
     let n = note(&e.v, Some("app"), "Parser keeps state", &["src/*.rs"], 10);
-    commit(&e.work, "src/a.rs", "parser rewrite", days_ago(5));
+    commit(&e.work, "src/a.rs", "parser rewrite", breadcrumb::util::now());
     assert!(get(&e, &n.id).contains("paths changed: 1 commit"), "{}", get(&e, &n.id));
+    assert!(crumb(&e, &["doctor"]).contains("paths changed: 1 commit"));
 
+    tick();
     crumb(&e, &["verify", &n.id]);
-    assert!(!get(&e, &n.id).contains("paths changed"), "verify resets the count: {}", get(&e, &n.id));
+    let stored = e.v.get(&n.id).unwrap();
+    let at = stored.field("verified_at").and_then(breadcrumb::note::yaml_scalar_string).unwrap();
+    assert!(at.starts_with(&format!("{today}T")) && at.ends_with('Z') && stored.verified_at().is_some(), "{at}");
+    assert!(!get(&e, &n.id).contains("paths changed"), "a verify the same day clears it at once: {}", get(&e, &n.id));
+    assert!(!crumb(&e, &["doctor"]).contains("paths changed"));
 
-    // A commit dated on the verify day before the verify still counts, a day has no time to tell it apart from a
-    // commit made after the verify that day.
-    let early = commit(&e.work, "src/b.rs", "early today", start + Duration::seconds(1));
+    tick();
+    let later = commit(&e.work, "src/b.rs", "after verify", breadcrumb::util::now());
+    let line = format!("paths changed: 1 commit since verified {today}, newest {later} \"after verify\"\n");
+    assert!(get(&e, &n.id).ends_with(&line), "{}", get(&e, &n.id));
+    assert!(crumb(&e, &["doctor"]).contains(&format!("{}, reread it", line.trim_end())));
+
+    tick();
+    crumb(&e, &["update", &n.id, "--body", "Parser keeps state across files"]);
+    assert!(!get(&e, &n.id).contains("paths changed"), "an update verifies too: {}", get(&e, &n.id));
+    assert!(!crumb(&e, &["doctor"]).contains("paths changed"));
+    let refused = Command::new(env!("CARGO_BIN_EXE_crumb")).args(["update", &n.id, "--field", "verified_at=2026-01-01T00:00:00Z"]).current_dir(&e.work).env("BREADCRUMB_HOME", &e.v.root).output().unwrap();
+    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("'verified_at' is set by breadcrumb"));
+}
+
+#[test]
+fn a_note_with_only_the_verified_day_counts_from_the_start_of_that_day() {
+    away_from_midnight();
+    let e = setup();
+    let start = today_start();
     let today = breadcrumb::util::fmt_date(&start);
-    assert!(get(&e, &n.id).ends_with(&format!("paths changed: 1 commit since verified {today}, newest {early} \"early today\"\n")), "{}", get(&e, &n.id));
-    let later = commit(&e.work, "src/a.rs", "after verify", breadcrumb::util::now());
-    assert!(get(&e, &n.id).ends_with(&format!("paths changed: 2 commits since verified {today}, newest {later} \"after verify\"\n")), "{}", get(&e, &n.id));
+    commit(&e.work, "src/a.rs", "base", days_ago(20));
+    let mut n = note(&e.v, Some("app"), "Parser keeps state", &["src/*.rs"], 10);
+    n.set_field("verified", serde_yaml::Value::String(today.clone()));
+    e.v.write_note(&mut n).unwrap();
+    commit(&e.work, "src/a.rs", "parser rewrite", days_ago(5));
+    assert!(!get(&e, &n.id).contains("paths changed"), "{}", get(&e, &n.id));
+
+    // A day has no time to tell a commit made earlier that day apart from one made after the verify, so it counts.
+    let early = commit(&e.work, "src/b.rs", "early today", start + Duration::seconds(1));
+    let line = format!("paths changed: 1 commit since verified {today}, newest {early} \"early today\"\n");
+    assert!(get(&e, &n.id).ends_with(&line), "{}", get(&e, &n.id));
+
+    // A `verified_at` on another day than `verified`, from a hand edit or an older binary's write, is not used.
+    n.set_field("verified_at", serde_yaml::Value::String(breadcrumb::util::fmt_time(&breadcrumb::util::now())));
+    n.set_field("verified", serde_yaml::Value::String(date(3)));
+    e.v.write_note(&mut n).unwrap();
+    assert!(get(&e, &n.id).contains(&format!("paths changed: 1 commit since verified {}, newest {early}", date(3))), "{}", get(&e, &n.id));
 
     // A note written today never counts commits from before it existed.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    tick();
     let fresh = breadcrumb::ops::add(&e.v, breadcrumb::ops::AddReq { title: "Fresh parser note".into(), kind: Some("gotcha".into()), project: Some("app".into()), paths: vec!["src/*.rs".into()], ..Default::default() }).unwrap();
     assert!(!get(&e, &fresh.id).contains("paths changed"), "{}", get(&e, &fresh.id));
 }

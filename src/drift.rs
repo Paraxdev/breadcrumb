@@ -34,12 +34,12 @@ fn commits(k: usize) -> String {
     if k == 1 { "1 commit".into() } else { format!("{k} commits") }
 }
 
-/// Commits after this time count. `verified` is a day, so the day's start (UTC) is taken: commits from earlier that day
-/// count too, rather than hiding commits made after a verify later that day. Commits before the note was created never
-/// count. A note without `verified` counts from `updated`.
+/// Commits after this time count: `verified_at`, else the start (UTC) of the `verified` day, which is all notes from
+/// older binaries have, so commits from earlier that day count rather than hiding ones made after a verify later that
+/// day, though never before the note was created. A note without `verified` counts from `updated`.
 pub fn since(n: &Note) -> (DateTime<Utc>, String) {
     match n.verified() {
-        Some(day) => (day.max(n.created), format!("verified {}", fmt_date(&day))),
+        Some(day) => (n.verified_at().unwrap_or(day.max(n.created)), format!("verified {}", fmt_date(&day))),
         None => (n.updated, format!("updated {}", fmt_date(&n.updated))),
     }
 }
