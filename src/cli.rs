@@ -166,7 +166,7 @@ pub enum Cmd {
         /// Only backlog items that are not closed
         #[arg(long)]
         open_only: bool,
-        /// Only this project
+        /// Only this project, or all or global
         #[arg(long, short = 'p')]
         project: Option<String>,
         /// Write the names, without it only print them
@@ -354,9 +354,10 @@ pub enum Cmd {
     /// Capture an idea quickly
     Idea {
         /// One line title
+        #[arg(allow_hyphen_values = true)]
         title: String,
         /// Body text
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         body: Option<String>,
         /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
@@ -1119,7 +1120,7 @@ pub enum RemoteCmd {
 #[derive(Args, Debug)]
 pub struct AddArgs {
     /// Short specific title, or give it with --title
-    #[arg(value_name = "TITLE", required_unless_present = "title_flag", conflicts_with = "title_flag")]
+    #[arg(value_name = "TITLE", required_unless_present = "title_flag", conflicts_with = "title_flag", allow_hyphen_values = true)]
     pub title: Option<String>,
     /// Short specific title, the same as the positional one
     #[arg(long = "title", short = 't', value_name = "TITLE")]
@@ -1402,6 +1403,9 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Project(pc) => project_cmd(&out, &open()?, pc, &cwd)?,
         Cmd::Add(a) => {
+            if let Some(t) = &a.title {
+                not_a_flag(t, "add <flags>")?;
+            }
             let v = open()?;
             let project = ops::target_project(&v, a.project.as_deref(), a.global, &cwd)?;
             let new_project = match &project {
@@ -1531,6 +1535,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     refs: u.refs,
                     slug: u.slug,
                     supersedes: u.supersedes.clone(),
+                    by_user: !backlog::in_session(),
                     ..Default::default()
                 },
             )?;
@@ -1539,17 +1544,20 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(format!("updated {}  {}{}{ignored}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
         }
         Cmd::Append { id, text, .. } => {
+            not_a_flag(&text, &format!("append {id}"))?;
             let text = read_body_arg(Some(text), None)?.unwrap_or_default();
             let n = ops::append(&open()?, &id, &text)?;
             out.emit(format!("appended to {}  {}", n.id, n.title), n.to_json());
         }
         Cmd::Slugs { backfill, open_only, project, yes } => {
             let v = open()?;
+            let sel = ScopeArgs { project, ..Default::default() }.sel();
+            let opts = crate::slug::Backfill { open_only, project: sel.project.map(|p| p.trim().to_string()), global: sel.global, write: yes };
             if backfill {
-                let named = crate::slug::backfill(&v, &crate::slug::Backfill { open_only, project, write: yes })?;
+                let named = crate::slug::backfill(&v, &opts)?;
                 out.emit(crate::slug::backfill_text(&named, yes), Json::Array(named.iter().map(|n| json!({"slug": n.slug(), "id": n.id, "title": n.title})).collect()));
             } else {
-                let named: Vec<_> = v.load_notes().into_iter().filter(|n| n.slug().is_some() && project.as_ref().is_none_or(|p| n.project.as_ref() == Some(p))).collect();
+                let named: Vec<_> = v.load_notes().into_iter().filter(|n| n.slug().is_some() && opts.covers(n)).collect();
                 let text: Vec<String> = named.iter().map(|n| format!("{}  {}", n.handle(), crate::format::short_title(&n.title))).collect();
                 out.emit(text.join("\n"), Json::Array(named.iter().map(|n| json!({"slug": n.slug(), "id": n.id, "title": n.title})).collect()));
             }
@@ -1734,7 +1742,8 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Doctor { severity, scope, .. } => {
             let v = open()?;
             let min = severity.as_deref().map(crate::doctor::parse_severity).transpose()?;
-            let sc = crate::doctor::scope_of(&v, scope.project.as_deref(), scope.global, scope.all, &cwd)?;
+            let sel = scope.sel();
+            let sc = crate::doctor::scope_of(&v, sel.project.as_deref(), sel.global, sel.all, &cwd)?;
             let run = crate::doctor::run_at(&v, &sc, crate::importer::default_claude_dir().as_deref(), &cwd);
             let errors = run.errors();
             out.emit(run.text(min, "`--all`"), json!({"notes": run.checked, "scope": sc.label(), "errors": errors, "problems": run.shown(min)}));
@@ -1746,6 +1755,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Guide => out.emit(crate::guide::AGENTS_MD, json!({"guide": crate::guide::AGENTS_MD})),
         Cmd::Idea { title, body, project, global, tags } => {
+            not_a_flag(&title, "idea <flags>")?;
             let v = open()?;
             let project = ops::target_project(&v, project.as_deref(), global, &cwd)?;
             let body = read_body_arg(body, None)?;
@@ -1765,15 +1775,23 @@ pub fn run(cli: Cli) -> Result<i32> {
             let states = states.iter().map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).map(|s| if s == backlog::BUILDING || s == backlog::WAITING { Ok(s) } else { backlog::check_state(&s).map_err(|e| anyhow::anyhow!("{e}, {} or {}", backlog::BUILDING, backlog::WAITING)) }).collect::<Result<Vec<_>>>()?;
             let include_closed = include_closed || states.iter().any(|s| backlog::is_closed(s));
             let mut cols = backlog::board(&v, &sc, &BoardFilter { kind, assignee, include_closed })?;
+            let shown = |c: &backlog::Column| states.contains(&c.state);
+            let elsewhere: Vec<String> = cols.iter().filter(|c| !shown(c)).filter_map(|c| Some(c.items.iter().filter(|i| states.contains(&i.state)).count()).filter(|k| *k > 0).map(|k| format!("{} ({k})", c.state))).collect();
             if !states.is_empty() {
-                cols.retain(|c| states.contains(&c.state));
+                cols.retain(shown);
             }
             let text = if !states.is_empty() && cols.iter().all(|c| c.items.is_empty()) {
                 let named = match states.split_last() {
                     Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
                     _ => states.join(""),
                 };
-                format!("# Board: {}\n\nNo items in {named}, without --state the board shows every column\n", sc.label())
+                let tail = if elsewhere.is_empty() {
+                    "without --state the board shows every column".to_string()
+                } else {
+                    let cols: Vec<&str> = elsewhere.iter().map(|e| e.split(' ').next().unwrap_or_default()).collect();
+                    format!("its {named} items sit in the {} column{}, add {} to --state", elsewhere.join(" and "), if elsewhere.len() == 1 { "" } else { "s" }, cols.join(","))
+                };
+                format!("# Board: {}\n\nNo items in {named}, {tail}\n", sc.label())
             } else {
                 backlog::board_text(&cols, &sc.label())
             };
@@ -1832,7 +1850,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Claim { id, by, force, release: true, project } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force, project.as_deref())?,
         Cmd::Claim { id, by, force, release: false, project } => {
             let v = open()?;
-            if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, track_project(&v, project.as_deref(), &cwd).as_deref(), by.as_deref(), false, force)? {
+            if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, track_project(&v, &id, project.as_deref(), &cwd)?.as_deref(), by.as_deref(), false, force)? {
                 out.emit(crate::lifecycle::take_text(&h, false), h.to_json());
             } else {
                 let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
@@ -1901,8 +1919,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, ..Default::default() };
-            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "replaced_steps": r.replaced, "waiting_for_user": waiting_json(r), "note": r.note.to_json()});
+            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, by_user: !backlog::in_session(), ..Default::default() };
+            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "replaced_steps": r.replaced, "waiting_for_user": waiting_json(r), "left_for_user": steps_json(&r.kept_for_user), "note": r.note.to_json()});
             if let [id] = ids.as_slice() {
                 let r = backlog::move_item(&open()?, id, req)?;
                 out.emit(backlog::move_text(&r), moved_json(&r));
@@ -1951,12 +1969,13 @@ pub fn run(cli: Cli) -> Result<i32> {
                 let line = e.lines().next().unwrap_or_default().to_string();
                 anyhow::anyhow!("could not read {range} in {}, nothing moved: {line}", repo.display())
             })?;
-            let report = crate::ship::report(&v, &slug, &commits)?;
+            let by_user = !backlog::in_session();
+            let report = crate::ship::report(&v, &slug, &commits, by_user)?;
             let mut text = crate::ship::text(&report, &range, &repo);
             let mut data = crate::ship::json(&report, &range, &repo);
             if yes {
                 let ids: Vec<String> = report.open.iter().map(|n| n.id.clone()).collect();
-                let moved = backlog::ship_items(&v, &ids, shipped_in.as_deref(), by.as_deref())?;
+                let moved = backlog::ship_items(&v, &ids, shipped_in.as_deref(), by.as_deref(), by_user)?;
                 text.push_str(&crate::ship::unchecked_text(&report));
                 text.push_str(&format!("\nMoved {} items to shipped in one vault commit\n", moved.len()));
                 data["moved"] = json!(moved.len());
@@ -2013,6 +2032,9 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Config { action, project } => {
             let mut v = open()?;
             let p = project.as_deref();
+            if let Some(w) = p.map(str::trim).filter(|p| ops::RESERVED_SLUGS.iter().any(|r| p.eq_ignore_ascii_case(r))) {
+                bail!("config has no {w} scope, drop -p for the vault's settings or name one project with -p <slug>");
+            }
             match action {
                 None => {
                     let list = crate::config::settings(&v, p)?;
@@ -2060,8 +2082,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "waiting_for_user": waiting_json(&r), "note": r.note.to_json()}));
         }
         Cmd::Check { id, which, .. } => {
-            let (n, changed) = backlog::check(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?)?;
-            out.emit(backlog::check_text(&n, changed), json!({"ticked": changed, "unmet_acceptance": backlog::unmet_acceptance(&n), "note": n.to_json()}));
+            let backlog::Checked { note: n, ticked, kept_for_user: kept } = backlog::check_as(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?, !backlog::in_session())?;
+            let text = format!("{}\n{}", backlog::check_text(&n, &ticked), backlog::kept_for_user_text(&n.id, &kept));
+            out.emit(text.trim_end(), json!({"ticked": ticked.len(), "ticked_steps": ticked, "unmet_acceptance": backlog::unmet_acceptance(&n), "left_for_user": steps_json(&kept), "note": n.to_json()}));
         }
         Cmd::Tree { id, .. } => {
             let text = backlog::tree(&open()?, &id)?;
@@ -2116,19 +2139,29 @@ running MCP and serve processes keep the old version until their client restarts
 }
 
 fn waiting_json(r: &backlog::MoveResult) -> Json {
-    Json::Array(r.waiting_for_user.iter().map(|(i, c)| json!({"step": i, "text": c})).collect())
+    steps_json(&r.waiting_for_user)
 }
 
-fn track_project(v: &Vault, project: Option<&str>, cwd: &Path) -> Option<String> {
-    match project.map(str::trim) {
-        Some(p) if p.eq_ignore_ascii_case("global") => None,
-        Some(p) => Some(p.to_string()),
-        None => v.detect_project(cwd),
+fn steps_json(steps: &[(usize, String)]) -> Json {
+    Json::Array(steps.iter().map(|(i, c)| json!({"step": i, "text": c})).collect())
+}
+
+/// Text args take a leading hyphen, so one that reads like a long flag is taken for a mistyped flag unless a lone `--` came first.
+fn not_a_flag(text: &str, usage: &str) -> Result<()> {
+    let flag = text.split([' ', '=', '\n']).next().unwrap_or_default();
+    let looks = flag.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()));
+    if looks && !std::env::args().any(|a| a == "--") {
+        bail!("unknown flag {flag}, text that starts with -- goes last, after a lone --: `breadcrumb {usage} -- \"{flag} ...\"`");
     }
+    Ok(())
+}
+
+fn track_project(v: &Vault, id: &str, project: Option<&str>, cwd: &Path) -> Result<Option<String>> {
+    ops::track_project(v, id, project, false, cwd)
 }
 
 fn release_cmd(out: &Out, v: &Vault, cwd: &Path, id: &str, by: Option<&str>, force: bool, project: Option<&str>) -> Result<()> {
-    if let Some(h) = crate::lifecycle::claim_handoff(v, id, track_project(v, project, cwd).as_deref(), by, true, force)? {
+    if let Some(h) = crate::lifecycle::claim_handoff(v, id, track_project(v, id, project, cwd)?.as_deref(), by, true, force)? {
         out.emit(crate::lifecycle::take_text(&h, true), h.to_json());
         return Ok(());
     }

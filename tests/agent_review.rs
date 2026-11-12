@@ -230,3 +230,88 @@ fn digest_counts_items_left_with_user_steps_as_waiting_for_the_user() {
     let d = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
     assert!(d.contains("Review: 1 waiting for an agent check, 1 waiting for the user (review_by = agent), `breadcrumb review`"), "{d}");
 }
+
+fn crumb_in_session(v: &Vault, args: &[&str]) -> (bool, String, String) {
+    let o = Command::new(env!("CARGO_BIN_EXE_crumb")).args(args).env("BREADCRUMB_HOME", &v.root).env_remove("CLAUDE_CODE_SESSION_ID").env("BREADCRUMB_SESSION", "night-shift").output().unwrap();
+    (o.status.success(), String::from_utf8_lossy(&o.stdout).to_string(), String::from_utf8_lossy(&o.stderr).to_string())
+}
+
+#[test]
+fn a_session_check_leaves_user_steps_open_where_agents_review() {
+    let (_d, mut v) = common::vault();
+    agents(&mut v);
+    let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
+    user_steps(&v, &a.id);
+
+    let (ok, _, err) = crumb_in_session(&v, &["check", &a.id, "2"]);
+    assert!(!ok && err.contains(&format!("step 2 of {} is the user's (USER: install it on the laptop), only the user ticks it, on the Review page of `breadcrumb serve`", a.id)), "{err}");
+    let (ok, _, err) = crumb_in_session(&v, &["move", &a.id, "review", "--check", "1,2"]);
+    assert!(!ok && err.contains("is the user's"), "move --check is held the same: {err}");
+    assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()).len(), 3, "refusals tick nothing");
+
+    let (ok, out, err) = crumb_in_session(&v, &["check", &a.id, "all"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(&format!("{}: ticked steps 1, 3, still open: 2. USER: install it on the laptop\n", a.id)) && out.contains(&format!("left open for the user: 2. USER: install it on the laptop, only the user ticks these, with a pass on the Review page of `breadcrumb serve` or `breadcrumb check {} 2` in a terminal of their own", a.id)), "{out}");
+    let r = backlog::review_pass(&v, &a.id, by("reviewer", Some("ran it"))).unwrap();
+    assert_eq!(r.to, "review", "check all then an agent pass no longer reaches done past the user's step");
+
+    let (ok, out, err) = crumb(&v, &["check", &a.id, "2"]);
+    assert!(ok && !out.contains("left open"), "the user's terminal ticks it: {err}");
+    assert!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()).is_empty());
+
+    let b = common::add(&v, "Other", "feature", Some("app"), &[]);
+    user_steps(&v, &b.id);
+    let r = backlog::move_item(&v, &b.id, MoveReq { state: "review".into(), check: Some(backlog::Check::All), ..Default::default() }).unwrap();
+    assert_eq!(r.kept_for_user.len(), 1, "the MCP move check is a session's");
+    assert!(backlog::move_text(&r).contains("left open for the user: 2."), "{}", backlog::move_text(&r));
+
+    let mut v2 = v.clone();
+    breadcrumb::config::set(&mut v2, "review_by", "user").unwrap();
+    let c = common::add(&v2, "Third", "feature", Some("app"), &[]);
+    user_steps(&v2, &c.id);
+    let (ok, out, _) = crumb_in_session(&v2, &["check", &c.id, "all"]);
+    assert!(ok && out.contains("ticked steps 1, 2, 3, all acceptance criteria met") && !out.contains("left open"), "with review_by user a user: step is a plain step: {out}");
+}
+
+#[test]
+fn a_session_cannot_close_an_item_waiting_for_review_without_a_verdict() {
+    let (_d, mut v) = common::vault();
+    agents(&mut v);
+    let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
+    let b = common::add(&v, "Other", "feature", Some("app"), &[]);
+    built_by(&v, &a.id, "builder");
+    built_by(&v, &b.id, "builder");
+    let waits = format!("{} is in review and waits for a check (review_by = agent), `breadcrumb review pass {} --by <name> --evidence \"...\"` (MCP move with verdict pass and evidence)", a.id, a.id);
+
+    for state in ["done", "shipped"] {
+        let (ok, _, err) = crumb_in_session(&v, &["move", &a.id, state]);
+        assert!(!ok && err.contains(&waits), "{state}: {err}");
+    }
+    let (ok, out, _) = crumb_in_session(&v, &["move", &a.id, &b.id, "done"]);
+    assert!(!ok && out.contains(&format!("failed {}: {waits}", a.id)), "a batch move holds each: {out}");
+    let (ok, _, err) = crumb_in_session(&v, &["update", &a.id, "--field", "state=done"]);
+    assert!(!ok && err.contains(&waits), "{err}");
+    let e = backlog::move_item(&v, &a.id, MoveReq { state: "done".into(), ..Default::default() }).unwrap_err().to_string();
+    assert_eq!(e, waits, "the MCP move is a session's");
+    let e = breadcrumb::ops::update(&v, &a.id, breadcrumb::ops::UpdateReq { fields: vec![("state".into(), breadcrumb::ops::FieldInput::Raw("shipped".into()))], ..Default::default() }).unwrap_err().to_string();
+    assert_eq!(e, waits, "and so is the MCP update");
+    assert_eq!(backlog::state(&v.get(&a.id).unwrap()), "review");
+
+    let commits = [breadcrumb::ship::Commit { sha: "abcdef1234567".into(), merge: true, subject: "merge".into() }];
+    breadcrumb::ops::update(&v, &a.id, breadcrumb::ops::UpdateReq { refs: vec!["commit:abcdef1234567".into()], ..Default::default() }).unwrap();
+    let r = breadcrumb::ship::report(&v, "app", &commits, false).unwrap();
+    assert!(r.open.is_empty() && r.not_landed[0].1.starts_with("waits for a check"), "ship leaves it in review for a session: {:?}", r.not_landed);
+    assert!(backlog::ship_items(&v, std::slice::from_ref(&a.id), None, None, false).unwrap().is_empty());
+    assert_eq!(breadcrumb::ship::report(&v, "app", &commits, true).unwrap().open.len(), 1, "the user ships it");
+
+    let (ok, _, err) = crumb_in_session(&v, &["move", &a.id, "queued"]);
+    assert!(ok, "other moves are free: {err}");
+    let (ok, _, err) = crumb(&v, &["move", &b.id, "done"]);
+    assert!(ok, "the user's terminal may close it: {err}");
+
+    let c = common::add(&v, "Mine", "feature", Some("app"), &[]);
+    user_steps(&v, &c.id);
+    backlog::review_pass(&v, &c.id, by("reviewer", Some("ran it"))).unwrap();
+    let (ok, _, err) = crumb_in_session(&v, &["move", &c.id, "done"]);
+    assert!(!ok && err.contains("waits for the user's steps") && err.contains(&format!("`breadcrumb review pass {} --by user`", c.id)), "{err}");
+}

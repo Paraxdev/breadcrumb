@@ -95,7 +95,7 @@ function card(it) {
     acts.before(reason); reason.focus();
   };
   const steps = it.steps.length
-    ? h("ol", {}, it.steps.map((s) => h("li", { text: s })))
+    ? h("ol", {}, it.steps.map((s, i) => h("li", { value: String((it.step_positions || [])[i] || i + 1), text: s })))
     : h("div", { class: "hint", text: "No steps recorded, ask the agent that built it what to try." });
   return h("div", { class: "card" },
     h("div", { class: "meta" },

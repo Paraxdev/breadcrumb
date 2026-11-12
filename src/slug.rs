@@ -239,7 +239,18 @@ pub fn rename(v: &Vault, n: &mut Note, given: &str) -> Result<()> {
 pub struct Backfill {
     pub open_only: bool,
     pub project: Option<String>,
+    /// Only global notes, `project` is then ignored
+    pub global: bool,
     pub write: bool,
+}
+
+impl Backfill {
+    pub fn covers(&self, n: &Note) -> bool {
+        if self.global {
+            return n.project.is_none();
+        }
+        self.project.as_ref().is_none_or(|p| n.project.as_ref() == Some(p))
+    }
 }
 
 /// Names notes that have no slug or a stored one that is not valid, oldest open item first so that open items get the
@@ -254,7 +265,7 @@ pub fn backfill(v: &Vault, opts: &Backfill) -> Result<Vec<Note>> {
     let mut todo: Vec<Note> = all
         .into_iter()
         .filter(|n| n.slug().is_none() && n.had_frontmatter)
-        .filter(|n| opts.project.as_ref().is_none_or(|p| n.project.as_ref() == Some(p)))
+        .filter(|n| opts.covers(n))
         .filter(|n| !opts.open_only || is_open(n))
         .collect();
     todo.sort_by_key(|n| (!is_open(n), n.created, n.id.clone()));

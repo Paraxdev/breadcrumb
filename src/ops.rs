@@ -106,6 +106,21 @@ pub fn digest_project(v: &Vault, project: Option<&str>, global: bool, cwd: &Path
     target_project(v, project, global, cwd)
 }
 
+/// The project a `claim` or `release` of `track:<name>` looks in, `project` only matters for a track.
+pub fn track_project(v: &Vault, target: &str, project: Option<&str>, global: bool, cwd: &Path) -> Result<Option<String>> {
+    let p = project.map(str::trim).map(str::to_ascii_lowercase);
+    Ok(match p.as_deref() {
+        _ if global => None,
+        Some("global") => None,
+        Some("all") | None => v.detect_project(cwd),
+        Some(slug) if target.trim().starts_with("track:") && v.load_project(slug)?.is_none() => {
+            let known: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
+            bail!("unknown project '{slug}', known projects: {}", if known.is_empty() { "(none)".into() } else { known.join(", ") });
+        }
+        Some(slug) => Some(slug.to_string()),
+    })
+}
+
 pub(crate) fn unknown_project_error(v: &Vault, slug: &str) -> anyhow::Error {
     let known: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
     anyhow::anyhow!(
@@ -440,14 +455,14 @@ pub(crate) fn add_held(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)>
             }
         }
     }
-    let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
+    let mut touched: Vec<PathBuf> = match &project {
+        Some(p) => ensure_project(v, p)?.into_iter().collect(),
+        None => vec![],
+    };
+    touched.extend(v.ensure_kind_file(&note.kind)?);
     if note.kind == crate::judge::JUDGMENT {
         touched.extend(crate::judge::upgrade_kind_file(v)?);
     }
-    if let Some(p) = &project
-        && let Some(created) = ensure_project(v, p)? {
-            touched.push(created);
-        }
     touched.extend(crate::lifecycle::unpin_superseded(v, &note, all)?);
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("add", &note))?;
@@ -551,6 +566,8 @@ pub struct UpdateReq {
     pub by: Option<String>,
     /// `version` of the note the caller edited. A mismatch means someone else changed it meanwhile.
     pub expected_version: Option<String>,
+    /// The user edits (the web page, a terminal with no session), see `MoveReq::by_user`.
+    pub by_user: bool,
 }
 
 /// Content hash of a note as breadcrumb would write it, used to detect concurrent edits.
@@ -692,6 +709,12 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         let has_resolution = note.field("resolution").and_then(yaml_scalar_string).is_some_and(|r| !r.trim().is_empty());
         if new_state == "rejected" && from != "rejected" && !has_resolution {
             bail!("moving to rejected requires a resolution explaining why, set the resolution field too");
+        }
+        if from == "review"
+            && (new_state == "done" || new_state == "shipped")
+            && let Some(why) = crate::backlog::review_hold(v, &before, req.by_user)
+        {
+            bail!("{} is in review and {why}", note.id);
         }
         crate::backlog::record_state_change(&mut note, &from, &new_state, req.by.as_deref());
     }

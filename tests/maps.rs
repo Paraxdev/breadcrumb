@@ -63,6 +63,25 @@ fn an_edited_file_marks_its_lines_stale_and_a_deleted_one_gone() {
 }
 
 #[test]
+fn a_put_into_a_reserved_slug_writes_nothing() {
+    let (_vd, v, _rd, root) = setup(&[("src/a.rs", "fn alpha() {}\n")]);
+    common::git(&v.root, &["rm", "-q", "kinds/map.toml"]);
+    common::git(&v.root, &["commit", "-q", "-m", "a vault older than the map kind"]);
+    let req = PutReq { area: "core".into(), project: "all".into(), lines: vec!["src/a.rs:1 alpha, first".into()], ..Default::default() };
+    let e = map::put(&v, req, &root).unwrap_err().to_string();
+    assert!(e.contains("'all' cannot be a project slug"), "{e}");
+    assert!(!v.root.join("kinds/map.toml").exists(), "a refused put leaves no kind file");
+    assert_eq!(common::git(&v.root, &["status", "--porcelain"]), "");
+
+    common::git(&v.root, &["rm", "-q", "kinds/gotcha.toml"]);
+    common::git(&v.root, &["commit", "-q", "-m", "a vault older than the gotcha kind"]);
+    let req = breadcrumb::ops::AddReq { title: "A gotcha".into(), kind: Some("gotcha".into()), project: Some("all".into()), ..Default::default() };
+    assert!(breadcrumb::ops::add(&v, req).is_err());
+    assert!(!v.root.join("kinds/gotcha.toml").exists(), "a refused add leaves no kind file either");
+    assert_eq!(common::git(&v.root, &["status", "--porcelain"]), "");
+}
+
+#[test]
 fn two_areas_stay_apart_and_a_second_map_for_an_area_is_refused() {
     let (_vd, v, _rd, root) = setup(&[("src/view/overlay.ts", "a\n"), ("src/doc/session.ts", "b\n")]);
     put(&v, &root, "stress overlay", &["src/view/overlay.ts:1 setOverlay, turns it on"]);

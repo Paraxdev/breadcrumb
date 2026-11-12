@@ -54,7 +54,7 @@ fn missing_paths_fold_to_one_line_naming_the_checkout_and_its_branch() {
     assert!(line.starts_with("warning: ") && line.contains("mentions 5 paths missing from ") && line.ends_with(" (on main): a/x.rs, a/y.rs, a/z.rs (+2)"), "{line}");
     assert_eq!(out.matches("missing from").count(), 1, "{out}");
     let first = out.lines().next().unwrap();
-    assert!(first.contains(": 0 errors, 1 warnings"), "one folded line is one warning: {first}");
+    assert!(first.contains(": 0 errors, 1 warning"), "one folded line is one warning: {first}");
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn doctor_reports_on_the_detected_project_and_global_and_all_checks_the_rest() {
     let (d, v, alpha, _) = two_projects();
     let (_, out) = doctor(&v, &alpha, &[]);
     let first = out.lines().next().unwrap();
-    assert!(first.starts_with("checked 2 notes of alpha and global: 0 errors, 1 warnings") && first.ends_with(", `--all` checks the rest"), "{first}");
+    assert!(first.starts_with("checked 2 notes of alpha and global: 0 errors, 1 warning, `--all` checks the rest") && first.ends_with(", `--all` checks the rest"), "{first}");
     assert!(out.contains("projects/alpha/"), "{out}");
     assert!(!out.contains("projects/beta/"), "{out}");
 
@@ -81,6 +81,8 @@ fn doctor_reports_on_the_detected_project_and_global_and_all_checks_the_rest() {
 
     let (_, global) = doctor(&v, &alpha, &["--global"]);
     assert!(global.starts_with("checked 1 note of global: "), "{global}");
+    assert_eq!(doctor(&v, &alpha, &["-p", "global"]).1, global, "-p global is --global");
+    assert_eq!(doctor(&v, &alpha, &["-p", "all"]).1, all, "-p all is --all");
 }
 
 #[test]
