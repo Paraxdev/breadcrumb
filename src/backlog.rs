@@ -8,7 +8,7 @@ use crate::vault::Vault;
 use anyhow::{Result, bail};
 use serde::Serialize;
 use serde_yaml::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write;
 use std::path::PathBuf;
 
@@ -1105,6 +1105,8 @@ pub struct ReviewItem {
     pub priority: String,
     pub created: String,
     pub steps: Vec<String>,
+    /// Each step's position in the acceptance list, the number `check` takes.
+    pub step_positions: Vec<usize>,
 }
 
 /// Items waiting for the user's check, priority first, then oldest.
@@ -1125,35 +1127,48 @@ pub fn review_items(v: &Vault, scope: &Scope) -> Result<Vec<ReviewItem>> {
             priority: priority(n),
             created: crate::util::fmt_time(&n.created),
             steps: review_steps(n),
+            step_positions: unmet_numbered(n).into_iter().map(|(i, _)| i).collect(),
         })
         .collect())
 }
 
-pub fn review_text(items: &[ReviewItem], scope_label: &str, agents: bool) -> String {
+/// `agents` says whether agents review the items of a project (None for global ones).
+pub fn review_text(items: &[ReviewItem], scope_label: &str, agents: impl Fn(Option<&str>) -> bool) -> String {
     if items.is_empty() {
         return format!("nothing in review in {scope_label}, --all shows every project\n");
     }
-    let mut s = if agents {
+    let by_agent: Vec<bool> = items.iter().map(|it| agents(it.project.as_deref())).collect();
+    let agent_projects: BTreeSet<&str> = items.iter().zip(&by_agent).filter(|(_, a)| **a).map(|(it, _)| it.project.as_deref().unwrap_or("global")).collect();
+    let mut s = if by_agent.iter().all(|a| *a) {
         format!(
             "{} in review in {scope_label}, agents review here: a session or subagent that did not build an item runs each step, then `breadcrumb review pass <id> --evidence \"what you ran and saw\"` or `breadcrumb review fail <id> --reason \"...\"`\n",
             items.len()
         )
-    } else {
+    } else if agent_projects.is_empty() {
         format!("{} in review in {scope_label}, try each, then `breadcrumb review pass <id>` or `breadcrumb review fail <id> --reason \"...\"`\n", items.len())
+    } else {
+        format!(
+            "{} in review in {scope_label}, agents review the items of {}: a session or subagent that did not build one runs each step, then `breadcrumb review pass <id> --evidence \"what you ran and saw\"`, try the others, then `breadcrumb review pass <id>`, a fail is `breadcrumb review fail <id> --reason \"...\"`\n",
+            items.len(),
+            agent_projects.into_iter().collect::<Vec<_>>().join(", ")
+        )
     };
-    let user_steps = agents && items.iter().any(|it| it.steps.iter().any(|c| is_user_step(c)));
+    let user_steps = items.iter().zip(&by_agent).any(|(it, a)| *a && it.steps.iter().any(|c| is_user_step(c)));
     if user_steps {
         s.push_str("Steps marked [user] are the user's, never run them: your pass ticks the others and leaves the item in review for the user\n");
     }
-    for it in items {
+    for (it, agent) in items.iter().zip(&by_agent) {
         let name = it.slug.as_ref().map(|x| format!("{x} ")).unwrap_or_default();
         let _ = writeln!(s, "\n{} {name}{} {}", it.priority, it.id, it.title);
         if it.steps.is_empty() {
             let _ = writeln!(s, "  no steps recorded, `breadcrumb get {}` or ask the agent that built it", it.id);
         }
         for (i, step) in it.steps.iter().enumerate() {
-            let mark = if user_steps && is_user_step(step) { "[user] " } else { "" };
-            let _ = writeln!(s, "  {}. {mark}{step}", i + 1);
+            let at = it.step_positions.get(i).copied().unwrap_or(i + 1);
+            let _ = match step.get(5..).filter(|_| *agent && is_user_step(step)) {
+                Some(rest) => writeln!(s, "  {at}. [user] {}", rest.trim_start()),
+                None => writeln!(s, "  {at}. {step}"),
+            };
         }
     }
     s
@@ -1420,7 +1435,7 @@ pub fn move_text(r: &MoveResult) -> String {
         format!("{name} {}: already in {}\n", r.note.title, r.to)
     };
     if r.replaced > 0 {
-        let _ = writeln!(s, "replaced {} open steps with the ones given, ticked ones stay", r.replaced);
+        let _ = writeln!(s, "replaced {} open step{} with the ones given, ticked ones stay", r.replaced, if r.replaced == 1 { "" } else { "s" });
     }
     if !r.unmet.is_empty() {
         let _ = writeln!(s, "warning: {} acceptance criteria not marked met ([x]), {}:", r.unmet.len(), check_hint(&r.note.id));

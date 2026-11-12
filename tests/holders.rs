@@ -253,7 +253,7 @@ fn a_branch_or_run_ref_on_a_queued_item_is_being_built_without_changing_its_stat
     assert!(backlog::board_text(&cols, "app").contains("## being-built (2)"));
 
     go_quiet(&e.v, &lane);
-    assert!(context(&e).contains(&format!("{lane}")));
+    assert!(context(&e).contains(&lane));
     let n = e.v.get(&lane).unwrap();
     assert!(backlog::being_built(&n).is_none(), "a lost lane does not hide its item forever");
 

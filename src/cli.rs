@@ -145,6 +145,7 @@ pub enum Cmd {
         /// Note id or slug
         id: String,
         /// The paragraph, "-" reads stdin
+        #[arg(allow_hyphen_values = true)]
         text: String,
         #[command(flatten)]
         _p: IgnoredProject,
@@ -458,7 +459,7 @@ pub enum Cmd {
         /// Session name (default: $BREADCRUMB_SESSION, else the Claude Code session id)
         #[arg(long)]
         by: Option<String>,
-        /// Take over another session's fresh claim, or with --release release it
+        /// Take over another session's fresh claim, or with --release release it or another session's handoff
         #[arg(long)]
         force: bool,
         /// Release the claim instead, the same as `release`
@@ -475,7 +476,7 @@ pub enum Cmd {
         /// Session name (default: $BREADCRUMB_SESSION, else the Claude Code session id)
         #[arg(long)]
         by: Option<String>,
-        /// Release another session's fresh claim
+        /// Release another session's fresh claim or handoff
         #[arg(long)]
         force: bool,
         /// Project of a track:<name> (default: detected from the current directory), an id ignores it
@@ -488,6 +489,7 @@ pub enum Cmd {
         /// Item id
         id: String,
         /// The question
+        #[arg(allow_hyphen_values = true)]
         text: String,
         /// Answer option as `label: description`, two to four (repeatable)
         #[arg(long = "option", short = 'o')]
@@ -1457,7 +1459,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
             let name = n.slug().map(|s| format!("  [{s}]")).unwrap_or_default();
             let landed = ops::landed(&n).map(|l| format!("  {l}")).unwrap_or_default();
-            out.emit(format!("added {}  {}  {}  {}{name}{landed}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
+            let mut data = n.to_json();
+            if let Json::Object(o) = &mut data {
+                o.entry("notices").or_insert(json!(created.lines().filter(|l| !l.is_empty()).collect::<Vec<_>>()));
+            }
+            out.emit(format!("added {}  {}  {}  {}{name}{landed}{created}", n.id, n.kind, n.scope_label(), n.title), data);
         }
         Cmd::Get { id, full, body, tail, .. } => {
             let v = open()?;
@@ -1525,7 +1531,9 @@ pub fn run(cli: Cli) -> Result<i32> {
                     ..Default::default()
                 },
             )?;
-            out.emit(format!("updated {}  {}{}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
+            let home = n.project.as_deref().unwrap_or("global");
+            let ignored = u._p.ignored_project.filter(|p| !p.eq_ignore_ascii_case(home)).map(|p| format!("\n-p {p} was ignored, the note stays in {home}, no command moves a note to another project")).unwrap_or_default();
+            out.emit(format!("updated {}  {}{}{ignored}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
         }
         Cmd::Append { id, text, .. } => {
             let text = read_body_arg(Some(text), None)?.unwrap_or_default();
@@ -1619,7 +1627,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Context { project, global, limit } => {
             let v = open()?;
-            let p = if global { None } else { ops::target_project(&v, project.as_deref(), false, &cwd)? };
+            let p = ops::digest_project(&v, project.as_deref(), global, &cwd)?;
             let text = ops::context(&v, p.as_deref(), limit.unwrap_or_else(|| crate::digest::recent_rows(&v, p.as_deref(), crate::digest::CONTEXT_RECENT)))?;
             out.emit(&text, json!({"project": p, "markdown": text}));
         }
@@ -1821,7 +1829,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Claim { id, by, force, release: true, project } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force, project.as_deref())?,
         Cmd::Claim { id, by, force, release: false, project } => {
             let v = open()?;
-            if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, track_project(&v, project.as_deref(), &cwd).as_deref(), by.as_deref(), false)? {
+            if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, track_project(&v, project.as_deref(), &cwd).as_deref(), by.as_deref(), false, force)? {
                 out.emit(crate::lifecycle::take_text(&h, false), h.to_json());
             } else {
                 let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
@@ -2036,7 +2044,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
                     let items = backlog::review_items(&v, &sc)?;
                     let review_by = crate::config::effective(&v, sc.project()).review_by;
-                    out.emit(backlog::review_text(&items, &sc.label(), review_by == "agent"), json!({"scope": sc.label(), "review_by": review_by, "items": items}));
+                    out.emit(backlog::review_text(&items, &sc.label(), |p| crate::config::agent_review(&v, sc.project().or(p))), json!({"scope": sc.label(), "review_by": review_by, "items": items}));
                     return Ok(0);
                 }
                 Some(ReviewCmd::Pass { id, by, evidence, .. }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by_user: backlog::typed_by_user(by.as_deref()), by, evidence })?,
@@ -2113,7 +2121,7 @@ fn track_project(v: &Vault, project: Option<&str>, cwd: &Path) -> Option<String>
 }
 
 fn release_cmd(out: &Out, v: &Vault, cwd: &Path, id: &str, by: Option<&str>, force: bool, project: Option<&str>) -> Result<()> {
-    if let Some(h) = crate::lifecycle::claim_handoff(v, id, track_project(v, project, cwd).as_deref(), by, true)? {
+    if let Some(h) = crate::lifecycle::claim_handoff(v, id, track_project(v, project, cwd).as_deref(), by, true, force)? {
         out.emit(crate::lifecycle::take_text(&h, true), h.to_json());
         return Ok(());
     }
@@ -2213,7 +2221,11 @@ fn map_cmd(out: &Out, v: &Vault, mc: MapCmd, cwd: &Path) -> Result<()> {
                 None => {}
             }
             let r = map::put(v, map::PutReq { area, project: slug, lines, paths, drop }, &repo)?;
-            out.emit(r.text(), r.map.note.to_json());
+            let mut data = r.map.note.to_json();
+            if let Json::Object(o) = &mut data {
+                o.entry("warnings").or_insert(json!(r.warnings));
+            }
+            out.emit(r.text(), data);
         }
         MapCmd::Get { area, project, repo } => {
             let slug = workflow::resolve_project(v, project.as_deref(), cwd)?;

@@ -74,6 +74,43 @@ fn all_wins_over_a_project_and_project_all_reads_as_all() {
     assert!(v.load_project("global").unwrap().is_none());
     let (ok, out, _) = crumb(&v, &["context", "-p", "global"]);
     assert!(ok && out.contains("Global by word"), "{out}");
+    let (ok, _, err) = crumb(&v, &["context", "-p", "All"]);
+    assert!(!ok && err.contains("the digest is per project or global"), "{err}");
+    let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: v.root.clone() };
+    let a = serde_json::json!({"project": "all"}).as_object().unwrap().clone();
+    assert!(srv.call_tool("context", &a).unwrap_err().to_string().contains("the digest is per project or global"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("tidy.js");
+    std::fs::write(&script, "export default async () => {}\n").unwrap();
+    let (ok, out, err) = crumb(&v, &["workflow", "save", script.to_str().unwrap(), "-p", "global"]);
+    assert!(ok && out.contains("tidy  global"), "{out}{err}");
+    assert!(v.load_project("global").unwrap().is_none());
+}
+
+#[test]
+fn free_text_may_start_with_a_hyphen() {
+    let (_d, v) = common::vault();
+    let a = common::add(&v, "Thing", "task", Some("app"), &[]);
+    for args in [vec!["append", &a.id, "- a bullet"], vec!["append", &a.id, "-p", "app", "- after a flag"], vec!["append", &a.id, "--dashes first", "-p", "app"]] {
+        let (ok, _, err) = crumb(&v, &args);
+        assert!(ok, "{args:?}: {err}");
+    }
+    let body = v.get(&a.id).unwrap().body;
+    assert!(body.contains("\n- a bullet") && body.contains("\n- after a flag") && body.contains("\n--dashes first"), "{body}");
+    let (ok, _, err) = crumb(&v, &["ask", &a.id, "-- which one?", "-o", "a: x", "-o", "b: y"]);
+    assert!(ok, "{err}");
+}
+
+#[test]
+fn update_says_when_it_ignored_another_project() {
+    let (_d, v) = common::vault();
+    let a = common::add(&v, "Thing", "task", Some("app"), &[]);
+    let (_, out, _) = crumb(&v, &["update", &a.id, "--tag", "x", "-p", "web"]);
+    assert!(out.ends_with("\n-p web was ignored, the note stays in app, no command moves a note to another project\n"), "{out}");
+    let (_, out, _) = crumb(&v, &["update", &a.id, "--tag", "y", "-p", "App"]);
+    assert!(!out.contains("ignored"), "{out}");
+    assert_eq!(v.get(&a.id).unwrap().project.as_deref(), Some("app"));
 }
 
 #[test]
@@ -81,7 +118,9 @@ fn claim_and_release_read_the_project_of_a_track() {
     let (_d, v) = common::vault();
     crumb(&v, &["add", "Pick up the parser", "-k", "handoff", "--track", "main", "-p", "app"]);
     let (ok, _, err) = crumb(&v, &["claim", "track:main", "--by", "me"]);
-    assert!(!ok && err.contains("no live handoff on track main in global"), "{err}");
+    assert!(!ok && err.contains("no live handoff on track main in global, app has one, pass -p app (project in MCP)"), "{err}");
+    let (ok, _, err) = crumb(&v, &["claim", "track:nope", "--by", "me"]);
+    assert!(!ok && err.contains("no live handoff on track nope in global, pass -p <slug> (project in MCP) for another project's track"), "{err}");
     let (ok, out, err) = crumb(&v, &["claim", "track:main", "-p", "app", "--by", "me"]);
     assert!(ok && out.contains("took pick-parser"), "{err}");
     let (ok, out, err) = crumb(&v, &["release", "track:main", "--project", "app", "--by", "me"]);

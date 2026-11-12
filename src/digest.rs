@@ -373,14 +373,14 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     }
     let landing = crate::land::digest_lines(v, project).unwrap_or_default();
     let mut todos = String::new();
-    for n in notes.iter().filter(|n| !n.pinned && is_open_todo(n)) {
+    for n in notes.iter().filter(|n| !n.pinned && is_open_todo(n) && !foreign(n)) {
         if todos.is_empty() {
             todos.push_str("Todos:\n");
         }
         let prio = n.field("priority").map(yaml_display).map(|p| format!(" {p}")).unwrap_or_default();
         writeln!(todos, "{} {}{prio}{}", n.handle(), crate::format::fit_title(&n.title, n.slug().as_deref()), scope_suffix(n, project))?;
     }
-    let mut backlog = crate::backlog::context_section(&notes, &all);
+    let mut backlog = crate::backlog::context_section(&notes.iter().filter(|n| crate::backlog::is_item(n) && !foreign(n)).cloned().collect::<Vec<_>>(), &all);
     if crate::config::agent_review(v, project) {
         let (users, waiting): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| crate::backlog::is_item(n) && crate::backlog::state(n) == "review").partition(|n| crate::backlog::only_user_steps_open(n));
         let user = if users.is_empty() { String::new() } else { format!(", {} waiting for the user", users.len()) };
@@ -398,7 +398,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
 
     let (rest, global_rest): (Vec<&Note>, Vec<&Note>) = notes
         .iter()
-        .filter(|n| !n.pinned && !is_pref(n) && !is_open_todo(n) && !crate::backlog::in_digest(n) && n.kind != HANDOFF)
+        .filter(|n| !n.pinned && !is_pref(n) && n.kind != HANDOFF && (foreign(n) || (!is_open_todo(n) && !crate::backlog::in_digest(n))))
         .partition(|n| !foreign(n));
     let global_more = match global_rest.len() {
         0 => String::new(),
@@ -411,7 +411,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
 
     // A handoff a newer one covers, or whose items all landed, has nothing left to resume, so the newest other one leads.
     let mut live = lifecycle::live_handoffs(&notes, project, &lapsed);
-    let marks: HashMap<String, String> = live.iter().filter_map(|h| lifecycle::handoff_mark(h, &live, &all).map(|m| (h.id.clone(), m))).collect();
+    let marks = lifecycle::handoff_marks(&live, &all);
     if let Some(i) = live.iter().position(|h| !marks.contains_key(&h.id)) {
         let lead = live.remove(i);
         live.insert(0, lead);

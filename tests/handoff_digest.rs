@@ -196,6 +196,29 @@ fn a_session_takes_a_track_and_the_digest_names_the_holder_apart_from_the_writer
 }
 
 #[test]
+fn only_the_holder_or_force_releases_a_handoff() {
+    let e = setup(&[(A, "app-a"), (B, "app-b")]);
+    let id = added_id(&crumb(&e, A, &["add", "-k", "handoff", "-t", "Main worker state", "-p", "app", "--track", "main-worker"]));
+    assert!(crumb(&e, A, &["release", &id]).starts_with("released "), "nobody holds it, a quiet success");
+    crumb(&e, B, &["claim", "track:main-worker"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_crumb"))
+        .args(["release", &id])
+        .current_dir(&e.work)
+        .env("BREADCRUMB_HOME", &e.v.root)
+        .env("BREADCRUMB_CLAUDE_DIR", &e.claude)
+        .env("CLAUDE_CODE_SESSION_ID", A)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && err.contains("held by app-b, not ") && err.contains(&format!("breadcrumb release {id} --force")), "{err}");
+    assert!(e.v.get(&id).unwrap().field("held_by").is_some());
+    assert!(crumb(&e, A, &["release", &id, "--force"]).starts_with("released "));
+    assert!(e.v.get(&id).unwrap().field("held_by").is_none());
+    crumb(&e, B, &["claim", &id]);
+    assert!(crumb(&e, B, &["release", "track:main-worker"]).starts_with("released "));
+}
+
+#[test]
 fn kinds_say_which_to_use_and_add_hints_at_the_other_way() {
     let e = setup(&[]);
     assert!(crumb(&e, A, &["kinds"]).contains("Which kind: a raw idea nobody committed to is kind idea"));

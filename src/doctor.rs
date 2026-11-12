@@ -328,11 +328,11 @@ impl Run {
         let count = |sev: &str| self.problems.iter().filter(|p| p.severity == sev).count();
         let of = match &self.scope {
             Scope::All => String::new(),
-            Scope::Global => " global".into(),
+            Scope::Global => " of global".into(),
             Scope::Project { slug, with_global: true } => format!(" of {slug} and global"),
             Scope::Project { slug, .. } => format!(" of {slug}"),
         };
-        let mut s = format!("checked {} notes{of}: {} errors, {} warnings", self.checked, count("error"), count("warning"));
+        let mut s = format!("checked {} note{}{of}: {} errors, {} warnings", self.checked, if self.checked == 1 { "" } else { "s" }, count("error"), count("warning"));
         let info = count("info");
         if info > 0 {
             let _ = write!(s, ", {info} info");

@@ -260,6 +260,7 @@ pub fn save(v: &Vault, files: &[PathBuf], project: Option<&str>, global: bool, c
     }
     let explicit = match (global, project) {
         (true, _) => Some(None),
+        (false, Some(p)) if p.trim().eq_ignore_ascii_case("global") => Some(None),
         (false, Some(p)) => Some(Some(resolve_project(v, Some(p), cwd)?)),
         _ => None,
     };

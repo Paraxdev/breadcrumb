@@ -298,7 +298,7 @@ fn mcp_move_names_user_steps_left_after_an_agent_pass_and_replaced_steps() {
         ],
         &[],
     );
-    assert!(text(&out[1]).contains("replaced 1 open steps"), "{}", text(&out[1]));
+    assert!(text(&out[1]).contains("replaced 1 open step"), "{}", text(&out[1]));
     assert!(text(&out[2]).contains("stays in review for the user's steps: 2. user: install it") && text(&out[2]).contains("--by user"), "{}", text(&out[2]));
     assert_eq!(breadcrumb::backlog::state(&v.get(&a.id).unwrap()), "review");
 }

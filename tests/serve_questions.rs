@@ -137,8 +137,6 @@ fn login_sets_a_hardened_cookie() {
     let r = app.handle(&req("GET", &format!("/login?token={TOKEN}"), HOST, None));
     assert_eq!(r.status, 200);
     assert_eq!(r.header("location"), None);
-    assert_eq!(r.header("referrer-policy"), Some("no-referrer"));
-    assert_eq!(r.header("cache-control"), Some("no-store"));
     let html = String::from_utf8_lossy(&r.body);
     assert!(html.contains("http-equiv=refresh content=\"0;url=/\"") && html.contains("<a href=\"/\">"), "{html}");
     assert!(!html.contains("<script") && !html.contains(TOKEN));
@@ -149,7 +147,11 @@ fn login_sets_a_hardened_cookie() {
     }
     let mut wire = vec![];
     breadcrumb::serve::write_response(&mut wire, &r).unwrap();
-    assert!(String::from_utf8(wire).unwrap().contains("Set-Cookie: crumb_token="));
+    let wire = String::from_utf8(wire).unwrap();
+    assert!(wire.contains("Set-Cookie: crumb_token="));
+    for h in ["Referrer-Policy: no-referrer\r\n", "Cache-Control: no-store\r\n"] {
+        assert_eq!(wire.matches(h).count(), 1, "{wire}");
+    }
 }
 
 #[test]

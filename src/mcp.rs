@@ -173,7 +173,7 @@ impl Server {
             }
             "answer" => {
                 let tokens: Vec<String> = match a.get("choices") {
-                    Some(Value::Array(xs)) => xs.iter().map(|x| s_of(x)).collect(),
+                    Some(Value::Array(xs)) => xs.iter().map(s_of).collect(),
                     Some(x) => vec![s_of(x)],
                     None => vec![],
                 };
@@ -218,7 +218,7 @@ impl Server {
         let v = self.vault()?;
         match name {
             "context" => {
-                let p = self.target_project(&v, a)?;
+                let p = ops::digest_project(&v, s(a, "project").as_deref(), b(a, "global"), &self.cwd_of(a))?;
                 ops::context_with(&v, p.as_deref(), ContextOpts { recent: u(a, "limit").unwrap_or_else(|| crate::digest::recent_rows(&v, p.as_deref(), crate::digest::CONTEXT_RECENT)), kinds: b(a, "kinds"), cwd: Some(self.cwd_of(a)), ..Default::default() })
             }
             "search" => {
@@ -405,7 +405,7 @@ impl Server {
             }
             "claim" => {
                 let id = req_s(a, "id")?;
-                if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, self.current(&v, a).as_deref(), s(a, "by").as_deref(), b(a, "release"))? {
+                if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, self.current(&v, a).as_deref(), s(a, "by").as_deref(), b(a, "release"), b(a, "force"))? {
                     return Ok(crate::lifecycle::take_text(&h, b(a, "release")));
                 }
                 let by = backlog::session_name(s(a, "by").as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.into());
@@ -429,7 +429,7 @@ impl Server {
                 }
                 "review" => {
                     let sc = self.scope(&v, a)?;
-                    Ok(backlog::review_text(&backlog::review_items(&v, &sc)?, &sc.label(), crate::config::agent_review(&v, sc.project())))
+                    Ok(backlog::review_text(&backlog::review_items(&v, &sc)?, &sc.label(), |p| crate::config::agent_review(&v, sc.project().or(p))))
                 }
                 "tree" => backlog::tree(&v, &req_s(a, "id")?),
                 "deps" => {

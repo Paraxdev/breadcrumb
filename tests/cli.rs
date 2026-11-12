@@ -98,6 +98,10 @@ fn add_line_keeps_its_start_and_names_state_priority_and_a_repaired_slug() {
     assert!(out.contains("\nslug shortened to doctor-mcp-no-project"), "{out}");
     let out = ok(&v, &["add", "--global", "--title", "Plain fact", "--kind", "note"]);
     assert!(!out.contains("state=") && !out.contains("slug "), "{out}");
+    let j = json(&v, &["add", "--global", "--title", "Doctor scope two", "--kind", "bug", "--slug", "doctor-mcp-no-project-scope"]);
+    assert_eq!(j["slug"], "doctor-mcp-no-project-2");
+    assert_eq!(j["notices"][0], "slug shortened to doctor-mcp-no-project-2, doctor-mcp-no-project is taken", "{j}");
+    assert_eq!(json(&v, &["add", "--global", "--title", "Quiet fact", "--kind", "note"])["notices"], serde_json::json!([]));
     let o = breadcrumb(&v, &["add", "--global", "--title", "x", "--kind", "done"], None);
     assert!(String::from_utf8_lossy(&o.stderr).contains("'done' is a state, not a kind: give a kind like task, bug, feature or epic and --field state=done"));
 }

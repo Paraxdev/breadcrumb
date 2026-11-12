@@ -262,11 +262,12 @@ fn locate(l: &MapLine, text: &str) -> Fresh {
 const LINE_WINDOW: u64 = 3;
 
 /// One short warning per incoming line that does not match the checkout, each file read once. A miss is advice, the put still saves.
-fn line_warnings(repo: &Path, lines: &[MapLine]) -> Vec<String> {
+fn line_warnings(repo: &Path, lines: &[MapLine], blobs: &HashMap<String, Option<String>>) -> Vec<String> {
     let mut texts: HashMap<&str, Option<String>> = HashMap::new();
     let mut out = vec![];
     for l in lines {
-        let text = texts.entry(&l.file).or_insert_with(|| std::fs::read(repo.join(&l.file)).ok().map(|b| String::from_utf8_lossy(&b).into_owned()));
+        let present = blobs.get(&l.file).is_none_or(Option::is_some);
+        let text = texts.entry(&l.file).or_insert_with(|| present.then(|| std::fs::read(repo.join(&l.file)).ok()).flatten().map(|b| String::from_utf8_lossy(&b).into_owned()));
         let at = format!("{}{}", l.file, l.line.as_deref().map(|n| format!(":{n}")).unwrap_or_default());
         let Some(text) = text else {
             out.push(format!("{at} file not found"));
@@ -285,7 +286,7 @@ fn line_warnings(repo: &Path, lines: &[MapLine]) -> Vec<String> {
             continue;
         }
         let hits: Vec<u64> = text.lines().enumerate().filter(|(_, row)| has_word(row, sym)).map(|(i, _)| i as u64 + 1).collect();
-        if hits.iter().any(|h| h.abs_diff(first) <= LINE_WINDOW) {
+        if hits.iter().any(|&h| h + LINE_WINDOW >= first && h <= last.max(first) + LINE_WINDOW) {
             continue;
         }
         match hits.iter().min_by_key(|h| h.abs_diff(first)) {
@@ -428,7 +429,7 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
     }
     let files: Vec<String> = incoming.iter().map(|l| l.file.clone()).collect::<BTreeSet<_>>().into_iter().collect();
     let hashes = current_blobs(repo, &files)?;
-    let warnings = line_warnings(repo, &incoming);
+    let warnings = line_warnings(repo, &incoming, &hashes);
     let globs = normalize_globs(&req.paths)?;
 
     let _g = v.lock()?;

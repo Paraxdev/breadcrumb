@@ -98,6 +98,14 @@ pub fn target_project(v: &Vault, project: Option<&str>, global: bool, cwd: &Path
     Ok(v.detect_project(cwd))
 }
 
+/// The project a digest is for, which is never all of them.
+pub fn digest_project(v: &Vault, project: Option<&str>, global: bool, cwd: &Path) -> Result<Option<String>> {
+    if !global && project.is_some_and(|p| p.trim().eq_ignore_ascii_case("all")) {
+        bail!("the digest is per project or global, there is no digest of all projects, name one project or global, list and board take all");
+    }
+    target_project(v, project, global, cwd)
+}
+
 pub(crate) fn unknown_project_error(v: &Vault, slug: &str) -> anyhow::Error {
     let known: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
     anyhow::anyhow!(
@@ -521,6 +529,7 @@ fn check_status(s: &str) -> Result<String> {
 pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
     let _g = v.lock()?;
     let mut note = v.get(id)?;
+    let before = note.clone();
     crate::merge::refuse_merged(&note)?;
     if let Some(want) = &req.expected_version
         && *want != version(&note)
@@ -647,9 +656,15 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         }
         crate::backlog::record_state_change(&mut note, &from, &new_state, req.by.as_deref());
     }
+    let mut was = before;
+    was.links.clone_from(&note.links);
+    was.pinned = note.pinned;
+    let only_links_or_pin = was.to_markdown() == note.to_markdown();
     note.mark_verified();
     crate::session::stamp_write(&mut note);
-    note.updated = now();
+    if !only_links_or_pin {
+        note.updated = now();
+    }
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
     if !req.supersedes.is_empty() {
         touched.extend(crate::lifecycle::unpin_superseded(v, &note, v.load_notes())?);

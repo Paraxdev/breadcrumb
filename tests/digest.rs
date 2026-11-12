@@ -195,6 +195,31 @@ fn a_project_digest_counts_unscoped_globals_and_a_scope_brings_a_global_note_in(
 }
 
 #[test]
+fn global_todos_and_backlog_items_follow_the_scope_rule_in_a_project_digest() {
+    let (_d, v) = common::vault();
+    let global = |title: &str, kind: &str, fields: &[(&str, &str)]| {
+        ops::add(&v, AddReq { title: title.into(), kind: Some(kind.into()), fields: fields.iter().map(|(k, x)| (k.to_string(), FieldInput::Raw(x.to_string()))).collect(), ..Default::default() }).unwrap()
+    };
+    let todo = global("Renew the domain", "todo", &[]);
+    let item = global("Vault wide cleanup", "task", &[("state", "queued")]);
+    let scoped_todo = global("Bump the laser mod", "todo", &[("scope", "create-*")]);
+    let scoped_item = global("Shared mod loader", "task", &[("state", "queued"), ("scope", "create-laser")]);
+    common::add(&v, "Own task", "task", Some("create-laser"), &[("state", "queued")]);
+
+    let ctx = ops::context(&v, Some("create-laser"), 15).unwrap();
+    assert!(!ctx.contains(&todo.id) && !ctx.contains(&item.id), "{ctx}");
+    assert!(ctx.contains(&format!("Todos:\nbump-laser-mod {} Bump the laser mod p2 (global)\nBacklog: queued 2\n", scoped_todo.id)), "{ctx}");
+    assert!(ctx.contains(&scoped_item.id), "{ctx}");
+    assert!(ctx.ends_with("Global: 2 more notes, breadcrumb list --global\n"), "the hidden ones are counted: {ctx}");
+
+    let home = ops::context(&v, None, 15).unwrap();
+    for shown in [&todo, &item, &scoped_todo, &scoped_item] {
+        assert!(home.contains(&shown.id), "{home}");
+    }
+    assert!(!home.contains("Global:"), "{home}");
+}
+
+#[test]
 fn scope_matches_slugs_and_globs() {
     use breadcrumb::recall::scope_matches;
     let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
