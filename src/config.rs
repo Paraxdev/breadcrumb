@@ -51,6 +51,9 @@ pub struct Setting {
     /// The project's override when it does not hold, with why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ignored: Option<String>,
+    /// The value in breadcrumb.toml when it does not hold, with why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broken: Option<String>,
 }
 
 fn table(c: &Config) -> Result<toml::Table> {
@@ -100,7 +103,7 @@ fn skip_reason(t: &toml::Table, k: &str, val: &toml::Value) -> Option<String> {
         return Some(format!("{k} is one of {}", d.words.join(", ")));
     }
     if let Err(e) = check(k, val) {
-        return e.to_string().split(", got ").next().map(str::to_string);
+        return Some(why(e));
     }
     let mut next = t.clone();
     next.insert(k.to_string(), val.clone());
@@ -209,16 +212,20 @@ pub fn settings(v: &Vault, project: Option<&str>) -> Result<Vec<Setting>> {
     Ok(SETTINGS
         .iter()
         .map(|d| {
-            let (value, default) = (shown(now.get(d.key)), shown(def.get(d.key)));
+            let (mut value, default) = (shown(now.get(d.key)), shown(def.get(d.key)));
+            let broken = vault.get(d.key).and_then(|x| check(d.key, x).err().map(|e| format!("{} ignored, {}", shown(Some(x)), why(e))));
             let source = if d.project && over.contains_key(d.key) && value == shown(over.get(d.key)) {
                 "project"
+            } else if broken.is_some() {
+                value = default.clone();
+                "default"
             } else if shown(vault.get(d.key)) != default {
                 "vault"
             } else {
                 "default"
             };
             let ignored = over.get(d.key).and_then(|x| skip_reason(&vault, d.key, x).map(|why| format!("{} ignored, {why}", shown(Some(x)))));
-            Setting { key: d.key.to_string(), value, default, about: d.about.to_string(), source: source.into(), overridable: d.project, ignored }
+            Setting { key: d.key.to_string(), value, default, about: d.about.to_string(), source: source.into(), overridable: d.project, ignored, broken }
         })
         .collect())
 }
@@ -237,6 +244,9 @@ fn marks(it: &Setting, project: bool) -> String {
     }
     if !it.overridable {
         m.push("vault only".into());
+    }
+    if let Some(b) = &it.broken {
+        m.push(format!("vault value {b}"));
     }
     if let Some(i) = &it.ignored {
         m.push(format!("project value {i}"));
@@ -281,6 +291,25 @@ pub fn overrides_line(v: &Vault, slug: &str, mcp: bool) -> Option<String> {
     Some(format!("Project {slug} (detected here) overrides {holds}{skips}, {how}\n"))
 }
 
+/// A `check` refusal without the value, for lines that already name it.
+fn why(e: anyhow::Error) -> String {
+    e.to_string().split(", got ").next().unwrap_or_default().to_string()
+}
+
+/// Values in breadcrumb.toml that parse but do not hold, so the default does: a line per key, for doctor.
+pub fn vault_problems(v: &Vault) -> Vec<String> {
+    let (Ok(vault), Ok(def)) = (table(&v.config), table(&Config::default())) else { return vec![] };
+    SETTINGS
+        .iter()
+        .filter_map(|d| {
+            let x = vault.get(d.key)?;
+            let e = check(d.key, x).err()?;
+            let dflt = shown(def.get(d.key));
+            Some(format!("{} = {x} is ignored, {}, the default {} holds", d.key, why(e), if dflt.is_empty() { "unset" } else { &dflt }))
+        })
+        .collect()
+}
+
 /// The least value of a number setting.
 fn floor(key: &str) -> u64 {
     match key {
@@ -294,7 +323,8 @@ fn floor(key: &str) -> u64 {
 /// one that does not exist.
 fn check(key: &str, val: &toml::Value) -> Result<()> {
     if key == "digest_sections" {
-        crate::digest::parse_sections(val.as_str().unwrap_or_default())?;
+        let Some(names) = val.as_str() else { bail!("digest_sections takes text, section names separated by commas") };
+        crate::digest::parse_sections(names)?;
     }
     if let Some(n) = val.as_integer()
         && n < floor(key) as i64

@@ -443,3 +443,27 @@ fn mcp_refusal_of_a_vault_only_key_says_to_drop_slug() {
     let (out, err) = mcp(&v, d.path(), json!({"slug": "app", "key": "judge_project", "value": "x"}));
     assert!(err && out.contains("judge_project is vault only, a project cannot override it, call the same action without slug to set it for every project") && !out.contains("breadcrumb config"), "{out}");
 }
+
+#[test]
+fn a_digest_value_in_breadcrumb_toml_that_does_not_hold_is_listed_as_ignored_and_doctor_reports_it() {
+    let (d, v, _) = setup();
+    let path = v.root.join("breadcrumb.toml");
+    let mut t: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    t.insert("digest_budget".into(), toml::Value::Integer(10));
+    std::fs::write(&path, toml::to_string(&t).unwrap()).unwrap();
+    let v = Vault::open(&v.root).unwrap();
+    let (_, out, _) = crumb_in(&v, d.path(), &["config"], "");
+    assert!(out.contains("  digest_budget = 6000 (vault value 10 ignored, digest_budget takes a whole number of 1000 or more)\n"), "{out}");
+    let (_, out, _) = crumb_in(&v, d.path(), &["config", "get", "digest_budget"], "");
+    assert_eq!(out.trim(), "6000", "get prints the value that holds");
+    let ps = breadcrumb::doctor::check_with(&v, None);
+    assert!(
+        ps.iter().any(|p| p.path == "breadcrumb.toml" && p.severity == "warning" && p.message == "digest_budget = 10 is ignored, digest_budget takes a whole number of 1000 or more, the default 6000 holds"),
+        "{:?}",
+        ps.iter().map(|p| &p.message).collect::<Vec<_>>()
+    );
+
+    std::fs::write(v.root.join("projects/app/settings.toml"), "digest_sections = [\"pins\", \"recent\"]\n").unwrap();
+    let (_, out, _) = crumb_in(&v, d.path(), &["config", "--project", "app"], "");
+    assert!(out.contains(" ignored, digest_sections takes text, section names separated by commas"), "{out}");
+}
