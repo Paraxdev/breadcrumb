@@ -563,6 +563,8 @@ pub struct UpdateReq {
     pub by: Option<String>,
     /// `version` of the note the caller edited. A mismatch means someone else changed it meanwhile.
     pub expected_version: Option<String>,
+    /// The user edits (the web page, a terminal with no session), see `MoveReq::by_user`.
+    pub by_user: bool,
 }
 
 /// Content hash of a note as breadcrumb would write it, used to detect concurrent edits.
@@ -704,6 +706,12 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         let has_resolution = note.field("resolution").and_then(yaml_scalar_string).is_some_and(|r| !r.trim().is_empty());
         if new_state == "rejected" && from != "rejected" && !has_resolution {
             bail!("moving to rejected requires a resolution explaining why, set the resolution field too");
+        }
+        if from == "review"
+            && (new_state == "done" || new_state == "shipped")
+            && let Some(why) = crate::backlog::review_hold(v, &before, req.by_user)
+        {
+            bail!("{} is in review and {why}", note.id);
         }
         crate::backlog::record_state_change(&mut note, &from, &new_state, req.by.as_deref());
     }

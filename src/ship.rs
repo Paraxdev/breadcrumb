@@ -62,7 +62,8 @@ pub struct Report {
     pub merges: usize,
 }
 
-pub fn report(v: &Vault, project: &str, commits: &[Commit]) -> Result<Report> {
+/// `by_user` as in `MoveReq`: a session leaves an item in review where agents review it.
+pub fn report(v: &Vault, project: &str, commits: &[Commit], by_user: bool) -> Result<Report> {
     let scope = Scope::Project { slug: project.to_string(), with_global: false };
     let all = v.load_notes();
     let idx = backlog::Index::new(&all);
@@ -80,7 +81,7 @@ pub fn report(v: &Vault, project: &str, commits: &[Commit]) -> Result<Report> {
         hit.extend(found);
         if matches!(backlog::state(n).as_str(), "shipped" | "rejected") {
             r.closed.push(n.clone());
-        } else if let Some(why) = backlog::ship_blocker(n, &idx) {
+        } else if let Some(why) = backlog::ship_blocker(n, &idx).or_else(|| backlog::review_hold(v, n, by_user)) {
             r.not_landed.push((n.clone(), why));
         } else {
             r.open.push(n.clone());

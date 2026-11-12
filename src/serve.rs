@@ -535,6 +535,7 @@ impl App {
                 status: str_of(&b, "status"),
                 links: links_of(&b)?,
                 by: str_of(&b, "by"),
+                by_user: true,
                 ..Default::default()
             },
         )?;
@@ -552,6 +553,7 @@ impl App {
                 resolution: str_of(&b, "resolution"),
                 shipped_in: str_of(&b, "shipped_in"),
                 by: str_of(&b, "by"),
+                by_user: true,
                 ..Default::default()
             },
         )?;

@@ -1531,6 +1531,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     refs: u.refs,
                     slug: u.slug,
                     supersedes: u.supersedes.clone(),
+                    by_user: !backlog::in_session(),
                     ..Default::default()
                 },
             )?;
@@ -1901,8 +1902,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, ..Default::default() };
-            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "replaced_steps": r.replaced, "waiting_for_user": waiting_json(r), "note": r.note.to_json()});
+            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, by_user: !backlog::in_session(), ..Default::default() };
+            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "replaced_steps": r.replaced, "waiting_for_user": waiting_json(r), "left_for_user": steps_json(&r.kept_for_user), "note": r.note.to_json()});
             if let [id] = ids.as_slice() {
                 let r = backlog::move_item(&open()?, id, req)?;
                 out.emit(backlog::move_text(&r), moved_json(&r));
@@ -1951,12 +1952,13 @@ pub fn run(cli: Cli) -> Result<i32> {
                 let line = e.lines().next().unwrap_or_default().to_string();
                 anyhow::anyhow!("could not read {range} in {}, nothing moved: {line}", repo.display())
             })?;
-            let report = crate::ship::report(&v, &slug, &commits)?;
+            let by_user = !backlog::in_session();
+            let report = crate::ship::report(&v, &slug, &commits, by_user)?;
             let mut text = crate::ship::text(&report, &range, &repo);
             let mut data = crate::ship::json(&report, &range, &repo);
             if yes {
                 let ids: Vec<String> = report.open.iter().map(|n| n.id.clone()).collect();
-                let moved = backlog::ship_items(&v, &ids, shipped_in.as_deref(), by.as_deref())?;
+                let moved = backlog::ship_items(&v, &ids, shipped_in.as_deref(), by.as_deref(), by_user)?;
                 text.push_str(&crate::ship::unchecked_text(&report));
                 text.push_str(&format!("\nMoved {} items to shipped in one vault commit\n", moved.len()));
                 data["moved"] = json!(moved.len());
@@ -2060,8 +2062,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "waiting_for_user": waiting_json(&r), "note": r.note.to_json()}));
         }
         Cmd::Check { id, which, .. } => {
-            let (n, changed) = backlog::check(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?)?;
-            out.emit(backlog::check_text(&n, changed), json!({"ticked": changed, "unmet_acceptance": backlog::unmet_acceptance(&n), "note": n.to_json()}));
+            let backlog::Checked { note: n, ticked, kept_for_user: kept } = backlog::check_as(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?, !backlog::in_session())?;
+            let text = format!("{}\n{}", backlog::check_text(&n, &ticked), backlog::kept_for_user_text(&n.id, &kept));
+            out.emit(text.trim_end(), json!({"ticked": ticked.len(), "ticked_steps": ticked, "unmet_acceptance": backlog::unmet_acceptance(&n), "left_for_user": steps_json(&kept), "note": n.to_json()}));
         }
         Cmd::Tree { id, .. } => {
             let text = backlog::tree(&open()?, &id)?;
@@ -2116,7 +2119,11 @@ running MCP and serve processes keep the old version until their client restarts
 }
 
 fn waiting_json(r: &backlog::MoveResult) -> Json {
-    Json::Array(r.waiting_for_user.iter().map(|(i, c)| json!({"step": i, "text": c})).collect())
+    steps_json(&r.waiting_for_user)
+}
+
+fn steps_json(steps: &[(usize, String)]) -> Json {
+    Json::Array(steps.iter().map(|(i, c)| json!({"step": i, "text": c})).collect())
 }
 
 fn track_project(v: &Vault, project: Option<&str>, cwd: &Path) -> Option<String> {

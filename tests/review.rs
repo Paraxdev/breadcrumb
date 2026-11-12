@@ -230,7 +230,8 @@ fn review_numbers_steps_by_the_positions_check_takes() {
     let (_, out, _) = crumb(&v, &["--json", "review", "--all"]);
     let j: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(j["items"][0]["step_positions"], json!([2, 3]));
-    crumb(&v, &["check", &a.id, "3"]);
+    let (_, out, _) = crumb(&v, &["check", &a.id, "3"]);
+    assert_eq!(out, format!("{}: ticked step 3, still open: 2. Press it\n", a.id), "check names steps by the same positions");
     assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()), ["Press it"], "the number review showed is the one check ticks");
 }
 

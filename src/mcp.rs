@@ -389,6 +389,9 @@ impl Server {
                 if r.replaced > 0 {
                     out.push_str(&format!("\nreplaced {} open steps with the ones given, ticked ones stay", r.replaced));
                 }
+                if !r.kept_for_user.is_empty() {
+                    out.push_str(&format!("\n{}", backlog::kept_for_user_text(&r.note.id, &r.kept_for_user).trim_end()));
+                }
                 for w in &r.warnings {
                     out.push_str(&format!("\nwarning: {w}"));
                 }
