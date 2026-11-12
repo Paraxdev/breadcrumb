@@ -81,7 +81,7 @@ pub fn resolve_scope(v: &Vault, sel: &ScopeSel, cwd: &Path) -> Result<Scope> {
 
 /// Project that a new note goes to.
 pub fn target_project(v: &Vault, project: Option<&str>, global: bool, cwd: &Path) -> Result<Option<String>> {
-    if global {
+    if global || project.is_some_and(|p| p.trim().eq_ignore_ascii_case("global")) {
         return Ok(None);
     }
     if let Some(p) = project {

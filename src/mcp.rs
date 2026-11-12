@@ -812,3 +812,44 @@ pub fn tool_defs() -> Vec<Value> {
         tool("doctor", "Validate notes, fix repairs what it can.", obj(json!({"fix": bl(), "apply": bl()}), &[])),
     ]
 }
+
+/// `breadcrumb mcp --tools`: each tool, then one line per argument, from `tool_defs()` so it never drifts from tools/list.
+pub fn tools_text() -> String {
+    use std::fmt::Write as _;
+    fn kind(p: &Value) -> String {
+        let t = match &p["type"] {
+            Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" or "),
+            t => t.as_str().unwrap_or("any").to_string(),
+        };
+        match p["items"]["type"].as_str() {
+            Some(i) if t == "array" => format!("{i}[]"),
+            _ => t,
+        }
+    }
+    fn args(s: &mut String, schema: &Value, indent: usize) {
+        let required: Vec<&str> = schema["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        let Some(props) = schema["properties"].as_object() else { return };
+        for (name, p) in props {
+            let _ = write!(s, "{:indent$}{name} {}", "", kind(p));
+            if let Some(e) = p["enum"].as_array() {
+                let _ = write!(s, ": {}", e.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("|"));
+            }
+            if let Some(d) = p["description"].as_str() {
+                let _ = write!(s, ", {d}");
+            }
+            if required.contains(&name.as_str()) {
+                s.push_str(" (required)");
+            }
+            s.push('\n');
+            if p["type"] == "object" {
+                args(s, p, indent + 2);
+            }
+        }
+    }
+    let mut s = String::new();
+    for t in tool_defs() {
+        let _ = writeln!(s, "{}: {}", t["name"].as_str().unwrap_or_default(), t["description"].as_str().unwrap_or_default());
+        args(&mut s, &t["inputSchema"], 2);
+    }
+    s
+}
