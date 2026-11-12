@@ -1,8 +1,10 @@
 use crate::kind::FieldType;
 use crate::note::yaml_scalar_string;
+use crate::ops::Scope;
 use crate::vault::Vault;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Problem {
@@ -81,13 +83,79 @@ fn ops_pref_unpinned(n: &crate::note::Note) -> bool {
     crate::ops::is_pref(n) && !n.pinned && !n.is_archived()
 }
 
+pub struct Run {
+    pub problems: Vec<Problem>,
+    pub checked: usize,
+    pub scope: Scope,
+}
+
+/// Where doctor looks: the project given, else the one detected from `cwd` (always with global notes), else every note.
+pub fn scope_of(v: &Vault, project: Option<&str>, global: bool, all: bool, cwd: &std::path::Path) -> anyhow::Result<Scope> {
+    if all || (project.is_none() && !global && v.detect_project(cwd).is_none()) {
+        return Ok(Scope::All);
+    }
+    let sel = crate::ops::ScopeSel { project: project.map(str::to_string), global, all: false };
+    Ok(match crate::ops::resolve_scope(v, &sel, cwd)? {
+        Scope::Project { slug, .. } => Scope::Project { slug, with_global: true },
+        other => other,
+    })
+}
+
+fn rank(severity: &str) -> u8 {
+    match severity {
+        "error" => 0,
+        "warning" => 1,
+        _ => 2,
+    }
+}
+
+pub fn parse_severity(s: &str) -> anyhow::Result<u8> {
+    match s.trim() {
+        "error" | "warning" | "info" => Ok(rank(s.trim())),
+        other => anyhow::bail!("severity must be error, warning or info, got '{other}'"),
+    }
+}
+
 pub fn check(v: &Vault) -> Vec<Problem> {
     check_with(v, crate::importer::default_claude_dir().as_deref())
 }
 
 /// `claude_dir` is where imported Claude Code memory came from, for the duplicate index check.
 pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Problem> {
+    run(v, &Scope::All, claude_dir).problems
+}
+
+fn checkout_label(dir: &std::path::Path, cache: &mut HashMap<PathBuf, Option<String>>) -> String {
+    let at = cache
+        .entry(dir.to_path_buf())
+        .or_insert_with(|| {
+            if !crate::git::available() {
+                return None;
+            }
+            crate::git::current_branch(dir)
+                .map(|b| format!("on {b}"))
+                .or_else(|| crate::git::ok(dir, &["rev-parse", "--short", "HEAD"]).ok().filter(|s| !s.is_empty()).map(|s| format!("at {s}")))
+        })
+        .clone();
+    let name = crate::util::path_str(dir);
+    match at {
+        Some(a) => format!("{name} ({a})"),
+        None => name,
+    }
+}
+
+fn missing_line(missing: &[String], roots: &[PathBuf], cache: &mut HashMap<PathBuf, Option<String>>) -> String {
+    let n = missing.len();
+    let shown = missing.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let more = if n > 3 { format!(" (+{})", n - 3) } else { String::new() };
+    let from = roots.iter().map(|r| checkout_label(r, cache)).collect::<Vec<_>>().join(", ");
+    format!("mentions {n} path{} missing from {from}: {shown}{more}", if n == 1 { "" } else { "s" })
+}
+
+/// Vault level checks always run. Checks that need every note (links, ids, slugs, field refs) read all of them and report only for notes in `scope`.
+pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Run {
     let mut out = vec![];
+    let mut checkouts: HashMap<PathBuf, Option<String>> = HashMap::new();
     let mut err = |path: String, id: Option<String>, severity: &'static str, message: String| {
         out.push(Problem { path, id, severity, message });
     };
@@ -107,17 +175,35 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
     let days = v.config.stale_days;
     let kinds: HashMap<String, crate::kind::KindDef> = kinds.into_iter().map(|k| (k.name.clone(), k)).collect();
     let (notes, note_errors) = v.load_notes_report();
+    let mut checked = notes.iter().filter(|n| scope.contains(n)).count();
     for (p, e) in note_errors {
-        err(v.rel(&p), None, "error", e);
+        let project = v.project_of_path(&p);
+        let inside = match scope {
+            Scope::Project { slug, with_global } => project.as_ref().map_or(*with_global, |x| x == slug),
+            Scope::Global => project.is_none(),
+            Scope::All => true,
+        };
+        if inside {
+            checked += 1;
+            err(v.rel(&p), None, "error", e);
+        }
     }
     let lapsed = crate::lifecycle::Lapsed::of(&notes);
     let mut ids: HashMap<String, Vec<String>> = HashMap::new();
     for n in &notes {
         ids.entry(n.id.clone()).or_default().push(n.path.as_ref().map(|p| v.rel(p)).unwrap_or_default());
     }
+    let scoped_ids: HashSet<&str> = notes.iter().filter(|n| scope.contains(n)).map(|n| n.id.as_str()).collect();
     for n in &notes {
         let path = n.path.as_ref().map(|p| v.rel(p)).unwrap_or_default();
         let id = Some(n.id.clone());
+        if let Some(paths) = ids.get(&n.id)
+            && paths.len() > 1 && paths.first() == Some(&path) && scoped_ids.contains(n.id.as_str()) {
+                err(path.clone(), id.clone(), "error", format!("duplicate id {} in: {}", n.id, paths.join(", ")));
+            }
+        if !scope.contains(n) {
+            continue;
+        }
         let file_id = n.path.as_ref().and_then(|p| crate::id::id_from_file_name(&p.file_name()?.to_string_lossy()));
         if let Some(fid) = &file_id
             && fid != &n.id {
@@ -129,10 +215,6 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
         if let Some(s) = n.slug()
             && notes.iter().any(|o| o.id != n.id && o.slug().as_deref() == Some(s.as_str())) {
                 err(path.clone(), id.clone(), "warning", format!("slug '{s}' is used by several notes, rename one with `breadcrumb update --slug`"));
-            }
-        if let Some(paths) = ids.get(&n.id)
-            && paths.len() > 1 && paths.first() == Some(&path) {
-                err(path.clone(), id.clone(), "error", format!("duplicate id {} in: {}", n.id, paths.join(", ")));
             }
         for w in &n.warnings {
             let sev = if w.starts_with(crate::note::INVALID_YAML) { "error" } else { "warning" };
@@ -161,8 +243,9 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
         if !n.is_archived()
             && let Some(rs) = n.project.as_ref().and_then(|p| roots.get(p))
         {
-            for m in missing_refs(n, rs) {
-                err(path.clone(), id.clone(), "warning", format!("mentions `{m}`, which does not exist in the project checkout"));
+            let missing = missing_refs(n, rs);
+            if !missing.is_empty() {
+                err(path.clone(), id.clone(), "warning", missing_line(&missing, rs, &mut checkouts));
             }
         }
         if let Some(crate::lifecycle::Expiry::Invalid(raw)) = crate::lifecycle::expiry(n) {
@@ -205,8 +288,9 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
             }
         }
     }
-    for (i, msg) in crate::merge::likely_lines(&notes, &lapsed) {
-        let n = &notes[i];
+    let scoped: Vec<crate::note::Note> = notes.iter().filter(|n| scope.contains(n)).cloned().collect();
+    for (i, msg) in crate::merge::likely_lines(&scoped, &lapsed) {
+        let n = &scoped[i];
         err(n.path.as_ref().map(|p| v.rel(p)).unwrap_or_default(), Some(n.id.clone()), "info", msg);
     }
     if let Some(cdir) = claude_dir {
@@ -223,21 +307,45 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
             }
         }
     }
-    out
+    Run { problems: out, checked, scope: scope.clone() }
+}
+
+impl Run {
+    /// Problems at `min` rank or worse, all of them without a filter.
+    pub fn shown(&self, min: Option<u8>) -> Vec<&Problem> {
+        self.problems.iter().filter(|p| min.is_none_or(|m| rank(p.severity) <= m)).collect()
+    }
+
+    pub fn errors(&self) -> usize {
+        self.problems.iter().filter(|p| p.severity == "error").count()
+    }
+
+    /// Summary line first, naming the scope and, when scoped, how to check the rest (`rest` is the surface's flag).
+    pub fn text(&self, min: Option<u8>, rest: &str) -> String {
+        use std::fmt::Write;
+        let count = |sev: &str| self.problems.iter().filter(|p| p.severity == sev).count();
+        let of = match &self.scope {
+            Scope::All => String::new(),
+            Scope::Global => " global".into(),
+            Scope::Project { slug, with_global: true } => format!(" of {slug} and global"),
+            Scope::Project { slug, .. } => format!(" of {slug}"),
+        };
+        let mut s = format!("checked {} notes{of}: {} errors, {} warnings", self.checked, count("error"), count("warning"));
+        let info = count("info");
+        if info > 0 {
+            let _ = write!(s, ", {info} info");
+        }
+        if self.scope != Scope::All {
+            let _ = write!(s, ", {rest} checks the rest");
+        }
+        s.push('\n');
+        for p in self.shown(min) {
+            let _ = writeln!(s, "{}: {}: {}", p.severity, p.path, p.message);
+        }
+        s
+    }
 }
 
 pub fn text(problems: &[Problem], note_count: usize) -> String {
-    use std::fmt::Write;
-    let mut s = String::new();
-    for p in problems {
-        let _ = writeln!(s, "{}: {}: {}", p.severity, p.path, p.message);
-    }
-    let count = |sev: &str| problems.iter().filter(|p| p.severity == sev).count();
-    let _ = write!(s, "checked {note_count} notes: {} errors, {} warnings", count("error"), count("warning"));
-    let info = count("info");
-    if info > 0 {
-        let _ = write!(s, ", {info} info");
-    }
-    s.push('\n');
-    s
+    Run { problems: problems.to_vec(), checked: note_count, scope: Scope::All }.text(None, "")
 }

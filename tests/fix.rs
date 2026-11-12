@@ -26,8 +26,8 @@ fn doctor_fix_rewrites_moved_paths_and_marks_gone_ones() {
     let body = "See `src/old_name.rs:12` and `lib/helper.py`, also `src/gone.rs` and `src/new_name.rs`.";
     let n = common::add(&v, "Engine notes", "note", Some("demo"), &[]);
     ops::update(&v, &n.id, UpdateReq { body: Some(body.into()), set_paths: Some(vec!["src/engine/**".into(), "src/vanished/**".into(), "*.rs".into()]), ..Default::default() }).unwrap();
-    let warnings = |v: &breadcrumb::vault::Vault| breadcrumb::doctor::check(v).into_iter().filter(|p| p.message.contains("does not exist")).count();
-    assert_eq!(warnings(&v), 5);
+    let warnings = |v: &breadcrumb::vault::Vault| breadcrumb::doctor::check(v).into_iter().filter(|p| p.message.contains("path") && p.message.contains("missing from")).count();
+    assert_eq!(warnings(&v), 1, "the five missing paths of one note are one finding");
 
     let plan = breadcrumb::fix::plan(&v);
     let lines: Vec<String> = plan.iter().map(|c| c.line()).collect();

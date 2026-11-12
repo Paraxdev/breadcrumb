@@ -292,15 +292,15 @@ fn doctor_reports_missing_repo_paths() {
     assert_eq!(breadcrumb::doctor::file_refs(body), vec!["src/real.rs", "src/gone.rs"]);
 
     let doc = stdout(&breadcrumb(&v.root, &["doctor"], "", &proj));
-    assert!(doc.contains("mentions `src/gone.rs`"), "{doc}");
-    assert!(doc.contains("mentions `gone_dir`"), "{doc}");
+    assert!(doc.contains("mentions 2 paths missing from ") && doc.contains(": src/gone.rs, gone_dir
+"), "{doc}");
     assert!(!doc.contains("src/real.rs") && !doc.contains("example.com") && !doc.contains("src/engine"), "{doc}");
 
     ops::project_add(&v, "nowhere", None, None, &["/definitely/not/here/proj".into()]).unwrap();
     let m = add_scoped(&v, "Elsewhere", "note", Some("nowhere"), &[]);
     ops::update(&v, &m.id, UpdateReq { body: Some("`src/gone.rs`".into()), ..Default::default() }).unwrap();
-    let doc = stdout(&breadcrumb(&v.root, &["doctor"], "", &proj));
-    assert_eq!(doc.matches("mentions `src/gone.rs`").count(), 1, "skipped when the project has no checkout here: {doc}");
+    let doc = stdout(&breadcrumb(&v.root, &["doctor", "--all"], "", &proj));
+    assert_eq!(doc.matches("missing from").count(), 1, "skipped when the project has no checkout here: {doc}");
 }
 
 fn write_memory(dir: &Path, file: &str, name: &str, body: &str) {

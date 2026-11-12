@@ -511,8 +511,12 @@ impl Server {
                 Ok(format!("{}{}", crate::fix::text(&changes, applied), crate::lifecycle::sweep_text(&expired, apply)).replace("--yes", "apply: true"))
             }
             "doctor" => {
-                let problems = crate::doctor::check(&v);
-                Ok(crate::doctor::text(&problems, v.note_files().len()))
+                let min = s(a, "severity").as_deref().map(crate::doctor::parse_severity).transpose()?;
+                let p = s(a, "project");
+                let is = |x: &str| p.as_deref() == Some(x);
+                let sc = crate::doctor::scope_of(&v, p.as_deref().filter(|p| *p != "all" && *p != "global"), is("global"), is("all"), &self.cwd_of(a))?;
+                let run = crate::doctor::run(&v, &sc, crate::importer::default_claude_dir().as_deref());
+                Ok(run.text(min, "`project: all`"))
             }
             other => bail!("unknown tool '{other}'"),
         }
@@ -806,6 +810,6 @@ pub fn tool_defs() -> Vec<Value> {
             "after": {"type": "string", "description": "move: sha, else first"},
         })), &[])),
         tool("sync", "Commit, pull and push the vault.", obj(json!({"message": st()}), &[])),
-        tool("doctor", "Validate notes, fix repairs what it can.", obj(json!({"fix": bl(), "apply": bl()}), &[])),
+        tool("doctor", "Validate notes, fix repairs what it can.", obj(json!({"fix": bl(), "apply": bl(), "project": st(), "severity": st()}), &[])),
     ]
 }
