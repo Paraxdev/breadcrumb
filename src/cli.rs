@@ -2171,7 +2171,7 @@ fn not_a_flag(text: &str, usage: &str) -> Result<()> {
 /// the next word. This names the flag instead.
 fn mistyped_flag() -> Option<String> {
     use clap::CommandFactory;
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     if args.iter().any(|a| a == "--") {
         return None;
     }

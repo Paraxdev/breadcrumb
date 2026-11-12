@@ -358,7 +358,9 @@ fn trim_to_budget(head: &str, mut blocks: Vec<(Option<&'static str>, String)>, o
             let mut lines: Vec<&str> = blocks[i].1.split_inclusive('\n').collect();
             let Some(last) = lines.iter().rposition(|l| !act(l)) else { break };
             lines.remove(last);
+            // A heading without rows goes too. The latest handoff opens with its title, not a heading.
             if let [only] = lines.as_slice()
+                && name != "handoff"
                 && only.trim_end().ends_with(':')
             {
                 lines.clear();

@@ -353,7 +353,9 @@ fn the_cut_to_fit_never_takes_an_answer_that_arrived_or_leaves_a_heading_alone()
     for t in 1..=3 {
         common::add(&v, &format!("State of track {t}, a handoff title that goes on for quite a while longer"), "handoff", Some("app"), &[("track", &format!("o{t}"))]);
     }
-    ops::add(&v, AddReq { title: "Main state".into(), kind: Some("handoff".into()), project: Some("app".into()), body: Some("Where it stands. ".repeat(60)), ..Default::default() }).unwrap();
+    tick();
+    ops::add(&v, AddReq { title: "Where it stands:".into(), kind: Some("handoff".into()), project: Some("app".into()), body: Some("Line of the body.
+".repeat(40)), ..Default::default() }).unwrap();
     for i in 0..4 {
         let t = common::add(&v, &format!("Task {i} with a question"), "task", Some("app"), &[("state", "queued")]);
         let options = ["this way", "that way"].iter().map(|l| Opt { label: l.to_string(), desc: String::new() }).collect();
@@ -377,4 +379,10 @@ fn the_cut_to_fit_never_takes_an_answer_that_arrived_or_leaves_a_heading_alone()
             assert!(!["Other live handoffs:", "Todos:", "Pinned (get an id for its body):"].contains(&l) || !(next.is_empty() || next.starts_with("Backlog:") || next.starts_with("Latest handoff") || next.starts_with("[cut to fit")), "{budget}, a heading without rows: {d}");
         }
     }
+    let alone = (880..=1000).step_by(10).any(|budget| {
+        let d = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(budget), ..Default::default() }).unwrap();
+        d.contains("): Where it stands:
+") && !d.contains("for more)")
+    });
+    assert!(alone, "a handoff title that ends with a colon is no heading, its line stays when it is all of the handoff that fits");
 }
