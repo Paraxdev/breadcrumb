@@ -6,6 +6,8 @@ How the tool behaves, for agents working on or with it. The source in `src/` is 
 
 Notes are plain markdown files with YAML frontmatter, every write is a git commit, and `breadcrumb sync` pushes to whatever remote you set. Run `breadcrumb guide` for the agent conventions.
 
+`breadcrumb project link <slug> [--path dir]` (the `project` tool, action link) binds a directory and its git remotes to a project. A directory another project already holds, the exact same path, is refused with the holder named and the command that takes it over, `breadcrumb project link <slug> --path <dir> --move`, which removes the path from the other project and binds it to this one in one vault commit (CLI only, the tool has no flag). Linking it again to the project that holds it changes nothing. A project bound to a parent or child directory is fine, detection takes the git remote first, then the longest path.
+
 ## Importing Claude Code memory
 
 `breadcrumb import claude` pulls in Claude Code auto-memory, `--retire-index` swaps each MEMORY.md for a pointer to breadcrumb and keeps the old one as MEMORY.md.breadcrumb.bak. The vault lives at ~/breadcrumb unless `BREADCRUMB_HOME` says otherwise.
