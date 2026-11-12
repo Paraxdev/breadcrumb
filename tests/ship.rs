@@ -99,13 +99,22 @@ fn a_release_note_is_one_line_set_by_update_and_move() {
 }
 
 #[test]
-fn moving_to_review_hints_and_warns_but_never_refuses() {
+fn moving_to_review_warns_in_one_line_but_never_refuses() {
     let (_d, v) = common::vault();
+    let z = common::add(&v, "Nothing", "task", Some("app"), &[]).id;
+    let (ok, out, _) = crumb(&v, &["move", &z, "review"]);
+    assert!(ok, "{out}");
+    let w: Vec<&str> = out.lines().filter(|l| l.starts_with("warning:")).collect();
+    assert_eq!(w.len(), 1, "{out}");
+    assert!(w[0].contains("without steps for the reviewer (--step") && w[0].contains("a commit: ref or shipped_in") && w[0].contains("(--ref commit:") && w[0].contains("and a release note (--release-note"), "{out}");
+    assert!(w[0].contains("(MCP move steps, refs and release_note)"), "{out}");
+
     let a = common::add(&v, "Bare", "task", Some("app"), &[]).id;
     let (ok, out, _) = crumb(&v, &["move", &a, "review", "--step", "Try"]);
     assert!(ok, "{out}");
-    assert_eq!(out.lines().filter(|l| l.starts_with("hint:") && l.contains("no release note")).count(), 1, "{out}");
-    assert_eq!(out.lines().filter(|l| l.starts_with("warning:") && l.contains("no commit: ref or shipped_in")).count(), 1, "{out}");
+    let w: Vec<&str> = out.lines().filter(|l| l.starts_with("warning:")).collect();
+    assert!(w.len() == 1 && w[0].contains("without a commit: ref or shipped_in") && w[0].contains("and a release note") && !w[0].contains("steps"), "{out}");
+    assert!(!out.contains("hint:"), "{out}");
 
     let b = common::add(&v, "With refs", "task", Some("app"), &[]).id;
     let (ok, out, _) = crumb(&v, &["move", &b, "review", "--step", "Try", "--ref", "commit:abc1234", "--release-note", "Line"]);
@@ -113,11 +122,11 @@ fn moving_to_review_hints_and_warns_but_never_refuses() {
 
     let c = common::add(&v, "With shipped_in", "task", Some("app"), &[]).id;
     crumb(&v, &["update", &c, "--field", "shipped_in=beta 1.0.386 (main 19fcf4af)"]);
-    assert!(!crumb(&v, &["move", &c, "review", "--step", "Try"]).1.contains("no commit: ref"));
+    assert!(!crumb(&v, &["move", &c, "review", "--step", "Try"]).1.contains("commit: ref"));
 
     let d = common::add(&v, "Elsewhere", "task", Some("app"), &[]).id;
     let (ok, out, _) = crumb(&v, &["move", &d, "in-progress"]);
-    assert!(ok && !out.contains("hint:") && !out.contains("no commit: ref"), "{out}");
+    assert!(ok && !out.contains("warning:"), "{out}");
 }
 
 #[test]

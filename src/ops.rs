@@ -89,7 +89,7 @@ pub fn resolve_scope(v: &Vault, sel: &ScopeSel, cwd: &Path) -> Result<Scope> {
 
 /// Project that a new note goes to.
 pub fn target_project(v: &Vault, project: Option<&str>, global: bool, cwd: &Path) -> Result<Option<String>> {
-    if global {
+    if global || project.is_some_and(|p| p.trim().eq_ignore_ascii_case("global")) {
         return Ok(None);
     }
     if let Some(p) = project {
@@ -314,11 +314,6 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     add_noted(v, req).map(|r| r.0)
 }
 
-/// Backlog state words an agent may pass as a kind, `idea` is a kind too.
-fn state_as_kind(kind: &str) -> Option<&'static str> {
-    crate::backlog::STATES.iter().copied().find(|s| *s == kind && *s != "idea")
-}
-
 /// The note and what `add` changed on the way that the caller should say, a repaired slug.
 pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
     let title = crate::util::one_line(&req.title);
@@ -326,13 +321,7 @@ pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
         bail!("title is required");
     }
     let kind_name = req.kind.clone().filter(|k| !k.trim().is_empty()).unwrap_or_else(|| crate::config::effective(v, req.project.as_deref()).default_kind);
-    let k = match v.require_kind(kind_name.trim()) {
-        Ok(k) => k,
-        Err(e) => match state_as_kind(&kind_name.trim().to_lowercase()) {
-            Some(s) => bail!("'{s}' is a backlog state, not a kind, use kind bug, feature or task with field state={s}"),
-            None => return Err(e),
-        },
-    };
+    let k = v.require_kind(kind_name.trim())?;
     let mut req = req;
     if k.name == crate::judge::JUDGMENT && crate::judge::home(v).is_some() && req.project != crate::judge::home(v) {
         if let Some(p) = req.project.take().filter(|_| !req.fields.iter().any(|(f, _)| f == "seen_in")) {

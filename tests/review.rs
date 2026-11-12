@@ -41,19 +41,19 @@ fn steps_are_acceptance_criteria_and_moving_without_them_only_warns() {
     let a = common::add(&v, "No steps", "bug", Some("app"), &[]);
     let r = to_review(&v, &a.id, &[]);
     assert_eq!(r.to, "review", "never a refusal");
-    assert!(r.warnings[0].contains("no steps") && backlog::move_text(&r).contains("warning: "), "{:?}", r.warnings);
+    assert!(r.warnings[0].contains("without steps for the reviewer") && backlog::move_text(&r).contains("warning: "), "{:?}", r.warnings);
 
     let r = to_review(&v, &a.id, &["Open the app", "Press the button"]);
-    assert!(r.changed && !r.warnings.iter().any(|w| w.contains("no steps")));
+    assert!(r.changed && !r.warnings.iter().any(|w| w.contains("without steps")));
     assert_eq!(backlog::review_steps(&r.note), ["Open the app", "Press the button"]);
     assert_eq!(backlog::unmet_acceptance(&r.note).len(), 2);
-    assert!(!to_review(&v, &a.id, &["open the APP"]).changed, "a known step is not added twice");
+    assert!(!to_review(&v, &a.id, &["open the APP", "Press the button"]).changed, "a known step is not added twice");
 
     let f = common::add(&v, "Has criteria", "feature", Some("app"), &[("acceptance", "['[x] builds', renders]")]);
     let r = to_review(&v, &f.id, &[]);
-    assert!(!r.warnings.iter().any(|w| w.contains("no steps")), "open criteria are the steps");
+    assert!(!r.warnings.iter().any(|w| w.contains("without steps")), "open criteria are the steps");
     assert_eq!(backlog::review_steps(&r.note), ["renders"]);
-    let r = to_review(&v, &f.id, &["builds"]);
+    let r = to_review(&v, &f.id, &["builds", "renders"]);
     assert_eq!(backlog::review_steps(&r.note), ["builds", "renders"], "asking for a met one again opens it");
 
     let t = common::add(&v, "Elsewhere", "task", Some("app"), &[]);
@@ -94,7 +94,7 @@ fn pass_and_fail_through_the_cli() {
     let (_d, v) = common::vault();
     let a = common::add(&v, "Pass me", "task", Some("app"), &[("priority", "p1")]);
     let (ok, out, _) = crumb(&v, &["move", &a.id, "review", "--step", "Open it", "--step", "Click it"]);
-    assert!(ok && !out.contains("no steps"), "{out}");
+    assert!(ok && !out.contains("without steps"), "{out}");
     let (_, out, _) = crumb(&v, &["review", "--project", "app"]);
     assert!(out.contains("1. Open it") && out.contains("2. Click it"), "{out}");
 
@@ -198,4 +198,23 @@ fn remote_review_is_as_protected_as_answering() {
     ok.headers.push(("Origin".into(), format!("https://{HOST}")));
     assert_eq!(app.handle(&ok).status, 200);
     assert_eq!(backlog::state(&v.get(&a.id).unwrap()), "done");
+}
+
+#[test]
+fn a_rereview_replaces_open_steps_and_keeps_ticked_ones() {
+    let (_d, v) = common::vault();
+    let a = common::add(&v, "Again", "task", Some("app"), &[]);
+    to_review(&v, &a.id, &["Open it", "Press it", "Close it"]);
+    backlog::check(&v, &a.id, &backlog::Check::parse("1").unwrap()).unwrap();
+    let (ok, out, err) = crumb(&v, &["move", &a.id, "review", "--step", "Close it", "--step", "Reload it"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("replaced 1 open steps with the ones given, ticked ones stay"), "{out}");
+    let n = v.get(&a.id).unwrap();
+    assert_eq!(backlog::unmet_acceptance(&n), ["Close it", "Reload it"]);
+    let all: Vec<&str> = n.field("acceptance").and_then(|a| a.as_sequence()).unwrap().iter().filter_map(|c| c.as_str()).collect();
+    assert_eq!(all, ["[x] Open it", "Close it", "Reload it"], "the ticked step stays");
+
+    let b = common::add(&v, "First time", "task", Some("app"), &[("acceptance", "[builds]")]);
+    let r = to_review(&v, &b.id, &["Run it"]);
+    assert_eq!((r.replaced, backlog::review_steps(&r.note).len()), (0, 2), "entering review adds as before");
 }

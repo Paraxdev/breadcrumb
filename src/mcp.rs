@@ -377,16 +377,19 @@ impl Server {
                 };
                 let req = MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note") };
                 let r = backlog::move_item(&v, &id, req)?;
+                if let Some(w) = backlog::user_wait_text(&r) {
+                    return Ok(w.trim_end().to_string());
+                }
                 let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.handle(), r.to) };
                 if !r.unmet.is_empty() {
                     let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
                     out.push_str(&format!("\nwarning, acceptance criteria not marked [x], tick with move check \"all\" or \"2,3\": {}", unmet.join("; ")));
                 }
+                if r.replaced > 0 {
+                    out.push_str(&format!("\nreplaced {} open steps with the ones given, ticked ones stay", r.replaced));
+                }
                 for w in &r.warnings {
                     out.push_str(&format!("\nwarning: {w}"));
-                }
-                for h in &r.hints {
-                    out.push_str(&format!("\nhint: {h}"));
                 }
                 Ok(out)
             }
@@ -767,7 +770,7 @@ pub fn tool_defs() -> Vec<Value> {
             "resolution": {"type": "string", "description": "for rejected"},
             "shipped_in": st(),
             "check": {"type": "string", "description": "tick: all or 2,3"},
-            "steps": {"type": "array", "items": st(), "description": "review: what to try"},
+            "steps": {"type": "array", "items": st(), "description": "review: what to try, user: prefix = user only"},
             "verdict": {"type": "string", "enum": ["pass", "fail"]},
             "evidence": st(),
             "release_note": st(),
@@ -836,4 +839,45 @@ pub fn tool_defs() -> Vec<Value> {
         tool("sync", "Commit, pull and push the vault.", obj(json!({"message": st()}), &[])),
         tool("doctor", "Validate notes, fix repairs what it can.", obj(json!({"fix": bl(), "apply": bl(), "project": st(), "severity": st()}), &[])),
     ]
+}
+
+/// `breadcrumb mcp --tools`: each tool, then one line per argument, from `tool_defs()` so it never drifts from tools/list.
+pub fn tools_text() -> String {
+    use std::fmt::Write as _;
+    fn kind(p: &Value) -> String {
+        let t = match &p["type"] {
+            Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" or "),
+            t => t.as_str().unwrap_or("any").to_string(),
+        };
+        match p["items"]["type"].as_str() {
+            Some(i) if t == "array" => format!("{i}[]"),
+            _ => t,
+        }
+    }
+    fn args(s: &mut String, schema: &Value, indent: usize) {
+        let required: Vec<&str> = schema["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        let Some(props) = schema["properties"].as_object() else { return };
+        for (name, p) in props {
+            let _ = write!(s, "{:indent$}{name} {}", "", kind(p));
+            if let Some(e) = p["enum"].as_array() {
+                let _ = write!(s, ": {}", e.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("|"));
+            }
+            if let Some(d) = p["description"].as_str() {
+                let _ = write!(s, ", {d}");
+            }
+            if required.contains(&name.as_str()) {
+                s.push_str(" (required)");
+            }
+            s.push('\n');
+            if p["type"] == "object" {
+                args(s, p, indent + 2);
+            }
+        }
+    }
+    let mut s = String::new();
+    for t in tool_defs() {
+        let _ = writeln!(s, "{}: {}", t["name"].as_str().unwrap_or_default(), t["description"].as_str().unwrap_or_default());
+        args(&mut s, &t["inputSchema"], 2);
+    }
+    s
 }

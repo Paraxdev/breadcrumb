@@ -29,21 +29,32 @@ pub struct Cli {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ScopeArgs {
-    /// Project slug (default: detected from the current directory)
+    /// Project slug, all or global (default: detected from the current directory)
     #[arg(long, short = 'p')]
     pub project: Option<String>,
     /// Only global notes
     #[arg(long, conflicts_with_all = ["project", "all"])]
     pub global: bool,
-    /// Every project and global
-    #[arg(long, conflicts_with = "project")]
+    /// Every project and global, wins over --project
+    #[arg(long)]
     pub all: bool,
 }
 
 impl ScopeArgs {
+    /// The MCP `project` takes all and global as words, so `-p` does too.
     fn sel(&self) -> ScopeSel {
-        ScopeSel { project: self.project.clone(), global: self.global, all: self.all }
+        let p = self.project.as_deref().map(str::trim);
+        let all = self.all || p.is_some_and(|p| p.eq_ignore_ascii_case("all"));
+        let global = !all && (self.global || p.is_some_and(|p| p.eq_ignore_ascii_case("global")));
+        ScopeSel { project: self.project.clone().filter(|_| !all && !global), global, all }
     }
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct IgnoredProject {
+    /// Accepted and ignored, an id or slug names one note in the whole vault
+    #[arg(long = "project", short = 'p', hide = true, value_name = "SLUG")]
+    pub ignored_project: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -124,6 +135,8 @@ pub enum Cmd {
         /// Keep only the last N lines of the text, History stays whole
         #[arg(long, value_name = "N")]
         tail: Option<usize>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Change a note
     Update(UpdateArgs),
@@ -133,12 +146,16 @@ pub enum Cmd {
         id: String,
         /// The paragraph, "-" reads stdin
         text: String,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Mark notes as still accurate, without changing them otherwise
     Verify {
         /// Note ids or slugs
         #[arg(required = true, num_args = 1..)]
         ids: Vec<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// List short names, --backfill names the notes without one (dry unless --yes)
     Slugs {
@@ -164,6 +181,8 @@ pub enum Cmd {
         /// Only the link of this type (default: every link between the two)
         #[arg(long)]
         rel: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Link two notes
     Link {
@@ -177,6 +196,8 @@ pub enum Cmd {
         /// Remove the link instead, every link between the two without --rel, same as `unlink`
         #[arg(long)]
         remove: bool,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Merge a duplicate note into the one that stays, nothing is lost, --undo restores it
     Merge {
@@ -186,16 +207,22 @@ pub enum Cmd {
         /// Take the merge back: both notes return as they were
         #[arg(long)]
         undo: bool,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Archive a note
     Archive {
         /// Note id or slug
         id: String,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Restore an archived note to active
     Unarchive {
         /// Note id or slug
         id: String,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Delete a note file (git history keeps it)
     Delete {
@@ -204,6 +231,8 @@ pub enum Cmd {
         /// Really delete, without it the command refuses
         #[arg(long, alias = "confirm")]
         yes: bool,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// List notes
     List {
@@ -270,8 +299,17 @@ pub enum Cmd {
         #[arg(short = 'm', long)]
         message: Option<String>,
     },
-    /// Run the MCP server on stdio
-    Mcp,
+    /// Run the MCP server on stdio, --tools lists its tools
+    ///
+    /// It reads newline delimited JSON-RPC 2.0 on stdin, one message per line, and writes
+    /// one reply per request to stdout, logs go to stderr. Methods: initialize, ping, tools/list, and tools/call with
+    /// params {name, arguments}, a tool error comes back as a result with isError. `breadcrumb mcp-config` prints the
+    /// command that registers it with Claude Code.
+    Mcp {
+        /// Print every tool with its arguments, types and allowed words, from the same definitions tools/list sends, and exit
+        #[arg(long)]
+        tools: bool,
+    },
     /// Print the command that registers the MCP server with Claude Code
     McpConfig,
     /// The vault's settings with what each does, `config set <key> <value>` changes one (review_by, judge_nudge, ...), add `--project <slug>` to override it for one project
@@ -351,6 +389,9 @@ pub enum Cmd {
         /// Also the shipped and rejected columns
         #[arg(long)]
         include_closed: bool,
+        /// Only these columns, like queued or review,in-progress (repeatable), being-built and waiting-on-user too. `list --where state=queued` lists every queued item flat, being built or waiting included
+        #[arg(long = "state", value_name = "STATE", value_delimiter = ',')]
+        states: Vec<String>,
     },
     /// Queue an item (end of queue by default)
     Queue {
@@ -365,6 +406,8 @@ pub enum Cmd {
         /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Highest priority unblocked queued item
     Next {
@@ -421,6 +464,9 @@ pub enum Cmd {
         /// Release the claim instead, the same as `release`
         #[arg(long)]
         release: bool,
+        /// Project of a track:<name> (default: detected from the current directory), an id ignores it
+        #[arg(long, short = 'p', value_name = "SLUG")]
+        project: Option<String>,
     },
     /// Release the claim on an item
     Release {
@@ -432,6 +478,9 @@ pub enum Cmd {
         /// Release another session's fresh claim
         #[arg(long)]
         force: bool,
+        /// Project of a track:<name> (default: detected from the current directory), an id ignores it
+        #[arg(long, short = 'p', value_name = "SLUG")]
+        project: Option<String>,
     },
     /// Ask the user a question about an item, an open question locks the item until it is answered. `questions` lists, `answer` and `unask` close
     #[command(visible_alias = "question")]
@@ -452,6 +501,8 @@ pub enum Cmd {
         /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// List the open questions (--answered adds answers no agent acknowledged yet)
     Questions {
@@ -483,6 +534,8 @@ pub enum Cmd {
         /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Withdraw an open question, which unlocks the item
     #[command(visible_alias = "withdraw")]
@@ -492,6 +545,8 @@ pub enum Cmd {
         /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Change the state of a backlog item
     Move {
@@ -515,7 +570,7 @@ pub enum Cmd {
         /// Also mark acceptance criteria met: all, or positions like 2,3
         #[arg(long, value_name = "WHICH")]
         check: Option<String>,
-        /// Moving to review, what the user should try (repeatable)
+        /// Moving to review, what the reviewer should try (repeatable). A step starting with user: is for the user alone, agents never run it. On an item already in review the steps given replace its open ones
         #[arg(long = "step", alias = "steps", value_name = "TEXT", allow_hyphen_values = true)]
         steps: Vec<String>,
         /// One line for the release notes, `ship` prints it
@@ -524,6 +579,8 @@ pub enum Cmd {
         /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, a bare sha reads as commit:<sha>, -type:value removes (repeatable)
         #[arg(long = "ref", alias = "refs", value_name = "REF", allow_hyphen_values = true)]
         refs: Vec<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// What a range of commits landed: release note lines, items, merges no item points at, --yes moves those in review or done to shipped
     Ship {
@@ -603,16 +660,22 @@ pub enum Cmd {
         id: String,
         /// all (default), or 1 based positions like 2,3
         which: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Epic, feature and task hierarchy
     Tree {
         /// Item id or slug
         id: String,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// What an item blocks and what blocks it, transitively
     Deps {
         /// Item id or slug
         id: String,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Change the kind of an item, keeping id, links and history
     Promote {
@@ -624,6 +687,8 @@ pub enum Cmd {
         /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Back up and restore Claude Code workflow scripts (.claude/workflows)
     #[command(subcommand)]
@@ -699,16 +764,18 @@ pub enum ConfigCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum ReviewCmd {
-    /// It works: move to done and mark its steps met
+    /// It works: move to done and mark its steps met. When agents review, an agent's pass leaves open user: steps for the user
     Pass {
         /// Item id or slug
         id: String,
-        /// Who did it, for the history (default: this session), a reviewer subagent names itself here
+        /// Who did it, for the history (default: this session), a reviewer subagent names itself here, user is the user's own pass
         #[arg(long)]
         by: Option<String>,
         /// What you ran and what you saw, added to the body, required when review_by is agent
         #[arg(long, allow_hyphen_values = true)]
         evidence: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// It does not: back to queued with the reason, keeping its priority
     Fail {
@@ -723,6 +790,8 @@ pub enum ReviewCmd {
         /// What you ran, kept for the next builder (optional, the reason usually says it)
         #[arg(long, allow_hyphen_values = true)]
         evidence: Option<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
 }
 
@@ -934,8 +1003,8 @@ pub enum WorkflowCmd {
         /// Project slug (default: detected from the current directory)
         #[arg(long, short = 'p')]
         project: Option<String>,
-        /// Every project
-        #[arg(long, conflicts_with = "project")]
+        /// Every project, wins over --project
+        #[arg(long)]
         all: bool,
     },
 }
@@ -1047,9 +1116,12 @@ pub enum RemoteCmd {
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
-    /// Short specific title
-    #[arg(long, short = 't')]
-    pub title: String,
+    /// Short specific title, or give it with --title
+    #[arg(value_name = "TITLE", required_unless_present = "title_flag", conflicts_with = "title_flag")]
+    pub title: Option<String>,
+    /// Short specific title, the same as the positional one
+    #[arg(long = "title", short = 't', value_name = "TITLE")]
+    pub title_flag: Option<String>,
     /// A handoff's line of work, a new handoff replaces the live one of its track, or without one its own session's
     #[arg(long, value_name = "WORD")]
     pub track: Option<String>,
@@ -1170,6 +1242,8 @@ pub struct UpdateArgs {
     /// Id or slug this note replaces (repeatable), a handoff also unpins it and the digest stops showing it
     #[arg(long, value_name = "ID")]
     pub supersedes: Vec<String>,
+    #[command(flatten)]
+    pub _p: IgnoredProject,
 }
 
 struct Out {
@@ -1335,7 +1409,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let links = a.supersedes.into_iter().map(|to| crate::note::Link { to, rel: ops::SUPERSEDES.into() }).collect();
             let judgment = a.kind.as_deref().is_some_and(|k| k.trim() == crate::judge::JUDGMENT);
             let req = AddReq {
-                title: a.title,
+                title: a.title.or(a.title_flag).unwrap_or_default(),
                 kind: a.kind,
                 project,
                 tags: a.tags,
@@ -1385,7 +1459,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let landed = ops::landed(&n).map(|l| format!("  {l}")).unwrap_or_default();
             out.emit(format!("added {}  {}  {}  {}{name}{landed}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
         }
-        Cmd::Get { id, full, body, tail } => {
+        Cmd::Get { id, full, body, tail, .. } => {
             let v = open()?;
             let n = v.get(&id)?;
             let all = v.load_notes();
@@ -1448,7 +1522,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             )?;
             out.emit(format!("updated {}  {}{}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
         }
-        Cmd::Append { id, text } => {
+        Cmd::Append { id, text, .. } => {
             let text = read_body_arg(Some(text), None)?.unwrap_or_default();
             let n = ops::append(&open()?, &id, &text)?;
             out.emit(format!("appended to {}  {}", n.id, n.title), n.to_json());
@@ -1464,13 +1538,13 @@ pub fn run(cli: Cli) -> Result<i32> {
                 out.emit(text.join("\n"), Json::Array(named.iter().map(|n| json!({"slug": n.slug(), "id": n.id, "title": n.title})).collect()));
             }
         }
-        Cmd::Verify { ids } => {
+        Cmd::Verify { ids, .. } => {
             let ns = ops::verify(&open()?, &ids)?;
             let text: Vec<String> = ns.iter().map(|n| format::ack("verified", n)).collect();
             out.emit(text.join("\n"), Json::Array(ns.iter().map(|n| n.to_json()).collect()));
         }
-        Cmd::Link { from, to, rel, remove } => link_cmd(&out, &open()?, &from, &to, rel.as_deref(), remove)?,
-        Cmd::Merge { notes, undo } => {
+        Cmd::Link { from, to, rel, remove, .. } => link_cmd(&out, &open()?, &from, &to, rel.as_deref(), remove)?,
+        Cmd::Merge { notes, undo, .. } => {
             let v = open()?;
             let ids: Vec<&String> = notes.iter().filter(|n| !n.eq_ignore_ascii_case("into")).collect();
             match (undo, ids.as_slice()) {
@@ -1486,16 +1560,16 @@ pub fn run(cli: Cli) -> Result<i32> {
                 (false, _) => bail!("merge takes the duplicate and the note that stays, like `breadcrumb merge DUP KEEP`, or --undo DUP"),
             }
         }
-        Cmd::Unlink { from, to, rel } => link_cmd(&out, &open()?, &from, &to, rel.as_deref(), true)?,
-        Cmd::Archive { id } => {
+        Cmd::Unlink { from, to, rel, .. } => link_cmd(&out, &open()?, &from, &to, rel.as_deref(), true)?,
+        Cmd::Archive { id, .. } => {
             let n = ops::set_status(&open()?, &id, "archived")?;
             out.emit(format!("archived {}  {}", n.id, n.title), n.to_json());
         }
-        Cmd::Unarchive { id } => {
+        Cmd::Unarchive { id, .. } => {
             let n = ops::set_status(&open()?, &id, "active")?;
             out.emit(format!("unarchived {}  {}", n.id, n.title), n.to_json());
         }
-        Cmd::Delete { id, yes } => {
+        Cmd::Delete { id, yes, .. } => {
             let v = open()?;
             if !yes {
                 let n = v.get(&id)?;
@@ -1621,7 +1695,8 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text = format!("{}{}", if r.committed { "committed pending changes\n" } else { "" }, r.message);
             out.emit(text, serde_json::to_value(&r)?);
         }
-        Cmd::Mcp => {
+        Cmd::Mcp { tools: true } => out.emit(crate::mcp::tools_text(), json!({"tools": crate::mcp::tool_defs()})),
+        Cmd::Mcp { tools: false } => {
             crate::mcp::run_stdio(root, cwd)?;
         }
         Cmd::McpConfig => {
@@ -1668,13 +1743,27 @@ pub fn run(cli: Cli) -> Result<i32> {
             let notes = ops::env_facts(&v, &sc, machine.as_deref())?;
             out.emit(format::env_table(&notes, machine.as_deref()), notes_json(&notes));
         }
-        Cmd::Board { scope, kind, assignee, include_closed } => {
+        Cmd::Board { scope, kind, assignee, include_closed, states } => {
             let v = open()?;
             let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
-            let cols = backlog::board(&v, &sc, &BoardFilter { kind, assignee, include_closed })?;
-            out.emit(backlog::board_text(&cols, &sc.label()), json!({"scope": sc.label(), "columns": cols}));
+            let states = states.iter().map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).map(|s| if s == backlog::BUILDING || s == backlog::WAITING { Ok(s) } else { backlog::check_state(&s).map_err(|e| anyhow::anyhow!("{e}, {} or {}", backlog::BUILDING, backlog::WAITING)) }).collect::<Result<Vec<_>>>()?;
+            let include_closed = include_closed || states.iter().any(|s| backlog::is_closed(s));
+            let mut cols = backlog::board(&v, &sc, &BoardFilter { kind, assignee, include_closed })?;
+            if !states.is_empty() {
+                cols.retain(|c| states.contains(&c.state));
+            }
+            let text = if !states.is_empty() && cols.iter().all(|c| c.items.is_empty()) {
+                let named = match states.split_last() {
+                    Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+                    _ => states.join(""),
+                };
+                format!("# Board: {}\n\nNo items in {named}, without --state the board shows every column\n", sc.label())
+            } else {
+                backlog::board_text(&cols, &sc.label())
+            };
+            out.emit(text, json!({"scope": sc.label(), "columns": cols}));
         }
-        Cmd::Queue { id, top, after, by } => {
+        Cmd::Queue { id, top, after, by, .. } => {
             let pos = match (top, after) {
                 (true, _) => QueuePos::Top,
                 (_, Some(a)) => QueuePos::After(a),
@@ -1724,10 +1813,10 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text = if all.is_empty() { "no leases on this machine".to_string() } else { all.iter().map(crate::lease::line).collect::<Vec<_>>().join("\n") };
             out.emit(text, serde_json::to_value(&all)?);
         }
-        Cmd::Claim { id, by, force, release: true } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force)?,
-        Cmd::Claim { id, by, force, release: false } => {
+        Cmd::Claim { id, by, force, release: true, project } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force, project.as_deref())?,
+        Cmd::Claim { id, by, force, release: false, project } => {
             let v = open()?;
-            if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, v.detect_project(&cwd).as_deref(), by.as_deref(), false)? {
+            if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, track_project(&v, project.as_deref(), &cwd).as_deref(), by.as_deref(), false)? {
                 out.emit(crate::lifecycle::take_text(&h, false), h.to_json());
             } else {
                 let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
@@ -1736,7 +1825,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 out.emit(format!("claimed {}\n{notice}", backlog::item_summary(&n)), n.to_json());
             }
         }
-        Cmd::Ask { id, text, options, multi, free, by } => {
+        Cmd::Ask { id, text, options, multi, free, by, .. } => {
             let req = question::AskReq { id, text, options: question::parse_options(&options), multi, free, by };
             let (n, q) = question::ask(&open()?, req)?;
             out.emit(format!("asked {}, {} is waiting on the user until `breadcrumb answer {}`", question::qid(&n, &q), n.id, question::qid(&n, &q)), n.to_json());
@@ -1773,20 +1862,20 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => return answer_walk(&out, &v, &scope, &cwd, &by),
             }
         }
-        Cmd::Ack { id, by } => {
+        Cmd::Ack { id, by, .. } => {
             let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
             match question::ack(&open()?, &id, &by)? {
                 Some(n) => out.emit(format!("acknowledged the answers on {}", backlog::item_summary(&n)), n.to_json()),
                 None => out.emit(format!("{id} has no unacknowledged answer"), Json::Null),
             }
         }
-        Cmd::Unask { qid, by } => {
+        Cmd::Unask { qid, by, .. } => {
             let by = backlog::session_name(by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
             let n = question::withdraw(&open()?, &qid, &by)?;
             out.emit(format!("withdrew the question on {}", backlog::item_summary(&n)), n.to_json());
         }
-        Cmd::Release { id, by, force } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force)?,
-        Cmd::Move { ids, state, position, resolution, shipped_in, by, check, steps, release_note, refs } => {
+        Cmd::Release { id, by, force, project } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force, project.as_deref())?,
+        Cmd::Move { ids, state, position, resolution, shipped_in, by, check, steps, release_note, refs, .. } => {
             if let Some(pos) = backlog::queue_position(&state, position.as_deref())? {
                 let [id] = ids.as_slice() else {
                     bail!("position takes one id, it would put each of them in the same place");
@@ -1797,7 +1886,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
             let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, ..Default::default() };
-            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "hints": r.hints, "note": r.note.to_json()});
+            let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "replaced_steps": r.replaced, "waiting_for_user": waiting_json(r), "note": r.note.to_json()});
             if let [id] = ids.as_slice() {
                 let r = backlog::move_item(&open()?, id, req)?;
                 out.emit(backlog::move_text(&r), moved_json(&r));
@@ -1945,26 +2034,26 @@ pub fn run(cli: Cli) -> Result<i32> {
                     out.emit(backlog::review_text(&items, &sc.label(), review_by == "agent"), json!({"scope": sc.label(), "review_by": review_by, "items": items}));
                     return Ok(0);
                 }
-                Some(ReviewCmd::Pass { id, by, evidence }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by, evidence, by_user: false })?,
-                Some(ReviewCmd::Fail { id, reason, by, evidence }) => backlog::review_fail(&v, &id, &reason, backlog::ReviewBy { by, evidence, by_user: false })?,
+                Some(ReviewCmd::Pass { id, by, evidence, .. }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by, evidence, by_user: false })?,
+                Some(ReviewCmd::Fail { id, reason, by, evidence, .. }) => backlog::review_fail(&v, &id, &reason, backlog::ReviewBy { by, evidence, by_user: false })?,
             };
-            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "note": r.note.to_json()}));
+            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "waiting_for_user": waiting_json(&r), "note": r.note.to_json()}));
         }
-        Cmd::Check { id, which } => {
+        Cmd::Check { id, which, .. } => {
             let (n, changed) = backlog::check(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?)?;
             out.emit(backlog::check_text(&n, changed), json!({"ticked": changed, "unmet_acceptance": backlog::unmet_acceptance(&n), "note": n.to_json()}));
         }
-        Cmd::Tree { id } => {
+        Cmd::Tree { id, .. } => {
             let text = backlog::tree(&open()?, &id)?;
             out.emit(&text, json!({"tree": text}));
         }
-        Cmd::Deps { id } => {
+        Cmd::Deps { id, .. } => {
             let v = open()?;
             let d = backlog::deps(&v, &id)?;
             let title = v.get(&d.id)?.title;
             out.emit(backlog::deps_text(&d, &title), serde_json::to_value(&d)?);
         }
-        Cmd::Promote { id, to, by } => {
+        Cmd::Promote { id, to, by, .. } => {
             let n = backlog::promote(&open()?, &id, &to, by.as_deref())?;
             out.emit(format!("promoted {}", backlog::item_summary(&n)), n.to_json());
         }
@@ -2006,8 +2095,20 @@ running MCP and serve processes keep the old version until their client restarts
     Ok(0)
 }
 
-fn release_cmd(out: &Out, v: &Vault, cwd: &Path, id: &str, by: Option<&str>, force: bool) -> Result<()> {
-    if let Some(h) = crate::lifecycle::claim_handoff(v, id, v.detect_project(cwd).as_deref(), by, true)? {
+fn waiting_json(r: &backlog::MoveResult) -> Json {
+    Json::Array(r.waiting_for_user.iter().map(|(i, c)| json!({"step": i, "text": c})).collect())
+}
+
+fn track_project(v: &Vault, project: Option<&str>, cwd: &Path) -> Option<String> {
+    match project.map(str::trim) {
+        Some(p) if p.eq_ignore_ascii_case("global") => None,
+        Some(p) => Some(p.to_string()),
+        None => v.detect_project(cwd),
+    }
+}
+
+fn release_cmd(out: &Out, v: &Vault, cwd: &Path, id: &str, by: Option<&str>, force: bool, project: Option<&str>) -> Result<()> {
+    if let Some(h) = crate::lifecycle::claim_handoff(v, id, track_project(v, project, cwd).as_deref(), by, true)? {
         out.emit(crate::lifecycle::take_text(&h, true), h.to_json());
         return Ok(());
     }
@@ -2205,7 +2306,7 @@ fn workflow_cmd(out: &Out, v: &Vault, wc: WorkflowCmd, cwd: &Path) -> Result<i32
             out.emit(workflow::status_text(&dir, &st), json!({"project": slug, "dir": path_str(&dir), "workflows": st}));
         }
         WorkflowCmd::List { project, all } => {
-            let sc = ops::resolve_scope(v, &ScopeSel { project, global: false, all }, cwd)?;
+            let sc = ops::resolve_scope(v, &ScopeArgs { project, global: false, all }.sel(), cwd)?;
             let ws = workflow::list(v, &sc);
             out.emit(workflow::list_text(&ws, &sc.label()), json!({"scope": sc.label(), "workflows": ws}));
         }

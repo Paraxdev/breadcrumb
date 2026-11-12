@@ -851,7 +851,8 @@ pub struct MoveReq {
     pub check: Option<Check>,
     /// `type:value` refs to add, `-type:value` removes.
     pub refs: Vec<String>,
-    /// What the user should try, added to the acceptance criteria when moving to review.
+    /// What the reviewer should try, added to the acceptance criteria when moving to review. On an item already in
+    /// review they replace its open steps.
     pub steps: Vec<String>,
     /// The check of an item in review, refused for items in any other state.
     pub verdict: Option<Verdict>,
@@ -877,7 +878,10 @@ pub struct MoveResult {
     /// False when the item already had the state and nothing else changed, so nothing was written.
     pub changed: bool,
     pub warnings: Vec<String>,
-    pub hints: Vec<String>,
+    /// Open steps a re-review's new steps replaced.
+    pub replaced: usize,
+    /// The user's steps, with their position, still open after an agent's pass kept the item in review.
+    pub waiting_for_user: Vec<(usize, String)>,
     /// Every file the move wrote.
     pub touched: Vec<PathBuf>,
 }
@@ -900,7 +904,7 @@ impl Check {
         for p in s.split([',', ' ']).map(str::trim).filter(|p| !p.is_empty()) {
             match p.parse::<usize>() {
                 Ok(i) if i > 0 => out.push(i),
-                _ => bail!("invalid criterion '{p}', expected all or 1 based numbers like 2,3, a step for the user to try goes in --step (MCP steps)"),
+                _ => bail!("invalid criterion '{p}', expected all or 1 based numbers like 2,3, a step for the reviewer to try goes in --step (MCP steps)"),
             }
         }
         Ok(Check::Some(out))
@@ -961,7 +965,7 @@ fn criterion_text(c: &str) -> &str {
     ["[x]", "[X]", "[ ]"].iter().find_map(|p| t.strip_prefix(p)).unwrap_or(t).trim()
 }
 
-/// Adds steps as open criteria. A step already listed stays where it is and opens again, the user has to try it again.
+/// Adds steps as open criteria. A step already listed stays where it is and opens again, the reviewer has to try it again.
 fn add_steps(n: &mut Note, steps: &[String]) -> usize {
     let mut items: Vec<Value> = match n.field("acceptance") {
         Some(Value::Sequence(s)) => s.clone(),
@@ -990,7 +994,44 @@ fn add_steps(n: &mut Note, steps: &[String]) -> usize {
     changed
 }
 
-/// What is left for the user to try: the acceptance criteria not yet marked met.
+/// A re-review's steps replace the open ones, ticked ones stay. Returns (open steps dropped, steps added or reopened).
+fn replace_open_steps(n: &mut Note, steps: &[String]) -> (usize, usize) {
+    let wanted: Vec<String> = steps.iter().map(|s| criterion_text(&crate::util::one_line(s)).to_ascii_lowercase()).collect();
+    let mut dropped = 0;
+    if let Some(Value::Sequence(items)) = n.field("acceptance").cloned() {
+        let kept: Vec<Value> = items
+            .into_iter()
+            .filter(|v| match yaml_scalar_string(v) {
+                Some(c) if !is_met(&c) && !wanted.contains(&criterion_text(&c).to_ascii_lowercase()) => {
+                    dropped += 1;
+                    false
+                }
+                _ => true,
+            })
+            .collect();
+        if dropped > 0 {
+            n.set_field("acceptance", Value::Sequence(kept));
+        }
+    }
+    (dropped, add_steps(n, steps))
+}
+
+/// A step only the user can do, like installing software on their machine: its text starts with `user:`.
+pub fn is_user_step(c: &str) -> bool {
+    criterion_text(c).get(..5).is_some_and(|p| p.eq_ignore_ascii_case("user:"))
+}
+
+pub fn only_user_steps_open(n: &Note) -> bool {
+    let open = unmet_acceptance(n);
+    !open.is_empty() && open.iter().all(|c| is_user_step(c))
+}
+
+/// The open steps an agent reviewer may not run, with their position.
+pub fn open_user_steps(n: &Note) -> Vec<(usize, String)> {
+    unmet_numbered(n).into_iter().filter(|(_, c)| is_user_step(c)).map(|(i, c)| (i, criterion_text(&c).to_string())).collect()
+}
+
+/// What is left for the reviewer to try: the acceptance criteria not yet marked met.
 pub fn review_steps(n: &Note) -> Vec<String> {
     unmet_acceptance(n).iter().map(|c| criterion_text(c).to_string()).collect()
 }
@@ -1014,20 +1055,33 @@ fn move_warnings(n: &Note, from: &str, to: &str) -> Vec<String> {
     if from == "queued" && to == "review" && assignee(n).is_none() {
         w.push(format!("{} went from queued to review and was never claimed, `breadcrumb claim {}` when work starts so nobody else picks it up", n.id, n.id));
     }
-    if to == "review" && review_steps(n).is_empty() {
-        w.push(format!("{} has no steps for the user to check, add them with `breadcrumb move {} review --step \"text\"` (repeatable, MCP move steps)", n.id, n.id));
+    if to != "review" {
+        return w;
     }
-    if to == "review" && !crate::ship::has_commit_pointer(n) {
-        w.push(format!("{} has no commit: ref or shipped_in, `breadcrumb ship` cannot find it, add `--ref commit:<sha>` with the merge commit", n.id));
+    let mut missing = vec![];
+    if review_steps(n).is_empty() {
+        missing.push(("steps for the reviewer (--step \"what to try\", repeatable)", "steps"));
+    }
+    if !crate::ship::has_commit_pointer(n) {
+        missing.push(("a commit: ref or shipped_in for `breadcrumb ship` (--ref commit:<merge sha>)", "refs"));
+    }
+    if crate::ship::release_note(n).is_none() {
+        missing.push(("a release note (--release-note \"one line\")", "release_note"));
+    }
+    if !missing.is_empty() {
+        let what: Vec<&str> = missing.iter().map(|m| m.0).collect();
+        let mcp: Vec<&str> = missing.iter().map(|m| m.1).collect();
+        w.push(format!("{} is in review without {}, `breadcrumb move {} review` with those flags adds them (MCP move {})", n.id, and_list(&what), n.id, and_list(&mcp)));
     }
     w
 }
 
-fn move_hints(n: &Note, to: &str) -> Vec<String> {
-    if to == "review" && crate::ship::release_note(n).is_none() {
-        return vec![format!("{} has no release note, add a line with `breadcrumb update {} --release-note \"...\"`", n.id, n.id)];
+fn and_list(xs: &[&str]) -> String {
+    match xs {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
-    vec![]
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1077,6 +1131,10 @@ pub fn review_text(items: &[ReviewItem], scope_label: &str, agents: bool) -> Str
     } else {
         format!("{} in review in {scope_label}, try each, then `breadcrumb review pass <id>` or `breadcrumb review fail <id> --reason \"...\"`\n", items.len())
     };
+    let user_steps = agents && items.iter().any(|it| it.steps.iter().any(|c| is_user_step(c)));
+    if user_steps {
+        s.push_str("Steps marked [user] are the user's, never run them: your pass ticks the others and leaves the item in review for the user\n");
+    }
     for it in items {
         let name = it.slug.as_ref().map(|x| format!("{x} ")).unwrap_or_default();
         let _ = writeln!(s, "\n{} {name}{} {}", it.priority, it.id, it.title);
@@ -1084,7 +1142,8 @@ pub fn review_text(items: &[ReviewItem], scope_label: &str, agents: bool) -> Str
             let _ = writeln!(s, "  no steps recorded, `breadcrumb get {}` or ask the agent that built it", it.id);
         }
         for (i, step) in it.steps.iter().enumerate() {
-            let _ = writeln!(s, "  {}. {step}", i + 1);
+            let mark = if user_steps && is_user_step(step) { "[user] " } else { "" };
+            let _ = writeln!(s, "  {}. {mark}{step}", i + 1);
         }
     }
     s
@@ -1145,7 +1204,9 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
         bail!("{} is {from}, not in review", n.id);
     }
     let evidence = req.evidence.as_deref().map(str::trim).filter(|e| !e.is_empty()).map(crate::util::normalize_newlines);
-    if req.verdict.is_some() && !req.by_user && crate::config::agent_review(v, n.project.as_deref()) {
+    let by_user = req.by_user || req.by.as_deref().is_some_and(|b| b.trim().eq_ignore_ascii_case(DEFAULT_ACTOR));
+    let agent_check = req.verdict.is_some() && !by_user && crate::config::agent_review(v, n.project.as_deref());
+    if agent_check {
         check_reviewer(&n, req.by.as_deref())?;
         if req.verdict == Some(Verdict::Pass) && evidence.is_none() {
             bail!("agents review here (review_by = agent), a pass needs --evidence \"what you ran and what you saw\" (MCP evidence)");
@@ -1157,24 +1218,36 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let unchanged = |key: &str, want: &Option<String>| want.as_ref().is_none_or(|w| str_field(&n, key).as_deref() == Some(w.as_str()));
     let shipped_in = req.shipped_in.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let release_note = req.release_note.as_deref().map(crate::util::one_line).filter(|s| !s.trim().is_empty());
-    let same = from == to && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) && unchanged(RELEASE_NOTE_KEY, &release_note);
+    let waiting_for_user = if agent_check && req.verdict == Some(Verdict::Pass) { open_user_steps(&n) } else { vec![] };
+    let to = if waiting_for_user.is_empty() { to } else { "review".to_string() };
+    let same = from == to && req.verdict.is_none() && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) && unchanged(RELEASE_NOTE_KEY, &release_note);
     let ticked = match &req.check {
         Some(c) => apply_check(&mut n, c)?,
         None => 0,
     };
-    let added = add_steps(&mut n, &req.steps);
+    let (replaced, added) = if from == "review" && to == "review" && !req.steps.is_empty() { replace_open_steps(&mut n, &req.steps) } else { (0, add_steps(&mut n, &req.steps)) };
     let mut ref_edits = req.refs.clone();
     if let Some(sha) = shipped_in.as_deref().filter(|s| (to == "done" || to == "shipped") && is_sha(s)) {
         ref_edits.push(format!("commit:{sha}"));
     }
     let refs_before = n.refs();
     crate::ops::edit_refs(&mut n, &ref_edits)?;
-    if same && ticked == 0 && added == 0 && n.refs() == refs_before {
+    if same && ticked == 0 && added == 0 && replaced == 0 && n.refs() == refs_before {
         let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
-        let (warnings, hints) = (move_warnings(&n, &from, &to), move_hints(&n, &to));
-        return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings, hints, touched: vec![] });
+        let warnings = move_warnings(&n, &from, &to);
+        return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings, replaced, waiting_for_user, touched: vec![] });
     }
     match &req.verdict {
+        Some(Verdict::Pass) if !waiting_for_user.is_empty() => {
+            let agent_steps: Vec<usize> = unmet_numbered(&n).into_iter().filter(|(_, c)| !is_user_step(c)).map(|(i, _)| i).collect();
+            if !agent_steps.is_empty() {
+                apply_check(&mut n, &Check::Some(agent_steps))?;
+            }
+            let who = crate::session::attribute(req.by.as_deref());
+            let date = crate::util::fmt_date(&now());
+            n.body = insert_before_history(&n.body, &format!("{date} {who}:\nagent steps passed: {}", evidence.as_deref().unwrap_or_default()));
+            n.body = append_history(&n.body, &event_line("agent steps passed, waiting for the user", &actor(req.by.as_deref())));
+        }
         Some(Verdict::Pass) => {
             if n.field("acceptance").is_some() {
                 apply_check(&mut n, &Check::All)?;
@@ -1233,8 +1306,8 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let mut touched: Vec<PathBuf> = waiting.iter().filter_map(|w| w.path.clone()).collect();
     save_with(v, &mut n, "move", waiting)?;
     touched.extend(n.path.clone());
-    let (warnings, hints) = (move_warnings(&n, &from, &to), move_hints(&n, &to));
-    Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings, hints, touched })
+    let warnings = if waiting_for_user.is_empty() { move_warnings(&n, &from, &to) } else { vec![] };
+    Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings, replaced, waiting_for_user, touched })
 }
 
 /// Moves each item on its own, a failure does not stop the rest, and commits what moved as one vault commit.
@@ -1325,11 +1398,17 @@ fn is_sha(s: &str) -> bool {
 
 pub fn move_text(r: &MoveResult) -> String {
     let name = r.note.handle();
+    if let Some(w) = user_wait_text(r) {
+        return w;
+    }
     let mut s = if r.changed {
         format!("{name} {}: {} -> {}\n", r.note.title, r.from, r.to)
     } else {
         format!("{name} {}: already in {}\n", r.note.title, r.to)
     };
+    if r.replaced > 0 {
+        let _ = writeln!(s, "replaced {} open steps with the ones given, ticked ones stay", r.replaced);
+    }
     if !r.unmet.is_empty() {
         let _ = writeln!(s, "warning: {} acceptance criteria not marked met ([x]), {}:", r.unmet.len(), check_hint(&r.note.id));
         for (i, c) in unmet_numbered(&r.note) {
@@ -1339,10 +1418,22 @@ pub fn move_text(r: &MoveResult) -> String {
     for w in &r.warnings {
         let _ = writeln!(s, "warning: {w}");
     }
-    for h in &r.hints {
-        let _ = writeln!(s, "hint: {h}");
-    }
     s
+}
+
+/// An agent's pass that left the item in review for the user's steps.
+pub fn user_wait_text(r: &MoveResult) -> Option<String> {
+    if r.waiting_for_user.is_empty() {
+        return None;
+    }
+    let steps: Vec<String> = r.waiting_for_user.iter().map(|(i, c)| format!("{i}. {c}")).collect();
+    Some(format!(
+        "{} {}: the agent steps passed, it stays in review for the user's steps: {}\nthe user passes it on the Review page of `breadcrumb serve` or with `breadcrumb review pass {} --by user`\n",
+        r.note.handle(),
+        r.note.title,
+        steps.join("; "),
+        r.note.id
+    ))
 }
 
 pub fn check_hint(id: &str) -> String {

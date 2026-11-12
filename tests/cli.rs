@@ -99,5 +99,5 @@ fn add_line_keeps_its_start_and_names_state_priority_and_a_repaired_slug() {
     let out = ok(&v, &["add", "--global", "--title", "Plain fact", "--kind", "note"]);
     assert!(!out.contains("state=") && !out.contains("slug "), "{out}");
     let o = breadcrumb(&v, &["add", "--global", "--title", "x", "--kind", "done"], None);
-    assert!(String::from_utf8_lossy(&o.stderr).contains("'done' is a backlog state, not a kind, use kind bug, feature or task with field state=done"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("'done' is a state, not a kind: give a kind like task, bug, feature or epic and --field state=done"));
 }

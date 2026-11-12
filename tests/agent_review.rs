@@ -138,3 +138,71 @@ fn digest_names_review_work_for_agents() {
     let d = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
     assert!(d.contains("Review: 1 waiting for an agent check"), "{d}");
 }
+
+fn user_steps(v: &Vault, id: &str) {
+    backlog::move_item(v, id, MoveReq { state: "review".into(), steps: vec!["Run it".into(), "USER: install it on the laptop".into(), "Check the log".into()], by: Some("builder".into()), ..Default::default() }).unwrap();
+}
+
+#[test]
+fn an_agent_pass_ticks_its_steps_and_leaves_user_steps_for_the_user() {
+    let (_d, mut v) = common::vault();
+    agents(&mut v);
+    let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
+    user_steps(&v, &a.id);
+    assert!(backlog::is_user_step("[x] user: done") && !backlog::is_user_step("users can log in"));
+
+    let (_, out, _) = crumb(&v, &["review", "--all"]);
+    assert!(out.contains("2. [user] USER: install it on the laptop") && out.contains("1. Run it") && out.contains("Steps marked [user] are the user's"), "{out}");
+
+    let (ok, out, err) = crumb(&v, &["review", "pass", &a.id, "--by", "reviewer", "--evidence", "ran it, log is clean"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("the agent steps passed, it stays in review for the user's steps: 2. USER: install it on the laptop"), "{out}");
+    assert!(out.contains(&format!("`breadcrumb review pass {} --by user`", a.id)) && out.contains("Review page of `breadcrumb serve`"), "{out}");
+    let n = v.get(&a.id).unwrap();
+    assert_eq!(backlog::state(&n), "review");
+    assert_eq!(backlog::unmet_acceptance(&n), ["USER: install it on the laptop"]);
+    assert!(n.body.contains("agent steps passed: ran it, log is clean") && n.body.contains("agent steps passed, waiting for the user (by reviewer)"), "{}", n.body);
+
+    let r = backlog::move_item(&v, &a.id, MoveReq { state: "done".into(), verdict: Some(backlog::Verdict::Pass), by: Some("other".into()), evidence: Some("again".into()), ..Default::default() }).unwrap();
+    assert_eq!((r.to.as_str(), r.waiting_for_user.len()), ("review", 1), "move with verdict pass behaves the same");
+
+    let (ok, _, err) = crumb(&v, &["review", "pass", &a.id, "--by", "User"]);
+    assert!(ok, "{err}");
+    let n = v.get(&a.id).unwrap();
+    assert_eq!(backlog::state(&n), "done", "the user's pass needs no evidence and ticks everything");
+    assert!(backlog::unmet_acceptance(&n).is_empty());
+}
+
+#[test]
+fn user_steps_are_plain_steps_for_a_user_review_and_the_web_pass_finishes_them() {
+    let (_d, mut v) = common::vault();
+    let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
+    user_steps(&v, &a.id);
+    let (_, out, _) = crumb(&v, &["review", "--all"]);
+    assert!(!out.contains("[user]"), "{out}");
+    assert_eq!(backlog::review_pass(&v, &a.id, by("someone", None)).unwrap().to, "done");
+
+    agents(&mut v);
+    let b = common::add(&v, "Other", "feature", Some("app"), &[]);
+    user_steps(&v, &b.id);
+    let r = backlog::review_pass(&v, &b.id, ReviewBy { by: Some("web".into()), evidence: None, by_user: true }).unwrap();
+    assert_eq!(r.to, "done");
+    let c = common::add(&v, "Failing", "feature", Some("app"), &[]);
+    user_steps(&v, &c.id);
+    assert_eq!(backlog::review_fail(&v, &c.id, "log has errors", by("reviewer", None)).unwrap().to, "queued", "fail works as before");
+}
+
+#[test]
+fn digest_counts_items_left_with_user_steps_as_waiting_for_the_user() {
+    let (_d, mut v) = common::vault();
+    agents(&mut v);
+    let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
+    user_steps(&v, &a.id);
+    backlog::review_pass(&v, &a.id, by("reviewer", Some("ran it"))).unwrap();
+    let d = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
+    assert!(d.contains("Review: 0 waiting for an agent check, 1 waiting for the user (review_by = agent), the user passes them on the Review page of `breadcrumb serve`"), "{d}");
+    let b = common::add(&v, "Other", "feature", Some("app"), &[]);
+    built_by(&v, &b.id, "builder");
+    let d = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
+    assert!(d.contains("Review: 1 waiting for an agent check, 1 waiting for the user (review_by = agent), `breadcrumb review`"), "{d}");
+}

@@ -245,9 +245,12 @@ fn move_and_update_set_a_release_note_and_review_says_when_it_is_missing() {
         ],
         &[],
     );
-    assert!(text(&out[0]).contains("hint:") && text(&out[0]).contains("no release note"), "{}", text(&out[0]));
-    assert!(!text(&out[0]).contains("no commit: ref"), "{}", text(&out[0]));
-    assert!(text(&out[2]).contains("no commit: ref") && !text(&out[2]).contains("hint:"), "{}", text(&out[2]));
+    let warns = |t: &str| t.lines().filter(|l| l.starts_with("warning:")).map(str::to_string).collect::<Vec<_>>();
+    let w = warns(text(&out[0]));
+    assert!(w.len() == 1 && w[0].contains("without a release note (--release-note") && w[0].contains("(MCP move release_note)") && !w[0].contains("commit: ref"), "{}", text(&out[0]));
+    let w = warns(text(&out[2]));
+    assert!(w.len() == 1 && w[0].contains("without a commit: ref") && w[0].contains("(MCP move refs)") && !w[0].contains("release note"), "{}", text(&out[2]));
+    assert!(!text(&out[0]).contains("hint:"), "{}", text(&out[0]));
     assert_eq!(v.get(&a.id).unwrap().field("release_note").and_then(|x| x.as_str()), Some("From update"));
     assert_eq!(v.get(&b.id).unwrap().field("release_note").and_then(|x| x.as_str()), Some("From move"));
 }
@@ -273,9 +276,29 @@ fn add_repairs_the_slug_shows_backlog_values_and_explains_a_state_kind() {
     assert_eq!(out[1]["result"]["isError"], false, "{}", text(&out[1]));
     assert!(text(&out[1]).contains("slug made from the title: plain-note") && !text(&out[1]).contains("state="), "{}", text(&out[1]));
     assert_eq!(out[2]["result"]["isError"], true);
-    assert!(text(&out[2]).contains("'queued' is a backlog state, not a kind, use kind bug, feature or task with field state=queued"), "{}", text(&out[2]));
+    assert!(text(&out[2]).contains("'queued' is a state, not a kind: give a kind like task, bug, feature or epic and --field state=queued"), "{}", text(&out[2]));
     assert!(text(&out[3]).contains("state=idea priority=p2"), "{}", text(&out[3]));
     assert_eq!(out[4]["result"]["isError"], true);
     assert!(text(&out[4]).contains("field state"), "{}", text(&out[4]));
     assert!(text(&out[5]).contains("state=queued priority=p2"), "{}", text(&out[5]));
+}
+
+#[test]
+fn mcp_move_names_user_steps_left_after_an_agent_pass_and_replaced_steps() {
+    let (d, mut v) = common::vault();
+    breadcrumb::config::set(&mut v, "review_by", "agent").unwrap();
+    let srv = Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let a = common::add(&v, "One", "task", Some("app"), &[]);
+    let out = run(
+        &srv,
+        &[
+            call(1, "move", json!({"id": a.id, "state": "review", "steps": ["Try", "Old"], "by": "builder"})),
+            call(2, "move", json!({"id": a.id, "state": "review", "steps": ["Try", "user: install it"], "by": "builder"})),
+            call(3, "move", json!({"id": a.id, "state": "done", "verdict": "pass", "evidence": "tried it", "by": "reviewer"})),
+        ],
+        &[],
+    );
+    assert!(text(&out[1]).contains("replaced 1 open steps"), "{}", text(&out[1]));
+    assert!(text(&out[2]).contains("stays in review for the user's steps: 2. user: install it") && text(&out[2]).contains("--by user"), "{}", text(&out[2]));
+    assert_eq!(breadcrumb::backlog::state(&v.get(&a.id).unwrap()), "review");
 }
