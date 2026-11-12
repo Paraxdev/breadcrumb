@@ -104,7 +104,7 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
         .iter()
         .map(|p| (p.slug.clone(), p.paths.iter().map(std::path::PathBuf::from).filter(|d| d.is_dir()).collect()))
         .collect();
-    let days = v.config.stale_days;
+    let eff = crate::config::Effective::load(v);
     let kinds: HashMap<String, crate::kind::KindDef> = kinds.into_iter().map(|k| (k.name.clone(), k)).collect();
     let (notes, note_errors) = v.load_notes_report();
     for (p, e) in note_errors {
@@ -154,7 +154,7 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
                 err(path.clone(), id.clone(), "error", format!("broken link to '{}' (rel {})", l.to, l.rel));
             }
         }
-        if crate::recall::is_stale(n, days) {
+        if crate::recall::is_stale(n, eff.of(n.project.as_deref()).stale_days) {
             let age = (crate::util::now() - n.fresh_at()).num_days();
             err(path.clone(), id.clone(), "warning", format!("not verified for {age} days, check it and run `breadcrumb verify {}`", n.id));
         }
@@ -186,7 +186,7 @@ pub fn check_with(v: &Vault, claude_dir: Option<&std::path::Path>) -> Vec<Proble
             err(path.clone(), id.clone(), "info", format!("unpinned {}, a new session sees only its title, `breadcrumb update {} --pin` if every session needs it", n.kind, n.id));
         }
         if n.pinned && !n.is_archived() {
-            for why in crate::pins::reasons(n, v.config.pin_review_days) {
+            for why in crate::pins::reasons(n, eff.of(n.project.as_deref()).pin_review_days) {
                 err(path.clone(), id.clone(), "info", format!("pin {why}, `breadcrumb pins` shows how to verify, unpin or archive it"));
             }
         }

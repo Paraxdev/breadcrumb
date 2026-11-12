@@ -41,6 +41,12 @@ fn default_judge_nudge() -> String {
 fn default_judge_project() -> String {
     "breadcrumb".into()
 }
+fn default_recall_notes() -> u64 {
+    crate::recall::DEFAULT_RECALL_NOTES
+}
+fn default_file_notes() -> u64 {
+    crate::recall::DEFAULT_FILE_NOTES
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -69,11 +75,17 @@ pub struct Config {
     /// The project judgments of breadcrumb are filed in, wherever the agent works.
     #[serde(default = "default_judge_project")]
     pub judge_project: String,
+    /// How many notes the UserPromptSubmit hook names for a session's first prompt, 0 silences it.
+    #[serde(default = "default_recall_notes")]
+    pub recall_notes: u64,
+    /// How many notes the PreToolUse file hook names for a file, 0 silences it.
+    #[serde(default = "default_file_notes")]
+    pub file_notes: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project() }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes() }
     }
 }
 

@@ -53,7 +53,7 @@ pub struct Pin {
 }
 
 /// Flagged first, then oldest first.
-pub fn review(notes: &[Note], review_days: u64) -> Vec<Pin> {
+pub fn review(notes: &[Note], review_days: impl Fn(&Note) -> u64) -> Vec<Pin> {
     let mut pins: Vec<Pin> = notes
         .iter()
         .filter(|n| n.pinned && !n.is_archived())
@@ -63,7 +63,7 @@ pub fn review(notes: &[Note], review_days: u64) -> Vec<Pin> {
             title: n.title.clone(),
             project: n.project.clone(),
             age_days: age_days(n),
-            reasons: reasons(n, review_days),
+            reasons: reasons(n, review_days(n)),
             commands: vec![format!("breadcrumb verify {}", n.id), format!("breadcrumb update {} --unpin", n.id), format!("breadcrumb archive {}", n.id)],
         })
         .collect();

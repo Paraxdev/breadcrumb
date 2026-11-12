@@ -274,10 +274,13 @@ pub enum Cmd {
     Mcp,
     /// Print the command that registers the MCP server with Claude Code
     McpConfig,
-    /// The vault's settings with what each does, `config set <key> <value>` changes one (review_by, judge_nudge, ...)
+    /// The vault's settings with what each does, `config set <key> <value>` changes one (review_by, judge_nudge, ...), add `--project <slug>` to override it for one project
     Config {
         #[command(subcommand)]
         action: Option<ConfigCmd>,
+        /// Effective settings of this project, `set` and `unset` write its overrides (without it the vault's, even inside a project)
+        #[arg(long, short = 'p', global = true)]
+        project: Option<String>,
     },
     /// Validate every note and report problems
     Doctor {
@@ -645,15 +648,20 @@ pub enum Cmd {
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigCmd {
-    /// Change one setting, saved to breadcrumb.toml and committed
+    /// Change one setting, saved to breadcrumb.toml and committed, with --project an override in projects/<slug>/settings.toml
     Set {
         /// Setting name, `breadcrumb config` lists them
         key: String,
-        /// New value, empty unsets remote
+        /// New value, empty unsets remote, or with --project drops the override
         value: String,
     },
-    /// Print one setting's value
+    /// Print one setting's value, with --project the value that holds there
     Get {
+        /// Setting name
+        key: String,
+    },
+    /// With --project drop that project's override, without it set the vault value back to its default
+    Unset {
         /// Setting name
         key: String,
     },
@@ -1769,8 +1777,10 @@ pub fn run(cli: Cli) -> Result<i32> {
             let v = open()?;
             let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
             let notes = ops::list(&v, &sc, &Filter { pinned: true, ..Default::default() })?;
-            let pins = crate::pins::review(&notes, v.config.pin_review_days);
-            out.emit(crate::pins::text(&pins, &sc.label(), v.config.pin_review_days), json!({"scope": sc.label(), "review_days": v.config.pin_review_days, "pins": pins}));
+            let eff = crate::config::Effective::load(&v);
+            let pins = crate::pins::review(&notes, |n| eff.of(n.project.as_deref()).pin_review_days);
+            let days = eff.of(sc.project()).pin_review_days;
+            out.emit(crate::pins::text(&pins, &sc.label(), days), json!({"scope": sc.label(), "review_days": days, "pins": pins}));
         }
         Cmd::Ship { range, repo, project, shipped_in, yes, by } => {
             if !range.contains("..") {
@@ -1812,23 +1822,37 @@ pub fn run(cli: Cli) -> Result<i32> {
             let n = crate::judge::judge(&v, &text, &verdict, about.as_deref(), v.detect_project(&cwd).as_deref())?;
             out.emit(format!("{}\n", format::ack("judged", &n)), n.to_json());
         }
-        Cmd::Config { action } => {
+        Cmd::Config { action, project } => {
             let mut v = open()?;
+            let p = project.as_deref();
             match action {
                 None => {
-                    let list = crate::config::settings(&v)?;
-                    out.emit(crate::config::text(&list), json!({"settings": list}));
+                    let list = crate::config::settings(&v, p)?;
+                    let mut text = crate::config::text(&list, p, false);
+                    let detected = if p.is_none() { v.detect_project(&cwd) } else { None };
+                    if let Some(l) = detected.as_deref().and_then(|d| crate::config::overrides_line(&v, d, false)) {
+                        text.push_str(&l);
+                    }
+                    out.emit(text, json!({"project": p, "settings": list}));
                 }
                 Some(ConfigCmd::Get { key }) => {
-                    let list = crate::config::settings(&v)?;
-                    let it = list.iter().find(|s| s.key == key).ok_or_else(|| anyhow::anyhow!("unknown setting '{key}', `breadcrumb config` lists them"))?;
-                    out.emit(format!("{}\n", it.value), json!({"key": it.key, "value": it.value}));
+                    let list = crate::config::settings(&v, p)?;
+                    let it = list.iter().find(|s| s.key == key.trim()).ok_or_else(|| anyhow::anyhow!("unknown setting '{key}', `breadcrumb config` lists them"))?;
+                    out.emit(format!("{}\n", it.value), json!({"key": it.key, "value": it.value, "source": it.source}));
                 }
                 Some(ConfigCmd::Set { key, value }) => {
-                    let before = crate::config::set(&mut v, &key, &value)?;
-                    let after = crate::config::settings(&v)?.into_iter().find(|s| s.key == key).map(|s| s.value).unwrap_or_default();
-                    let shown = if before.is_empty() { "unset" } else { before.as_str() };
-                    out.emit(format!("{key}: {shown} -> {after}\n"), json!({"key": key, "before": before, "value": after}));
+                    let (before, after) = match p {
+                        Some(p) => crate::config::set_in(&v, p, &key, &value)?,
+                        None => {
+                            let before = crate::config::set(&mut v, &key, &value)?;
+                            (before, crate::config::settings(&v, None)?.into_iter().find(|s| s.key == key.trim()).map(|s| s.value).unwrap_or_default())
+                        }
+                    };
+                    out.emit(crate::config::change_text(key.trim(), p, &before, &after), json!({"key": key.trim(), "project": p, "before": before, "value": after}));
+                }
+                Some(ConfigCmd::Unset { key }) => {
+                    let (before, after) = crate::config::unset(&mut v, &key, p)?;
+                    out.emit(crate::config::change_text(key.trim(), p, &before, &after), json!({"key": key.trim(), "project": p, "before": before, "value": after}));
                 }
             }
         }
@@ -1838,8 +1862,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => {
                     let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
                     let items = backlog::review_items(&v, &sc)?;
-                    let agents = crate::config::agent_review(&v);
-                    out.emit(backlog::review_text(&items, &sc.label(), agents), json!({"scope": sc.label(), "review_by": v.config.review_by, "items": items}));
+                    let review_by = crate::config::effective(&v, sc.project()).review_by;
+                    out.emit(backlog::review_text(&items, &sc.label(), review_by == "agent"), json!({"scope": sc.label(), "review_by": review_by, "items": items}));
                     return Ok(0);
                 }
                 Some(ReviewCmd::Pass { id, by, evidence }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by, evidence, by_user: false })?,

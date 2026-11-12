@@ -30,6 +30,14 @@ impl Scope {
         }
     }
 
+    /// The one project this scope is about, None for global or all.
+    pub fn project(&self) -> Option<&str> {
+        match self {
+            Scope::Project { slug, .. } => Some(slug),
+            _ => None,
+        }
+    }
+
     pub fn label(&self) -> String {
         match self {
             Scope::All => "all projects".into(),
@@ -90,7 +98,7 @@ pub fn target_project(v: &Vault, project: Option<&str>, global: bool, cwd: &Path
     Ok(v.detect_project(cwd))
 }
 
-fn unknown_project_error(v: &Vault, slug: &str) -> anyhow::Error {
+pub(crate) fn unknown_project_error(v: &Vault, slug: &str) -> anyhow::Error {
     let known: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
     anyhow::anyhow!(
         "unknown project '{slug}', known projects: {}. Create it first with the project tool, action link (or `breadcrumb project link {slug}` in its directory), or use an existing slug",
@@ -304,7 +312,7 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     if title.is_empty() {
         bail!("title is required");
     }
-    let kind_name = req.kind.clone().filter(|k| !k.trim().is_empty()).unwrap_or_else(|| v.config.default_kind.clone());
+    let kind_name = req.kind.clone().filter(|k| !k.trim().is_empty()).unwrap_or_else(|| crate::config::effective(v, req.project.as_deref()).default_kind);
     let k = v.require_kind(kind_name.trim())?;
     let mut req = req;
     if k.name == crate::judge::JUDGMENT && crate::judge::home(v).is_some() && req.project != crate::judge::home(v) {

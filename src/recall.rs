@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub const FILE_NOTES_MAX: usize = 5;
-pub const RECALL_MAX: usize = 3;
+/// Defaults of the file_notes and recall_notes settings.
+pub const DEFAULT_FILE_NOTES: u64 = 5;
+pub const DEFAULT_RECALL_NOTES: u64 = 3;
 pub const RECALL_MIN_SCORE: f64 = 9.0;
 pub const RECALL_MAX_TERMS: usize = 12;
 pub const RECALL_MIN_WORDS: usize = 3;
@@ -333,6 +334,10 @@ pub fn file_notes(v: &Vault, cwd: &Path, file: &Path, exclude: &HashSet<String>)
     let projects = v.load_projects();
     let cwd_project = crate::project::detect(&projects, &crate::git::config_remote_urls(cwd), cwd);
     let (slug, rel) = locate(&projects, cwd_project.as_deref(), &abs)?;
+    let cfg = crate::config::effective(v, Some(&slug));
+    if cfg.file_notes == 0 {
+        return None;
+    }
     let hits: Vec<IndexEntry> = path_index(v)
         .into_iter()
         .filter(|e| e.project.as_deref().is_none_or(|p| p == slug))
@@ -352,8 +357,8 @@ pub fn file_notes(v: &Vault, cwd: &Path, file: &Path, exclude: &HashSet<String>)
         return None;
     }
     shown.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.fresh.cmp(&a.1.fresh)));
-    shown.truncate(FILE_NOTES_MAX);
-    let days = v.config.stale_days;
+    shown.truncate(cfg.file_notes as usize);
+    let days = cfg.stale_days;
     let items: Vec<String> = shown.iter().map(|(rank, e)| file_item(*rank, e, e.stale(days))).collect();
     let mut counts: Vec<String> = vec![];
     if !maps.is_empty() {
@@ -404,7 +409,8 @@ pub fn prompt_terms(prompt: &str) -> Vec<String> {
 /// Best matches for a prompt in the project plus global, only those that clear a minimum score.
 pub fn recall(v: &Vault, project: Option<&str>, prompt: &str, exclude: &HashSet<String>) -> Vec<Note> {
     let terms = prompt_terms(prompt);
-    if terms.is_empty() {
+    let max = crate::config::effective(v, project).recall_notes as usize;
+    if terms.is_empty() || max == 0 {
         return vec![];
     }
     let scope = match project {
@@ -420,14 +426,14 @@ pub fn recall(v: &Vault, project: Option<&str>, prompt: &str, exclude: &HashSet<
         .hits
         .into_iter()
         .filter(|h| h.score >= RECALL_MIN_SCORE && h.matched >= need)
-        .take(RECALL_MAX)
+        .take(max)
         .map(|h| h.note)
         .collect()
 }
 
 pub fn recall_line(v: &Vault, notes: &[Note]) -> String {
-    let days = v.config.stale_days;
-    let items: Vec<String> = notes.iter().map(|n| item(&n.id, &n.kind, &n.title, is_stale(n, days))).collect();
+    let eff = crate::config::Effective::load(v);
+    let items: Vec<String> = notes.iter().map(|n| item(&n.id, &n.kind, &n.title, is_stale(n, eff.of(n.project.as_deref()).stale_days))).collect();
     format!("breadcrumb may be relevant: {}", items.join("; "))
 }
 

@@ -671,7 +671,7 @@ pub fn import_files(v: &Vault, opts: &FilesOpts) -> Result<ImportReport> {
         .filter(|p| matches!(p.extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("md" | "txt" | "markdown")))
         .collect();
     files.sort();
-    let default_kind = opts.kind.clone().unwrap_or_else(|| v.config.default_kind.clone());
+    let default_kind = opts.kind.clone().unwrap_or_else(|| crate::config::effective(v, opts.project.as_deref()).default_kind);
     v.require_kind(&default_kind)?;
     let _g = v.lock()?;
     let mut imp = Importer::new(v, opts.dry_run);
