@@ -69,3 +69,21 @@ fn parallel_processes_share_one_vault() {
     assert_eq!(log.lines().filter(|l| l.starts_with("breadcrumb: add ")).count(), procs * per);
     assert_eq!(common::git(&v.root, &["status", "--porcelain"]), "");
 }
+
+#[test]
+fn parallel_helped_judgments_with_one_about_count_on_one_note() {
+    let (_d, v) = common::vault();
+    let threads = 6;
+    let handles: Vec<_> = (0..threads)
+        .map(|t| {
+            let root = v.root.clone();
+            std::thread::spawn(move || breadcrumb::judge::judge(&Vault::open(&root).unwrap(), &format!("brief helped {t}"), "helped", Some("brief"), None).unwrap().counted)
+        })
+        .collect();
+    let counted = handles.into_iter().map(|h| h.join().unwrap()).filter(|c| *c).count();
+    assert_eq!(counted, threads - 1);
+    let js: Vec<_> = v.load_notes().into_iter().filter(|n| n.kind == "judgment").collect();
+    assert_eq!(js.len(), 1, "one note, not one per racing thread");
+    assert_eq!(breadcrumb::judge::count(&js[0]), threads as u64);
+    assert_eq!(common::git(&v.root, &["status", "--porcelain"]), "");
+}

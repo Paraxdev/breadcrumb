@@ -275,7 +275,7 @@ impl Server {
                     if j.counted {
                         return Ok(j.text());
                     }
-                    (j.note, None)
+                    (j.note, j.slug_note)
                 } else {
                     ops::add_noted(&v, req)?
                 };

@@ -301,7 +301,7 @@ impl Vault {
                     continue;
                 }
                 match read_text(&p).and_then(|s| KindDef::from_toml(&s)) {
-                    Ok(k) if kind_file_matches(&p, &k) => kinds.push(k),
+                    Ok(k) if kind_file_matches(&p, &k) => kinds.push(current(k)),
                     Ok(k) => errors.push((p.clone(), kind_name_mismatch(&p, &k))),
                     Err(err) => errors.push((p, format!("{err:#}"))),
                 }
@@ -333,7 +333,7 @@ impl Vault {
         if !kind_file_matches(&p, &k) {
             bail!("{}", kind_name_mismatch(&p, &k));
         }
-        Ok(Some(k))
+        Ok(Some(current(k)))
     }
 
     /// Returns the kind or an error that tells an agent how to define it. A built-in kind newer than the vault
@@ -615,6 +615,11 @@ impl Vault {
         note.path = Some(path.clone());
         Ok(path)
     }
+}
+
+/// The judgment kind as this binary has it, so a vault's older file never stamps its old default or refuses unrated.
+fn current(k: KindDef) -> KindDef {
+    if k.name == crate::judge::JUDGMENT { crate::judge::current_kind(k) } else { k }
 }
 
 fn kind_file_matches(p: &Path, k: &KindDef) -> bool {

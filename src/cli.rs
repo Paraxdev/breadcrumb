@@ -1426,10 +1426,10 @@ pub fn run(cli: Cli) -> Result<i32> {
             let (n, slug_note) = if judgment {
                 let j = crate::judge::add(&v, req)?;
                 if j.counted {
-                    out.emit(j.text(), j.note.to_json());
+                    out.emit(j.text(), j.json());
                     return Ok(0);
                 }
-                (j.note, None)
+                (j.note, j.slug_note)
             } else {
                 ops::add_noted(&v, req)?
             };
@@ -1457,7 +1457,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
             let name = n.slug().map(|s| format!("  [{s}]")).unwrap_or_default();
             let landed = ops::landed(&n).map(|l| format!("  {l}")).unwrap_or_default();
-            out.emit(format!("added {}  {}  {}  {}{name}{landed}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
+            let mut data = n.to_json();
+            if judgment && let Json::Object(o) = &mut data {
+                o.insert("counted".into(), false.into());
+            }
+            out.emit(format!("added {}  {}  {}  {}{name}{landed}{created}", n.id, n.kind, n.scope_label(), n.title), data);
         }
         Cmd::Get { id, full, body, tail, .. } => {
             let v = open()?;
@@ -1988,7 +1992,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             };
             let text = read_body_arg(Some(text.join(" ")), None)?.unwrap_or_default();
             let j = crate::judge::judge(&v, &text, &verdict, about.as_deref(), v.detect_project(&cwd).as_deref())?;
-            out.emit(format!("{}\n", j.text()), j.note.to_json());
+            let mut text = j.text();
+            if let Some(m) = &j.slug_note {
+                text.push_str(&format!("\n{m}"));
+            }
+            out.emit(format!("{text}\n"), j.json());
         }
         Cmd::Config { action, project } => {
             let mut v = open()?;

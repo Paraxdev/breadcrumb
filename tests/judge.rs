@@ -78,11 +78,13 @@ fn no_verdict_is_unrated_never_hindered() {
     .unwrap();
     let srv = Server { vault_root: v.root.clone(), cwd: proj.clone() };
     let out = srv.call_tool("add", &args(json!({"title": "the digest cut my handoff", "kind": "judgment", "fields": {"about": "digest"}}))).unwrap();
-    assert!(out.contains("no verdict, saved as unrated, set one of hindered, confusing, missing, helped with update") && out.contains("{\"verdict\": \"...\"}"), "{out}");
     let n = judgments(&v).pop().unwrap();
+    assert!(
+        out.contains(&format!("no verdict, saved as unrated, to rate it call update with id {} and fields {{\"verdict\": V}}, V one of \"hindered\", \"confusing\", \"missing\", \"helped\"", n.id)),
+        "{out}"
+    );
     assert_eq!(n.field("verdict").and_then(|x| x.as_str()), Some("unrated"));
-    let k = v.load_kind("judgment").unwrap().unwrap();
-    assert!(k.field("verdict").unwrap().values.contains(&"unrated".to_string()), "the kind file learns unrated");
+    assert!(std::fs::read_to_string(v.root.join("kinds/judgment.toml")).unwrap().contains("unrated"), "the kind file learns unrated");
     let doctor = breadcrumb::doctor::check(&v);
     assert!(!format!("{doctor:?}").contains("must be one of"), "{doctor:?}");
 
@@ -285,4 +287,77 @@ fn dismiss_archives_with_the_reason() {
     let n = v.get(&a.id).unwrap();
     assert!(n.is_archived() && n.body.ends_with(":\ndismissed: it was a cold cache"), "{}", n.body);
     assert!(judge::list(&v, None, false).is_empty());
+}
+
+const OLD_KIND: &str = "name = \"judgment\"\ndescription = \"old\"\n\n[[fields]]\nname = \"verdict\"\ntype = \"enum\"\ndefault = \"hindered\"\nvalues = [\"hindered\", \"confusing\", \"missing\", \"helped\"]\n";
+
+fn note_file(v: &Vault, id: &str) -> std::path::PathBuf {
+    v.note_files().into_iter().find(|p| std::fs::read_to_string(p).unwrap().contains(&format!("id: {id}"))).unwrap()
+}
+
+#[test]
+fn an_old_judgment_kind_file_never_stamps_hindered_or_refuses_unrated_on_update_or_doctor() {
+    let (_d, v) = common::vault();
+    let rated = judge::judge(&v, "search was slow", "confusing", Some("search"), None).unwrap().note;
+    let unrated = ops::add(&v, AddReq { title: "list cut the title".into(), kind: Some("judgment".into()), ..Default::default() }).unwrap();
+    let kind_file = v.root.join("kinds/judgment.toml");
+    std::fs::write(&kind_file, OLD_KIND).unwrap();
+    let p = note_file(&v, &rated.id);
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.contains("verdict: confusing"), "{text}");
+    std::fs::write(&p, text.replace("verdict: confusing\n", "")).unwrap();
+    common::git(&v.root, &["commit", "-qam", "old vault"]);
+
+    let doctor = format!("{:?}", breadcrumb::doctor::check(&v));
+    assert!(!doctor.contains("must be one of") && !doctor.contains("unrated"), "{doctor}");
+    assert!(!std::fs::read_to_string(&kind_file).unwrap().contains("unrated"), "doctor writes nothing");
+
+    let n = ops::update(&v, &unrated.id, ops::UpdateReq { title: Some("list cut the long title".into()), ..Default::default() }).unwrap();
+    assert_eq!(judge::verdict(&n), "unrated");
+    let n = ops::update(&v, &rated.id, ops::UpdateReq { title: Some("search was slow twice".into()), ..Default::default() }).unwrap();
+    assert_eq!(n.field("verdict").and_then(|x| x.as_str()), Some("unrated"), "never the old default hindered");
+    assert!(std::fs::read_to_string(&kind_file).unwrap().contains("unrated"), "an update of a judgment upgrades the kind file");
+    assert_eq!(common::git(&v.root, &["status", "--porcelain"]), "", "the upgrade is committed with the update");
+}
+
+#[test]
+fn to_refuses_a_judgment_as_the_item() {
+    let (d, v) = common::vault();
+    let a = judge::judge(&v, "search missed an exact id", "hindered", Some("search"), None).unwrap().note;
+    let b = judge::judge(&v, "exact id came third", "hindered", Some("search"), None).unwrap().note;
+    let (ok, _, err) = crumb_in(&v, d.path(), &["judge", "--to", &a.id, &b.id]);
+    assert!(!ok && err.contains(&format!("{} is a judgment, and judgments are filed under a work item or note, name one with --to", a.handle())), "{err}");
+    assert!(v.get(&b.id).unwrap().links.is_empty());
+    assert_eq!(judge::list(&v, None, false).len(), 2);
+}
+
+#[test]
+fn json_says_whether_a_judgment_was_counted() {
+    let (d, v) = common::vault();
+    let json_of = |out: &str| serde_json::from_str::<Value>(out).unwrap();
+    let (ok, out, err) = crumb_in(&v, d.path(), &["--json", "judge", "brief was what I needed", "--verdict", "helped", "--about", "brief"]);
+    assert!(ok, "{err}");
+    let first = json_of(&out);
+    assert_eq!(first["counted"], json!(false), "{out}");
+    let (ok, out, err) = crumb_in(&v, d.path(), &["--json", "judge", "brief again", "--verdict", "helped", "--about", "brief"]);
+    assert!(ok, "{err}");
+    let again = json_of(&out);
+    assert_eq!((&again["counted"], &again["count"], &again["id"]), (&json!(true), &json!(2), &first["id"]), "{out}");
+    let (ok, out, err) = crumb_in(&v, d.path(), &["--json", "add", "-k", "judgment", "-t", "brief a third time", "--field", "verdict=helped", "--field", "about=brief"]);
+    assert!(ok, "{err}");
+    assert_eq!((&json_of(&out)["counted"], &json_of(&out)["count"]), (&json!(true), &json!(3)), "{out}");
+    let (ok, out, err) = crumb_in(&v, d.path(), &["--json", "add", "-k", "judgment", "-t", "list cut the title", "--field", "verdict=hindered"]);
+    assert!(ok, "{err}");
+    assert_eq!(json_of(&out)["counted"], json!(false), "{out}");
+    assert!(json_of(&out).get("count").is_none(), "{out}");
+}
+
+#[test]
+fn a_judgment_reply_says_when_its_slug_was_repaired() {
+    let (d, v) = common::vault();
+    let srv = Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let out = srv.call_tool("add", &args(json!({"title": "search was slow", "kind": "judgment", "slug": "Slow Search!", "fields": {"verdict": "hindered"}}))).unwrap();
+    assert!(out.contains("slug fixed to slow-search"), "{out}");
+    let (ok, out, err) = crumb_in(&v, d.path(), &["add", "-k", "judgment", "-t", "list cut the title", "--slug", "Cut Title!", "--field", "verdict=hindered"]);
+    assert!(ok && out.contains("slug fixed to cut-title"), "{out}{err}");
 }

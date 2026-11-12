@@ -377,7 +377,6 @@ pub(crate) fn add_held(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)>
         }
         req.project = crate::judge::home(v);
     }
-    let k = if k.name == crate::judge::JUDGMENT { crate::judge::current_kind(k) } else { k };
     let project = match &req.project {
         Some(p) => Some(check_slug(p)?),
         None => None,
@@ -700,6 +699,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
     crate::session::stamp_write(&mut note);
     note.updated = now();
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
+    if note.kind == crate::judge::JUDGMENT {
+        touched.extend(crate::judge::upgrade_kind_file(v)?);
+    }
     if !req.supersedes.is_empty() {
         touched.extend(crate::lifecycle::unpin_superseded(v, &note, v.load_notes())?);
     }
