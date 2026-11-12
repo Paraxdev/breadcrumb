@@ -220,6 +220,27 @@ fn global_todos_and_backlog_items_follow_the_scope_rule_in_a_project_digest() {
 }
 
 #[test]
+fn a_global_item_in_review_stays_out_of_a_project_digests_review_line() {
+    let (_d, mut v) = common::vault();
+    breadcrumb::config::set(&mut v, "review_by", "agent").unwrap();
+    let global = ops::add(&v, AddReq { title: "Vault wide cleanup".into(), kind: Some("task".into()), ..Default::default() }).unwrap();
+    let own = common::add(&v, "Own task", "task", Some("create-laser"), &[]);
+    let review = |id: &str, steps: &[&str]| {
+        breadcrumb::backlog::move_item(&v, id, breadcrumb::backlog::MoveReq { state: "review".into(), steps: steps.iter().map(|s| s.to_string()).collect(), by: Some("builder".into()), ..Default::default() }).unwrap();
+    };
+    review(&global.id, &["Run it"]);
+    review(&own.id, &["Run it"]);
+    let ctx = ops::context(&v, Some("create-laser"), 15).unwrap();
+    assert!(ctx.contains("Review: 1 waiting for an agent check (review_by = agent)"), "{ctx}");
+
+    let user_only = common::add(&v, "Needs the user", "task", Some("create-laser"), &[]);
+    review(&user_only.id, &["user: install it"]);
+    breadcrumb::backlog::move_item(&v, &own.id, breadcrumb::backlog::MoveReq { state: "queued".into(), ..Default::default() }).unwrap();
+    let ctx = ops::context(&v, Some("create-laser"), 15).unwrap();
+    assert!(ctx.contains("Review: 0 waiting for an agent check, 1 waiting for the user"), "the global one is no agent check here: {ctx}");
+}
+
+#[test]
 fn scope_matches_slugs_and_globs() {
     use breadcrumb::recall::scope_matches;
     let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();

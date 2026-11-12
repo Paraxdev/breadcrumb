@@ -382,7 +382,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     }
     let mut backlog = crate::backlog::context_section(&notes.iter().filter(|n| crate::backlog::is_item(n) && !foreign(n)).cloned().collect::<Vec<_>>(), &all);
     if crate::config::agent_review(v, project) {
-        let (users, waiting): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| crate::backlog::is_item(n) && crate::backlog::state(n) == "review").partition(|n| crate::backlog::only_user_steps_open(n));
+        let (users, waiting): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| crate::backlog::is_item(n) && !foreign(n) && crate::backlog::state(n) == "review").partition(|n| crate::backlog::only_user_steps_open(n));
         let user = if users.is_empty() { String::new() } else { format!(", {} waiting for the user", users.len()) };
         if !waiting.is_empty() {
             writeln!(review, "Review: {} waiting for an agent check{user} (review_by = agent), `breadcrumb review` lists the steps, check only what you did not build", waiting.len())?;
