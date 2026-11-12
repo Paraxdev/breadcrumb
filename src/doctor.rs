@@ -320,12 +320,10 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
 
 /// `.local` holds machine state, the serve token among it, and every write commits with `git add -A`.
 fn local_dir_problem(v: &Vault) -> Option<Problem> {
-    let text = std::fs::read_to_string(v.root.join(".gitignore")).unwrap_or_default();
-    if text.lines().any(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".local") {
-        return None;
-    }
-    // Other spellings such as `.local/*` ignore it too, git knows them all.
-    if crate::git::available() && crate::git::run(&v.root, &["check-ignore", "-q", ".local/probe"]).is_ok_and(|o| o.status.success()) {
+    // git knows every spelling and a later `!.local/`, its exit code is 0 for ignored and 1 for not. The line match is for a machine without git.
+    let by_git = crate::git::available().then(|| crate::git::run(&v.root, &["check-ignore", "-q", ".local/probe"]).ok()).flatten().and_then(|o| o.status.code()).filter(|c| *c < 2).map(|c| c == 0);
+    let ignored = by_git.unwrap_or_else(|| std::fs::read_to_string(v.root.join(".gitignore")).unwrap_or_default().lines().any(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".local"));
+    if ignored {
         return None;
     }
     Some(Problem {

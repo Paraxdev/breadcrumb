@@ -353,12 +353,17 @@ fn trim_to_budget(head: &str, mut blocks: Vec<(Option<&'static str>, String)>, o
             if chars(&text) <= room {
                 return text + &note;
             }
-            let b = &mut blocks[i].1;
-            if b.is_empty() {
-                break;
+            // The board block ends with the answers that arrived and a review line, those ask the agent to act too.
+            let act = |l: &str| l.starts_with("answer arrived on ") || l.starts_with("Review: ");
+            let mut lines: Vec<&str> = blocks[i].1.split_inclusive('\n').collect();
+            let Some(last) = lines.iter().rposition(|l| !act(l)) else { break };
+            lines.remove(last);
+            if let [only] = lines.as_slice()
+                && only.trim_end().ends_with(':')
+            {
+                lines.clear();
             }
-            let body = b.trim_end_matches('\n');
-            *b = body.rfind('\n').map(|at| body[..=at].to_string()).unwrap_or_default();
+            blocks[i].1 = lines.concat();
         }
     }
     assemble(head.to_string(), blocks, order) + &note

@@ -340,3 +340,41 @@ fn a_digest_filled_by_pins_and_handoffs_still_fits_and_keeps_the_lines_that_ask_
     let wide = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(20000), ..Default::default() }).unwrap();
     assert!(!wide.contains("[cut to fit") && wide.contains("Decision 11") && wide.contains("Todo 19"), "{wide}");
 }
+
+#[test]
+fn the_cut_to_fit_never_takes_an_answer_that_arrived_or_leaves_a_heading_alone() {
+    use breadcrumb::question::{self, AskReq, Opt};
+    let (_d, mut v) = common::vault();
+    breadcrumb::config::set(&mut v, "review_by", "agent").unwrap();
+    for i in 0..6 {
+        let n = common::add(&v, &format!("Decision {i:02} that every session has to know about, written out at its full length here"), "decision", Some("app"), &[]);
+        pin(&v, &n.id);
+    }
+    for t in 1..=3 {
+        common::add(&v, &format!("State of track {t}, a handoff title that goes on for quite a while longer"), "handoff", Some("app"), &[("track", &format!("o{t}"))]);
+    }
+    ops::add(&v, AddReq { title: "Main state".into(), kind: Some("handoff".into()), project: Some("app".into()), body: Some("Where it stands. ".repeat(60)), ..Default::default() }).unwrap();
+    for i in 0..4 {
+        let t = common::add(&v, &format!("Task {i} with a question"), "task", Some("app"), &[("state", "queued")]);
+        let options = ["this way", "that way"].iter().map(|l| Opt { label: l.to_string(), desc: String::new() }).collect();
+        let text = format!("Question {i}: which of the two ways should this be built, given what the last session found out about it?");
+        let (n, q) = question::ask(&v, AskReq { id: t.id.clone(), text, options, multi: false, free: false, by: None }).unwrap();
+        if i < 3 {
+            question::answer(&v, &question::qid(&n, &q), &[2], None, "user").unwrap();
+        }
+    }
+    let built = common::add(&v, "Thing to check", "feature", Some("app"), &[]);
+    breadcrumb::backlog::move_item(&v, &built.id, breadcrumb::backlog::MoveReq { state: "review".into(), steps: vec!["Run it".into()], by: Some("builder".into()), ..Default::default() }).unwrap();
+
+    for budget in [1000, 1200, 1500] {
+        let d = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(budget), ..Default::default() }).unwrap();
+        assert!(d.chars().count() <= budget, "{budget}: {} chars\n{d}", d.chars().count());
+        assert_eq!(d.matches("answer arrived on ").count(), 3, "{budget}: {d}");
+        assert!(budget != 1000 || d.contains("[cut to fit digest_budget = 1000"), "the tight budget is one that cuts: {d}");
+        assert!(d.contains("Review: 1 waiting for an agent check"), "{budget}: {d}");
+        for (i, l) in d.lines().enumerate() {
+            let next = d.lines().nth(i + 1).unwrap_or_default();
+            assert!(!["Other live handoffs:", "Todos:", "Pinned (get an id for its body):"].contains(&l) || !(next.is_empty() || next.starts_with("Backlog:") || next.starts_with("Latest handoff") || next.starts_with("[cut to fit")), "{budget}, a heading without rows: {d}");
+        }
+    }
+}

@@ -249,6 +249,12 @@ fn a_mistyped_flag_before_the_title_of_add_or_idea_is_named() {
     assert!(v.load_notes().is_empty(), "nothing was saved");
     let (ok, _, err) = crumb(&v, &["add", "title", "more words"]);
     assert!(!ok && err.contains("unexpected argument 'more words'"), "clap's own message stays for the rest: {err}");
+    let (ok, _, err) = crumb(&v, &["add", "title", "extra", "--body", "--foo"]);
+    assert!(!ok && err.contains("unexpected argument 'extra'") && !err.contains("unknown flag"), "a flag's value is never blamed: {err}");
+    for args in [&["board", "--kind", "idea", "--bogus"][..], &["search", "add", "--limt", "5"][..], &["list", "-k", "add", "--bogus"][..]] {
+        let (ok, _, err) = crumb(&v, args);
+        assert!(!ok && !err.contains("--help` lists the flags") && err.contains("unexpected argument"), "another command with add or idea as a value keeps clap's message: {args:?}: {err}");
+    }
     let (ok, _, err) = crumb(&v, &["add", "-k", "gotcha", "--global", "--", "--kinds of trouble"]);
     assert!(ok, "{err}");
 }

@@ -196,4 +196,6 @@ fn doctor_reports_a_gitignore_that_lets_the_local_directory_through() {
         std::fs::write(v.root.join(".gitignore"), format!("*.lock\n{spelling}\n")).unwrap();
         assert!(found(&v).is_empty(), "{spelling}: git is asked about the rest");
     }
+    std::fs::write(v.root.join(".gitignore"), ".local/\n!.local/\n").unwrap();
+    assert_eq!(found(&v).len(), 1, "a later negation lets it through again");
 }

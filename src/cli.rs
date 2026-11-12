@@ -2176,10 +2176,46 @@ fn mistyped_flag() -> Option<String> {
         return None;
     }
     let root = Cli::command();
-    let sub = args.iter().find_map(|a| ["add", "idea"].contains(&a.as_str()).then(|| root.find_subcommand(a)).flatten())?;
-    let known: Vec<&str> = root.get_arguments().chain(sub.get_arguments()).flat_map(|a| a.get_long().into_iter().chain(a.get_all_aliases().unwrap_or_default())).chain(["help"]).collect();
-    let flag = args.iter().map(|a| a.split('=').next().unwrap_or_default()).find(|a| a.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()) && !r.contains(char::is_whitespace) && !known.contains(&r)))?;
-    Some(format!("unknown flag {flag}, `breadcrumb {} --help` lists the flags, and text that starts with -- goes last, after a lone --", sub.get_name()))
+    let mut at = 0;
+    while args.get(at).is_some_and(|a| a.starts_with('-')) {
+        at += if value_follows(&[&root], &args[at]) == Some(true) { 2 } else { 1 };
+    }
+    let sub = root.find_subcommand(args.get(at)?)?;
+    if !["add", "idea"].contains(&sub.get_name()) {
+        return None;
+    }
+    let mut rest = args[at + 1..].iter();
+    while let Some(t) = rest.next() {
+        match value_follows(&[&root, sub], t) {
+            Some(true) => {
+                rest.next();
+            }
+            Some(false) => {}
+            None => {
+                let flag = t.split('=').next().unwrap_or_default();
+                if flag != "--help" && flag.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()) && !r.contains(char::is_whitespace)) {
+                    return Some(format!("unknown flag {flag}, `breadcrumb {} --help` lists the flags, and text that starts with -- goes last, after a lone --", sub.get_name()));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// None when `token` is no flag of `cmds`, else whether its value is the token after it.
+fn value_follows(cmds: &[&clap::Command], token: &str) -> Option<bool> {
+    let (long, short, inline) = match token.strip_prefix("--") {
+        Some(l) => (Some(l.split('=').next().unwrap_or_default()), None, l.contains('=')),
+        None => {
+            let mut cs = token.strip_prefix('-')?.chars();
+            (None, Some(cs.next()?), !cs.as_str().is_empty())
+        }
+    };
+    let arg = cmds.iter().flat_map(|c| c.get_arguments()).find(|a| match long {
+        Some(l) => a.get_long() == Some(l) || a.get_all_aliases().is_some_and(|al| al.contains(&l)),
+        None => a.get_short() == short,
+    })?;
+    Some(arg.get_action().takes_values() && !inline)
 }
 
 fn track_project(v: &Vault, id: &str, project: Option<&str>, cwd: &Path) -> Result<Option<String>> {

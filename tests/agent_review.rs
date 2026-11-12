@@ -331,7 +331,7 @@ fn a_session_update_cannot_tick_drop_or_reword_the_users_steps_where_agents_revi
     assert!(e.contains("step 'USER: install it on the laptop' of") && e.contains("only the user ticks it (review_by = agent)"), "{e}");
     for steps in [&["[ ] Run it", "[ ] Check the log"][..], &["[ ] Run it", "[ ] user: skip the laptop", "[ ] Check the log"][..]] {
         let e = set(steps, false).unwrap_err().to_string();
-        assert!(e.contains("is in review and its step 'USER: install it on the laptop' waits for the user") && e.contains(&format!("`breadcrumb move {} queued` takes the item out of review", a.id)), "{e}");
+        assert!(e.contains("is in review and its step 'USER: install it on the laptop' waits for the user") && e.contains(&format!("only the user changes their own steps, with `breadcrumb update {}` in a terminal of their own", a.id)) && !e.contains("queued"), "{e}");
     }
     assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()).len(), 3, "refusals change nothing");
 
@@ -356,7 +356,7 @@ fn a_session_keeps_the_users_open_steps_in_a_re_review_and_cannot_close_past_the
     let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
     user_steps(&v, &a.id);
     let (ok, out, err) = crumb_in_session(&v, &["move", &a.id, "review", "--by", "builder", "--step", "Run it again", "--step", "Check the log"]);
-    assert!(ok && out.contains("replaced 1 open step with the ones given"), "{out}{err}");
+    assert!(ok && out.contains("replaced 1 open step with the ones given") && out.contains("left open for the user: 1. USER: install it on the laptop, only the user ticks these"), "{out}{err}");
     let n = v.get(&a.id).unwrap();
     let mut open = backlog::review_steps(&n);
     open.sort();

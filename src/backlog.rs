@@ -1061,7 +1061,7 @@ pub fn user_steps_hold(v: &Vault, before: &Note, after: &Note, by_user: bool) ->
         return None;
     }
     let open = steps(after, false);
-    steps(before, false).into_iter().find(|t| !open.contains(t)).map(|t| format!("{} is in review and its step '{t}' waits for the user (review_by = agent), a session cannot drop or reword it, `breadcrumb move {} queued` takes the item out of review to change its steps", after.id, after.id))
+    steps(before, false).into_iter().find(|t| !open.contains(t)).map(|t| format!("{} is in review and its step '{t}' waits for the user (review_by = agent), a session cannot drop or reword it, only the user changes their own steps, with `breadcrumb update {}` in a terminal of their own", after.id, after.id))
 }
 
 fn criterion_text(c: &str) -> &str {
@@ -1364,8 +1364,13 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
         Some(c) => apply_check(&mut n, c, keep_user)?,
         None => 0,
     };
-    let kept_for_user = if keep_user && waiting_for_user.is_empty() && req.check == Some(Check::All) { open_user_steps(&n) } else { vec![] };
-    let (replaced, added) = if from == "review" && to == "review" && !req.steps.is_empty() { replace_open_steps(&mut n, &req.steps, keep_user) } else { (0, add_steps(&mut n, &req.steps)) };
+    let mut kept_for_user = if keep_user && waiting_for_user.is_empty() && req.check == Some(Check::All) { open_user_steps(&n) } else { vec![] };
+    let rereview = from == "review" && to == "review" && !req.steps.is_empty();
+    let (replaced, added) = if rereview { replace_open_steps(&mut n, &req.steps, keep_user) } else { (0, add_steps(&mut n, &req.steps)) };
+    if rereview && keep_user && kept_for_user.is_empty() {
+        let named: Vec<String> = req.steps.iter().map(|s| criterion_text(&crate::util::one_line(s)).to_ascii_lowercase()).collect();
+        kept_for_user = open_user_steps(&n).into_iter().filter(|(_, c)| !named.contains(&c.to_ascii_lowercase())).collect();
+    }
     let mut ref_edits = req.refs.clone();
     if let Some(sha) = shipped_in.as_deref().filter(|s| (to == "done" || to == "shipped") && is_sha(s)) {
         ref_edits.push(format!("commit:{sha}"));
