@@ -232,6 +232,10 @@ fn symbol_token(l: &MapLine) -> &str {
     l.symbol.split_whitespace().next().unwrap_or("").trim_matches(|c: char| !is_word(c))
 }
 
+fn has_word(row: &str, sym: &str) -> bool {
+    row.match_indices(sym).any(|(at, m)| !row[..at].chars().next_back().is_some_and(is_word) && !row[at + m.len()..].chars().next().is_some_and(is_word))
+}
+
 /// Looks the line's symbol up as a whole word in the file's current text, the occurrence nearest the old line wins.
 fn locate(l: &MapLine, text: &str) -> Fresh {
     let sym = symbol_token(l);
@@ -242,10 +246,7 @@ fn locate(l: &MapLine, text: &str) -> Fresh {
     let mut best: Option<u64> = None;
     for (i, row) in text.lines().enumerate() {
         let no = i as u64 + 1;
-        let hit = row.match_indices(sym).any(|(at, m)| {
-            !row[..at].chars().next_back().is_some_and(is_word) && !row[at + m.len()..].chars().next().is_some_and(is_word)
-        });
-        if hit && best.is_none_or(|b| no.abs_diff(old) < b.abs_diff(old)) {
+        if has_word(row, sym) && best.is_none_or(|b| no.abs_diff(old) < b.abs_diff(old)) {
             best = Some(no);
         }
     }
@@ -255,6 +256,44 @@ fn locate(l: &MapLine, text: &str) -> Fresh {
         Some(n) if n == old => Fresh::Fresh,
         Some(n) => Fresh::Moved(n),
     }
+}
+
+/// How many rows either side of the given number the symbol may sit.
+const LINE_WINDOW: u64 = 3;
+
+/// One short warning per incoming line that does not match the checkout, each file read once. A miss is advice, the put still saves.
+fn line_warnings(repo: &Path, lines: &[MapLine]) -> Vec<String> {
+    let mut texts: HashMap<&str, Option<String>> = HashMap::new();
+    let mut out = vec![];
+    for l in lines {
+        let text = texts.entry(&l.file).or_insert_with(|| std::fs::read(repo.join(&l.file)).ok().map(|b| String::from_utf8_lossy(&b).into_owned()));
+        let at = format!("{}{}", l.file, l.line.as_deref().map(|n| format!(":{n}")).unwrap_or_default());
+        let Some(text) = text else {
+            out.push(format!("{at} file not found"));
+            continue;
+        };
+        let Some(range) = l.line.as_deref() else { continue };
+        let total = text.lines().count() as u64;
+        let last = range.rsplit('-').next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+        let first = l.first_line_no();
+        if first == 0 || last > total {
+            out.push(format!("{at} is past the end, the file ends at line {total}"));
+            continue;
+        }
+        let sym = symbol_token(l);
+        if sym.is_empty() {
+            continue;
+        }
+        let hits: Vec<u64> = text.lines().enumerate().filter(|(_, row)| has_word(row, sym)).map(|(i, _)| i as u64 + 1).collect();
+        if hits.iter().any(|h| h.abs_diff(first) <= LINE_WINDOW) {
+            continue;
+        }
+        match hits.iter().min_by_key(|h| h.abs_diff(first)) {
+            Some(n) => out.push(format!("{at} {sym} is at line {n}")),
+            None => out.push(format!("{at} {sym} is not in the file")),
+        }
+    }
+    out
 }
 
 pub fn area_of(n: &Note) -> String {
@@ -343,13 +382,17 @@ pub struct PutReport {
     pub refreshed: usize,
     pub unchanged: usize,
     pub dropped: usize,
+    /// Lines that do not match the checkout, saved all the same.
+    pub warnings: Vec<String>,
 }
 
 impl PutReport {
     pub fn text(&self) -> String {
         let m = &self.map;
+        let warned: String = self.warnings.iter().map(|w| format!("
+{w}")).collect();
         format!(
-            "{} map {} {}: {} added, {} replaced, {} refreshed, {} unchanged, {} dropped, {} lines",
+            "{} map {} {}: {} added, {} replaced, {} refreshed, {} unchanged, {} dropped, {} lines{warned}",
             if self.created { "created" } else { "updated" },
             m.area(),
             m.note.id,
@@ -385,9 +428,7 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
     }
     let files: Vec<String> = incoming.iter().map(|l| l.file.clone()).collect::<BTreeSet<_>>().into_iter().collect();
     let hashes = current_blobs(repo, &files)?;
-    if let Some((f, _)) = hashes.iter().find(|(_, h)| h.is_none()) {
-        bail!("{f} is not a file in {}", path_str(repo));
-    }
+    let warnings = line_warnings(repo, &incoming);
     let globs = normalize_globs(&req.paths)?;
 
     let _g = v.lock()?;
@@ -402,7 +443,7 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
             CodeMap { note: n, lines: vec![], prose: vec![], blobs: HashMap::new() }
         }
     };
-    let mut r = PutReport { map: m.clone(), created, added: 0, replaced: 0, refreshed: 0, unchanged: 0, dropped: 0 };
+    let mut r = PutReport { map: m.clone(), created, added: 0, replaced: 0, refreshed: 0, unchanged: 0, dropped: 0, warnings };
     let before = m.lines.len();
     m.lines.retain(|l| !req.drop.iter().any(|d| d.trim() == l.key() || d.trim().trim_end_matches('/') == l.file));
     r.dropped = before - m.lines.len();

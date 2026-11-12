@@ -97,16 +97,16 @@ fn the_same_title_gets_different_names_and_a_retitle_keeps_the_name() {
 }
 
 #[test]
-fn a_given_name_wins_and_bad_ones_are_refused() {
+fn a_given_name_wins_and_update_refuses_bad_ones() {
     let (_d, v) = common::vault();
     let add_as = |title: &str, s: &str| ops::add(&v, AddReq { title: title.into(), project: Some("app".into()), slug: Some(s.into()), ..Default::default() });
     assert_eq!(add_as("Long title about meshing", "Thin-Walls").unwrap().slug().as_deref(), Some("thin-walls"));
     assert_eq!(add_as("Another", "thin-walls").unwrap().slug().as_deref(), Some("thin-walls-2"));
+    let n = add(&v, "Field slug", "note");
     for bad in ["oneword", "with space", "-leading", "trailing-", "a--b", "one-two-three-four-five", "12-34", "app-k3m9x2qa"] {
-        let e = add_as("x y", bad).unwrap_err().to_string();
+        let e = ops::update(&v, &n.id, UpdateReq { slug: Some(bad.into()), ..Default::default() }).unwrap_err().to_string();
         assert!(e.contains("slug"), "{bad}: {e}");
     }
-    let n = add(&v, "Field slug", "note");
     let r = ops::update(&v, &n.id, UpdateReq { slug: Some("thin-walls".into()), ..Default::default() });
     assert!(r.unwrap_err().to_string().contains("taken"));
     let n = ops::update(&v, &n.id, UpdateReq { slug: Some("field-renamed".into()), ..Default::default() }).unwrap();
@@ -252,4 +252,30 @@ fn doctor_warns_about_a_slug_two_notes_share_and_stays_quiet_otherwise() {
     assert!(breadcrumb::doctor::check(&v).iter().any(|p| p.message.contains("used by several")));
     assert!(v.get(&a.slug().unwrap()).unwrap_err().to_string().contains("several"));
     assert_eq!(v.get(&a.id).unwrap().id, a.id, "ids still resolve");
+}
+
+#[test]
+fn add_repairs_a_bad_given_name_instead_of_refusing() {
+    let (_d, v) = common::vault();
+    let add_as = |title: &str, s: &str| ops::add_noted(&v, AddReq { title: title.into(), project: Some("app".into()), slug: Some(s.into()), ..Default::default() }).unwrap();
+    let (n, said) = add_as("Doctor without a project", "doctor-mcp-no-project-scope");
+    assert_eq!(n.slug().as_deref(), Some("doctor-mcp-no-project"));
+    assert_eq!(said.as_deref(), Some("slug shortened to doctor-mcp-no-project"));
+    let (n, said) = add_as("Thin walls", "Thin Walls_v2!");
+    assert_eq!(n.slug().as_deref(), Some("thin-walls-v2"));
+    assert_eq!(said.as_deref(), Some("slug fixed to thin-walls-v2"));
+    let (n, said) = add_as("Doctor without a project", "doctor-mcp-no-project-scope");
+    assert_eq!(n.slug().as_deref(), Some("doctor-mcp-no-project-2"), "a clash still gets a number");
+    assert_eq!(said.as_deref(), Some("slug shortened to doctor-mcp-no-project-2"));
+    let (n, said) = add_as("Stress overlay colours", "oneword");
+    assert_eq!(n.slug().as_deref(), Some("stress-overlay-colours"));
+    assert_eq!(said.as_deref(), Some("slug made from the title: stress-overlay-colours"));
+    let (n, said) = add_as("Mesh fillet", "!!! 12-34");
+    assert_eq!(n.slug().as_deref(), Some("mesh-fillet"));
+    assert!(said.is_some());
+    let (n, said) = add_as("Key lookalike", "app-k3m9x2qa");
+    assert_eq!(n.slug().as_deref(), Some("app-k3m9x2qa-2"));
+    assert!(said.is_none(), "{said:?}");
+    let (_, said) = add_as("Fine", "plain-name");
+    assert!(said.is_none());
 }

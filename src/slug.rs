@@ -146,12 +146,30 @@ fn reads_like_key(s: &str, projects: &[String]) -> bool {
     s.rsplit_once('-').is_some_and(|(head, tail)| crate::id::is_valid_id(tail) && projects.iter().any(|p| p == head))
 }
 
+/// A trailing number is the clash number, not a word.
+fn well_formed(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    let words = parts.len() - usize::from(parts.len() > 1 && parts[parts.len() - 1].chars().all(|c| c.is_ascii_digit()));
+    is_valid(s) && words <= MAX_WORDS
+}
+
+/// A given name made valid the way title words are, cut to its first four words, and whether it was cut. None when no usable name is left.
+fn repair(given: &str) -> Option<(String, bool)> {
+    let plain = plain_text(given);
+    let tokens: Vec<String> = plain.split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty()).map(|t| t.chars().take(MAX_WORD).collect()).collect();
+    let cut = tokens.len() > MAX_WORDS;
+    let mut words: Vec<String> = tokens.into_iter().take(MAX_WORDS).collect();
+    while words.len() > 1 && words.join("-").len() > MAX_SLUG {
+        words.pop();
+    }
+    let s = words.join("-");
+    is_valid(&s).then_some((s, cut))
+}
+
 /// Normalizes a name given by hand, or says what is wrong with it.
 pub fn check_given(given: &str, v: &Vault) -> Result<String> {
     let s = given.trim().to_ascii_lowercase();
-    let parts: Vec<&str> = s.split('-').collect();
-    let words = parts.len() - usize::from(parts.len() > 1 && parts[parts.len() - 1].chars().all(|c| c.is_ascii_digit()));
-    if !is_valid(&s) || words > MAX_WORDS {
+    if !well_formed(&s) {
         bail!("slug '{given}' must be two to four lowercase words joined by hyphens, like stress-auto-mesh");
     }
     let projects: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
@@ -182,16 +200,22 @@ pub fn unique(base: &str, taken: &HashSet<String>, projects: &[String]) -> Strin
         .unwrap_or_default()
 }
 
-/// The slug for a new note, from the given name or its title. Call while holding the lock.
-pub fn assign(v: &Vault, n: &mut Note, given: Option<&str>) -> Result<()> {
-    let base = match given.map(str::trim).filter(|g| !g.is_empty()) {
-        Some(g) => check_given(g, v)?,
-        None => from_title(&n.title, &n.kind, &n.id),
+/// The slug for a new note, from the given name or its title, never a refusal. A given name that breaks the rule is
+/// repaired and the returned text says what happened. Call while holding the lock.
+pub fn assign(v: &Vault, n: &mut Note, given: Option<&str>) -> Option<String> {
+    let given = given.map(str::trim).filter(|g| !g.is_empty());
+    let (base, how) = match given {
+        Some(g) if well_formed(&g.to_ascii_lowercase()) => (g.to_ascii_lowercase(), None),
+        Some(g) => match repair(g) {
+            Some((s, cut)) => (s, Some(if cut { "shortened to" } else { "fixed to" })),
+            None => (from_title(&n.title, &n.kind, &n.id), Some("made from the title:")),
+        },
+        None => (from_title(&n.title, &n.kind, &n.id), None),
     };
     let projects: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
     let name = unique(&base, &taken(&v.load_notes()), &projects);
-    n.set_field(SLUG_KEY, Value::String(name));
-    Ok(())
+    n.set_field(SLUG_KEY, Value::String(name.clone()));
+    how.map(|h| format!("slug {h} {name}"))
 }
 
 /// An explicit rename, the one thing that changes a slug. A clash is an error here since the note already has a name.

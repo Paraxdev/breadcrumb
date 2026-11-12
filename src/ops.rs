@@ -169,6 +169,9 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
         if crate::merge::KEYS.contains(&key.as_str()) {
             bail!("'{key}' is set by merge, use the merge tool or `breadcrumb merge`");
         }
+        if key == "status" {
+            bail!("'status' is the active or archived flag of a note, backlog progress is the field state, like state=queued");
+        }
         if RESERVED_KEYS.contains(&key.as_str()) {
             bail!("'{key}' is note metadata, not a field, use the dedicated option (title, kind, tags, links, status, pin)");
         }
@@ -300,12 +303,28 @@ pub struct AddReq {
 }
 
 pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
+    add_noted(v, req).map(|r| r.0)
+}
+
+/// Backlog state words an agent may pass as a kind, `idea` is a kind too.
+fn state_as_kind(kind: &str) -> Option<&'static str> {
+    crate::backlog::STATES.iter().copied().find(|s| *s == kind && *s != "idea")
+}
+
+/// The note and what `add` changed on the way that the caller should say, a repaired slug.
+pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
     let title = crate::util::one_line(&req.title);
     if title.is_empty() {
         bail!("title is required");
     }
     let kind_name = req.kind.clone().filter(|k| !k.trim().is_empty()).unwrap_or_else(|| v.config.default_kind.clone());
-    let k = v.require_kind(kind_name.trim())?;
+    let k = match v.require_kind(kind_name.trim()) {
+        Ok(k) => k,
+        Err(e) => match state_as_kind(&kind_name.trim().to_lowercase()) {
+            Some(s) => bail!("'{s}' is a backlog state, not a kind, use kind bug, feature or task with field state={s}"),
+            None => return Err(e),
+        },
+    };
     let mut req = req;
     if k.name == crate::judge::JUDGMENT && crate::judge::home(v).is_some() && req.project != crate::judge::home(v) {
         if let Some(p) = req.project.take().filter(|_| !req.fields.iter().any(|(f, _)| f == "seen_in")) {
@@ -336,7 +355,7 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
         note.body = k.template.clone().unwrap_or_default().trim_end().to_string();
     }
     let (fields, field_slug) = split_slug(req.fields);
-    crate::slug::assign(v, &mut note, req.slug.or(field_slug).as_deref())?;
+    let slug_note = crate::slug::assign(v, &mut note, req.slug.or(field_slug).as_deref());
     apply_fields(v, &mut note, &k, fields)?;
     if let Some(t) = req.track.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         if t.split_whitespace().count() > 1 {
@@ -389,7 +408,12 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
     }
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("add", &note))?;
-    Ok(note)
+    Ok((note, slug_note))
+}
+
+/// What landed for a backlog item, so the agent sees the stored values.
+pub fn landed(n: &Note) -> Option<String> {
+    crate::backlog::is_item(n).then(|| format!("state={} priority={}", crate::backlog::state(n), crate::backlog::priority(n)))
 }
 
 pub const SIMILAR_MAX: usize = 2;

@@ -251,7 +251,7 @@ impl Server {
             }
             "add" => {
                 let project = self.target_project(&v, a)?;
-                let n = ops::add(
+                let (n, slug_note) = ops::add_noted(
                     &v,
                     AddReq {
                         title: req_s(a, "title")?,
@@ -274,6 +274,12 @@ impl Server {
                     },
                 )?;
                 let mut out = format::ack("saved", &n);
+                if let Some(l) = ops::landed(&n) {
+                    out.push_str(&format!(" {l}"));
+                }
+                if let Some(m) = slug_note {
+                    out.push_str(&format!("\n{m}"));
+                }
                 if ops::is_pref(&n) && !n.pinned {
                     out.push_str(&format!("\n{}", ops::PIN_HINT));
                 }
@@ -702,11 +708,11 @@ pub fn tool_defs() -> Vec<Value> {
             "kind": {"type": "string", "description": "default note"},
             "body": st(),
             "tags": arr(),
-            "fields": fields(),
+            "fields": {"type": "object", "description": "kind fields too (state, priority, parent), see kinds; summary: pin's digest line, expires: date, 3d or until:id, said: user's quote"},
             "links": links(),
             "pinned": bl(),
             "paths": paths(),
-            "slug": st(),
+            "slug": {"type": "string", "description": "2-4 hyphenated lowercase words, else from title"},
             "track": st(),
             "supersedes": arr(),
         })), &["title"])),

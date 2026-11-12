@@ -1060,7 +1060,7 @@ pub struct AddArgs {
     /// When it stops holding: a date (the last day), an RFC3339 time, 3d or 12h from now, or until:<id> is closed
     #[arg(long, value_name = "WHEN")]
     pub expires: Option<String>,
-    /// Short name, two to four words with hyphens, generated from the title when left out
+    /// Short name, two to four words with hyphens, generated from the title when left out, a name that breaks the rule is repaired
     #[arg(long)]
     pub slug: Option<String>,
 }
@@ -1292,7 +1292,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => false,
             };
             let links = a.supersedes.into_iter().map(|to| crate::note::Link { to, rel: ops::SUPERSEDES.into() }).collect();
-            let n = ops::add(
+            let (n, slug_note) = ops::add_noted(
                 &v,
                 AddReq {
                     title: a.title,
@@ -1311,6 +1311,9 @@ pub fn run(cli: Cli) -> Result<i32> {
                 },
             )?;
             let mut created = if new_project { format!("\n(created new project {})", n.scope_label()) } else { String::new() };
+            if let Some(m) = slug_note {
+                created.push_str(&format!("\n{m}"));
+            }
             if ops::is_pref(&n) && !n.pinned {
                 created.push_str(&format!("\n{}, `breadcrumb update {} --pin`", ops::PIN_HINT, n.id));
             }
@@ -1327,7 +1330,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 created.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n)));
             }
             let name = n.slug().map(|s| format!("  [{s}]")).unwrap_or_default();
-            out.emit(format!("added {}  {}  {}  {}{name}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
+            let landed = ops::landed(&n).map(|l| format!("  {l}")).unwrap_or_default();
+            out.emit(format!("added {}  {}  {}  {}{name}{landed}{created}", n.id, n.kind, n.scope_label(), n.title), n.to_json());
         }
         Cmd::Get { id, full, body, tail } => {
             let v = open()?;
