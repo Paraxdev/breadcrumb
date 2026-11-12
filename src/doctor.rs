@@ -79,10 +79,6 @@ pub fn missing_refs(n: &crate::note::Note, roots: &[std::path::PathBuf]) -> Vec<
     out
 }
 
-fn ops_pref_unpinned(n: &crate::note::Note) -> bool {
-    crate::ops::is_pref(n) && !n.pinned && !n.is_archived()
-}
-
 pub struct Run {
     pub problems: Vec<Problem>,
     pub checked: usize,
@@ -264,9 +260,6 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
             } else if !n.is_archived() {
                 err(path.clone(), id.clone(), "info", format!("merged into {to} but not archived, it stays hidden, `breadcrumb merge --undo {}` restores it", n.id));
             }
-        }
-        if ops_pref_unpinned(n) {
-            err(path.clone(), id.clone(), "info", format!("unpinned {}, a new session sees only its title, `breadcrumb update {} --pin` if every session needs it", n.kind, n.id));
         }
         if n.pinned && !n.is_archived() {
             for why in crate::pins::reasons(n, v.config.pin_review_days) {

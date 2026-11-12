@@ -443,7 +443,7 @@ fn verbatim_unc_paths_normalize_to_the_form_the_shell_reports() {
 }
 
 #[test]
-fn unpinned_prefs_get_one_line_and_doctor_info() {
+fn unpinned_prefs_get_one_line_and_doctor_stays_quiet() {
     let (_d, v) = common::vault();
     let old = common::add(&v, "Prefers tabs over spaces", "feedback", None, &[]);
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -465,12 +465,8 @@ fn unpinned_prefs_get_one_line_and_doctor_info() {
     assert!(line.chars().count() <= breadcrumb::ops::PREFS_LINE_MAX && line.ends_with("more"), "{line}");
 
     let probs = breadcrumb::doctor::check(&v);
-    let info: Vec<_> = probs.iter().filter(|p| p.severity == "info").collect();
-    let (pins, dups): (Vec<&&breadcrumb::doctor::Problem>, Vec<_>) = info.iter().partition(|p| p.message.contains("--pin"));
-    assert_eq!(pins.len(), 32);
-    assert!(dups.iter().all(|p| p.message.contains("may duplicate") || p.message.contains("more")), "the alike titles are listed as likely duplicates");
+    assert!(!probs.iter().any(|p| p.message.contains("--pin") || p.message.contains("unpinned")), "an unpinned preference is by design, not a finding");
     assert!(!probs.iter().any(|p| p.severity == "warning" && p.id.as_deref() == Some(old.id.as_str())));
-    assert!(breadcrumb::doctor::text(&probs, 35).contains(&format!("{} info", info.len())));
 
     let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: v.root.clone() };
     let mut a = serde_json::Map::new();
