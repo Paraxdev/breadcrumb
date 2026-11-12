@@ -60,6 +60,8 @@ Search ranks a note the query names by id or slug first, then a note holding the
 
 When the duplicate's body is empty, or its text with whitespace normalized already sits whole (at word edges) in the kept note's body, nothing is appended and no `Merged from` line is written, the output says `body not added (empty)` or `body not added (already there)`, and tags, globs, links, retargeting, the pin and the archived duplicate with its `merge_undo` record happen as always. `merge --undo` then leaves the kept note's body alone.
 
+Bodies with fewer than 8 distinct words (`BODY_TINY_WORDS` in src/merge.rs) are listed as likely duplicates only when they are equal after normalizing whitespace and case and not empty, or one note says `duplicate of <the other>`, a lookalike title is not enough. `add` and its lookalike check are unchanged.
+
 ## Who wrote what
 
 `breadcrumb get <id>` hides what an import left (`source`, `metadata`, `source_hash`, `memory_name`), nothing leaves the file, `--full` and `--json` show it. It ends with what links to the note, `superseded by` first. `--tail N` keeps the last N lines of the text with a line saying how many were cut, History stays whole and does not count, since appends land above it. `--body` prints the text alone for piping, a cut line goes to stderr. The MCP `get` takes `full`, `body` and `tail`. `--json` always holds every key and the whole body, plus `inbound`.
@@ -133,6 +135,8 @@ Code maps save what an agent learned about one area of a project, so the next on
 ## Staleness
 
 Notes carry a `verified` date, set on every write. `breadcrumb verify <id>` confirms a note is still accurate without changing it, notes older than `stale_days` (breadcrumb.toml, default 60) get a `(stale?)` marker, and `breadcrumb doctor` lists them along with backticked repo paths that no longer exist in the project checkout. `breadcrumb stats --prompt "..." --file src/x.rs` shows what the hooks would inject.
+
+`breadcrumb doctor` checks the detected project's notes plus global ones, `--project <slug>` (`-p`, MCP `project`) picks another, `--all` (MCP `project: all`) checks every note, and with no detected project and no flag it checks everything. Vault level checks (kind files, project files, the Claude memory index) always run, and checks that need every note (broken links, duplicate ids, slug clashes, field refs) read all notes and report only for those in scope. The first line is the summary, `checked 36 notes of create-laserdefense and global: 0 errors, 3 warnings, 2 info, `--all` checks the rest`, it counts everything and names the scope. A note's missing paths are one warning, `mentions 4 paths missing from D:/dev/neocad (on main): a/b.rs, c/d.rs, e/f.rs (+1)`, naming the checkout that was looked at and the branch it is on (`at <sha>` when detached), so a moved file reads differently from a checkout on another branch. `--severity warning` (MCP `severity`) shows that level and worse, `--json` has the same folding and filter. `doctor --fix` always works on the whole vault. Unpinned feedback and user notes are no finding, a title only digest line is the design.
 
 ## Upgrade and serve
 

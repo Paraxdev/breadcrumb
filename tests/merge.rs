@@ -261,8 +261,8 @@ fn doctor_lists_likely_duplicates_with_the_merge_command_and_changes_nothing() {
     let other = "Plugins read their manifest from the bundle root, a manifest in a subfolder is ignored and the plugin never shows in the list, which looks like a broken install to users.";
     let old = note(&v, "HDRI size limits on Linux", "gotcha", hdri, &["render"], &[]);
     let new = note(&v, "HDRI limit for big files on Linux", "gotcha", &format!("{hdri} Seen again today."), &["render"], &[]);
-    let globs_a = note(&v, "Cache invalidation order", "note", "c", &[], &["src/cache/**"]);
-    let globs_b = note(&v, "Order of cache eviction", "note", "d", &[], &["src/cache/**"]);
+    let globs_a = note(&v, "Cache invalidation order", "note", "Invalidate the cache entries in dependency order before the evict pass runs", &[], &["src/cache/**"]);
+    let globs_b = note(&v, "Order of cache eviction", "note", "Invalidate the cache entries in dependency order before the evict pass runs", &[], &["src/cache/**"]);
     let unrelated = note(&v, "Packaging needs a desktop file", "note", "e", &[], &["src/cache/**"]);
     let apart = note(&v, "HDRI limit for big plugin files on Linux", "gotcha", other, &["render"], &[]);
     let linked_a = note(&v, "Shader cache path on Linux builds", "gotcha", hdri, &[], &[]);
@@ -372,4 +372,24 @@ fn a_body_the_kept_note_already_holds_or_an_empty_one_is_not_added_and_undo_rest
     let m = merge::merge(&v, &word.id, &keep.id).unwrap();
     assert_eq!(m.skipped, None, "a fragment of a word is not the same text");
     assert!(v.get(&keep.id).unwrap().body.contains("Merged from"));
+}
+
+#[test]
+fn tiny_bodies_are_listed_only_when_equal_or_one_says_it_duplicates_the_other() {
+    let (_d, v) = common::vault();
+    let lines = || breadcrumb::doctor::check_with(&v, None).into_iter().filter(|p| p.message.contains("may duplicate")).collect::<Vec<_>>();
+    let a = note(&v, "Linux render cache path", "note", "x", &[], &[]);
+    let b = note(&v, "Linux render cache size", "note", "a", &[], &[]);
+    let empty_a = note(&v, "Mesa driver version pin", "note", "", &[], &[]);
+    let empty_b = note(&v, "Mesa driver version cap", "note", "", &[], &[]);
+    let same_a = note(&v, "Windows installer signing", "note", "Use  the
+signed build", &[], &[]);
+    let same_b = note(&v, "Windows installer signing step", "note", "use the signed BUILD", &[], &[]);
+    let told_a = note(&v, "Gamma curve default", "note", "ok", &[], &[]);
+    let told_b = note(&v, "Gamma curve default value", "note", &format!("Duplicate of {}", told_a.id), &[], &[]);
+    let found: Vec<String> = lines().iter().filter_map(|p| p.id.clone()).collect();
+    assert!(!found.contains(&a.id) && !found.contains(&b.id), "different tiny bodies are not duplicates: {found:?}");
+    assert!(!found.contains(&empty_a.id) && !found.contains(&empty_b.id), "empty bodies prove nothing");
+    assert_eq!(found.iter().filter(|i| **i == same_a.id || **i == same_b.id).count(), 1, "equal after whitespace and case: {found:?}");
+    assert!(found.contains(&told_b.id) && !found.contains(&told_a.id), "a duplicate of note still counts");
 }

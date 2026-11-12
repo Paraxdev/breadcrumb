@@ -42,7 +42,7 @@ fn days_ago(n: i64) -> String {
 }
 
 fn counts(doctor: &str) -> String {
-    doctor.lines().last().unwrap().split(": ").nth(1).unwrap().split(", ").take(2).collect::<Vec<_>>().join(", ")
+    doctor.lines().next().unwrap().split(": ").nth(1).unwrap().split(", ").take(2).collect::<Vec<_>>().join(", ")
 }
 
 #[test]

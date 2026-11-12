@@ -279,14 +279,19 @@ pub enum Cmd {
         #[command(subcommand)]
         action: Option<ConfigCmd>,
     },
-    /// Validate every note and report problems
+    /// Validate notes and report problems, the detected project's plus global ones, --all for every note
     Doctor {
-        /// Propose fixes: rewrite moved file paths, drop or mark gone ones, mark expired notes (dry run without --yes)
+        /// Propose fixes on the whole vault: rewrite moved file paths, drop or mark gone ones, mark expired notes (dry run without --yes)
         #[arg(long)]
         fix: bool,
         /// Apply the --fix changes in one commit
         #[arg(long, requires = "fix", alias = "apply")]
         yes: bool,
+        /// Only this level and worse, the summary still counts everything
+        #[arg(long, value_parser = ["error", "warning", "info"], conflicts_with = "fix")]
+        severity: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
     /// Every pin with its age and why it is flagged, flagged first, with the commands to verify, unpin or archive it (changes nothing)
     Pins {
@@ -1579,7 +1584,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let cmd = format!("claude mcp add --scope user breadcrumb -- {quoted} mcp");
             out.emit(&cmd, json!({"command": cmd, "exe": exe}));
         }
-        Cmd::Doctor { fix: true, yes } => {
+        Cmd::Doctor { fix: true, yes, .. } => {
             let v = open()?;
             let changes = crate::fix::plan(&v);
             let applied = if yes { Some(crate::fix::apply(&v, &changes)?) } else { None };
@@ -1587,12 +1592,13 @@ pub fn run(cli: Cli) -> Result<i32> {
             let text = format!("{}{}", crate::fix::text(&changes, applied), crate::lifecycle::sweep_text(&expired, yes));
             out.emit(text, json!({"applied": applied, "changes": changes, "expired": expired}));
         }
-        Cmd::Doctor { .. } => {
+        Cmd::Doctor { severity, scope, .. } => {
             let v = open()?;
-            let problems = crate::doctor::check(&v);
-            let n = v.note_files().len();
-            let errors = problems.iter().filter(|p| p.severity == "error").count();
-            out.emit(crate::doctor::text(&problems, n), json!({"notes": n, "errors": errors, "problems": problems}));
+            let min = severity.as_deref().map(crate::doctor::parse_severity).transpose()?;
+            let sc = crate::doctor::scope_of(&v, scope.project.as_deref(), scope.global, scope.all, &cwd)?;
+            let run = crate::doctor::run(&v, &sc, crate::importer::default_claude_dir().as_deref());
+            let errors = run.errors();
+            out.emit(run.text(min, "`--all`"), json!({"notes": run.checked, "scope": sc.label(), "errors": errors, "problems": run.shown(min)}));
             return Ok(if errors > 0 { 1 } else { 0 });
         }
         Cmd::Stats { prompt, file } => {
