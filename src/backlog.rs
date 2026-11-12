@@ -129,8 +129,7 @@ pub const CLAIM_STALE_HOURS: i64 = 24;
 /// Seconds a dead session's claim still keeps others away after its last write, a restart must not cost a session its work.
 const DEAD_GRACE: i64 = 3600;
 
-/// Who this process works as: `by`, else BREADCRUMB_SESSION, else the start of the Claude Code session id.
-/// `by` is the word reserved for the user.
+/// The name `user` is reserved for the user.
 pub fn named_user(by: Option<&str>) -> bool {
     by.is_some_and(|b| b.trim().eq_ignore_ascii_case(DEFAULT_ACTOR))
 }
@@ -140,6 +139,7 @@ pub fn typed_by_user(by: Option<&str>) -> bool {
     named_user(by) && session_name(None).is_none()
 }
 
+/// Who this process works as: `by`, else BREADCRUMB_SESSION, else the start of the Claude Code session id.
 pub fn session_name(by: Option<&str>) -> Option<String> {
     let given = |s: Option<String>| s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
     given(by.map(str::to_string))
@@ -1216,7 +1216,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let evidence = req.evidence.as_deref().map(str::trim).filter(|e| !e.is_empty()).map(crate::util::normalize_newlines);
     let agents = req.verdict.is_some() && crate::config::agent_review(v, n.project.as_deref());
     if agents && !req.by_user && named_user(req.by.as_deref()) {
-        bail!("only the user reviews as user, on the Review page of `breadcrumb serve` or in a terminal of their own, a session gives its own name with --by (MCP by) and its evidence");
+        bail!("only the user reviews as user, on the Review page of `breadcrumb serve` or in a terminal of their own (no CLAUDE_CODE_SESSION_ID or BREADCRUMB_SESSION set), a session gives its own name with --by (MCP by) and its evidence");
     }
     let agent_check = agents && !req.by_user;
     if agent_check {
