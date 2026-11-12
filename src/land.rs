@@ -238,6 +238,9 @@ fn mutate<T>(v: &Vault, slug: &str, f: impl FnOnce(&mut Vec<Entry>) -> Result<(S
     let _g = v.lock()?;
     let mut entries = read(v, slug)?;
     let (msg, out) = f(&mut entries)?;
+    if msg.is_empty() {
+        return Ok(out);
+    }
     let p = write(v, slug, &mut entries)?;
     v.commit(&[p], &format!("breadcrumb: {msg}"))?;
     Ok(out)

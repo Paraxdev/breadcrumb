@@ -276,8 +276,6 @@ impl App {
                 return Some(Response::html(401, LOGIN_HTML));
             }
             let mut resp = Response::html(200, LOGGED_IN_HTML);
-            resp.headers.push(("Referrer-Policy", "no-referrer".into()));
-            resp.headers.push(("Cache-Control", "no-store".into()));
             resp.headers.push(("Set-Cookie", format!("{COOKIE}={}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Strict", r.token)));
             return Some(resp);
         }

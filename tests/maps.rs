@@ -255,7 +255,7 @@ fn a_put_of_a_moved_line_makes_it_fresh_again() {
 
 #[test]
 fn put_warns_about_each_line_that_misses_the_checkout_and_still_saves() {
-    let rows: Vec<String> = (1..=60).map(|i| if i == 57 { "export function setStressOverlay() { markWindow(); }".into() } else { format!("// row {i}") }).collect();
+    let rows: Vec<String> = (1..=60).map(|i| if i == 57 { "export function setStressOverlay() { markWindow(); }".into() } else if i == 20 { "function rangeTarget() {}".into() } else { format!("// row {i}") }).collect();
     let (_vd, v, _rd, root) = setup(&[("src/view/overlay.ts", &rows.join("\n")), ("src/a.rs", "fn alpha() {}\nfn beta() {}\n")]);
     let r = put(
         &v,
@@ -270,9 +270,10 @@ fn put_warns_about_each_line_that_misses_the_checkout_and_still_saves() {
             "src/a.rs:2-9 beta, range past the end",
             "src/gone.rs:3 nope, no such file",
             "src/a.rs ranging, no line number",
+            "src/view/overlay.ts:5-30 rangeTarget, the symbol lies inside the range",
         ],
     );
-    assert_eq!(r.added, 8, "{}", r.text());
+    assert_eq!(r.added, 9, "{}", r.text());
     let text = r.text();
     let warned: Vec<&str> = text.lines().skip(1).collect();
     assert_eq!(
@@ -289,6 +290,21 @@ fn put_warns_about_each_line_that_misses_the_checkout_and_still_saves() {
     assert!(get(&v, &root, "stress overlay").contains("src/gone.rs:3 nope"), "the line is saved anyway");
     let clean = put(&v, &root, "stress overlay", &["src/view/overlay.ts:57 setStressOverlay, turns the overlay on"]);
     assert_eq!(clean.text().lines().count(), 1, "{}", clean.text());
+}
+
+#[test]
+fn map_put_json_carries_the_warnings() {
+    let (_vd, v, _rd, root) = setup(&[("src/a.rs", "fn alpha() {}\n")]);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_breadcrumb"))
+        .args(["--json", "map", "put", "core", "-p", "app", "--line", "src/a.rs:40 alpha, first"])
+        .current_dir(&root)
+        .env("BREADCRUMB_HOME", &v.root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let j: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(j["warnings"], json!(["src/a.rs:40 is past the end, the file ends at line 1"]), "{j}");
+    assert_eq!(j["kind"], "map");
 }
 
 #[test]

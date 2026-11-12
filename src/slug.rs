@@ -156,12 +156,13 @@ fn well_formed(s: &str) -> bool {
 /// A given name made valid the way title words are, cut to its first four words, and whether it was cut. None when no usable name is left.
 fn repair(given: &str) -> Option<(String, bool)> {
     let plain = plain_text(given);
-    let tokens: Vec<String> = plain.split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty()).map(|t| t.chars().take(MAX_WORD).collect()).collect();
-    let cut = tokens.len() > MAX_WORDS;
-    let mut words: Vec<String> = tokens.into_iter().take(MAX_WORDS).collect();
+    let raw: Vec<&str> = plain.split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty()).collect();
+    let long = raw.iter().take(MAX_WORDS).any(|t| t.chars().count() > MAX_WORD);
+    let mut words: Vec<String> = raw.iter().take(MAX_WORDS).map(|t| t.chars().take(MAX_WORD).collect()).collect();
     while words.len() > 1 && words.join("-").len() > MAX_SLUG {
         words.pop();
     }
+    let cut = long || raw.len() > words.len();
     let s = words.join("-");
     is_valid(&s).then_some((s, cut))
 }
@@ -215,7 +216,13 @@ pub fn assign(v: &Vault, n: &mut Note, given: Option<&str>) -> Option<String> {
     let projects: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
     let name = unique(&base, &taken(&v.load_notes()), &projects);
     n.set_field(SLUG_KEY, Value::String(name.clone()));
-    how.map(|h| format!("slug {h} {name}"))
+    let clash = (name != base).then(|| if reads_like_key(&base, &projects) { format!("{base} reads like an item's board key") } else { format!("{base} is taken") });
+    match (how, clash) {
+        (Some(h), Some(c)) => Some(format!("slug {h} {name}, {c}")),
+        (Some(h), None) => Some(format!("slug {h} {name}")),
+        (None, Some(c)) if given.is_some() => Some(format!("slug {name}, {c}")),
+        _ => None,
+    }
 }
 
 /// An explicit rename, the one thing that changes a slug. A clash is an error here since the note already has a name.

@@ -78,6 +78,9 @@ fn doctor_reports_on_the_detected_project_and_global_and_all_checks_the_rest() {
 
     let (_, everything) = doctor(&v, d.path(), &[]);
     assert!(everything.starts_with("checked 3 notes: 0 errors, 2 warnings"), "no detected project and no flag checks everything: {everything}");
+
+    let (_, global) = doctor(&v, &alpha, &["--global"]);
+    assert!(global.starts_with("checked 1 note of global: "), "{global}");
 }
 
 #[test]

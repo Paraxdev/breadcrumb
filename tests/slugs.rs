@@ -266,7 +266,7 @@ fn add_repairs_a_bad_given_name_instead_of_refusing() {
     assert_eq!(said.as_deref(), Some("slug fixed to thin-walls-v2"));
     let (n, said) = add_as("Doctor without a project", "doctor-mcp-no-project-scope");
     assert_eq!(n.slug().as_deref(), Some("doctor-mcp-no-project-2"), "a clash still gets a number");
-    assert_eq!(said.as_deref(), Some("slug shortened to doctor-mcp-no-project-2"));
+    assert_eq!(said.as_deref(), Some("slug shortened to doctor-mcp-no-project-2, doctor-mcp-no-project is taken"));
     let (n, said) = add_as("Stress overlay colours", "oneword");
     assert_eq!(n.slug().as_deref(), Some("stress-overlay-colours"));
     assert_eq!(said.as_deref(), Some("slug made from the title: stress-overlay-colours"));
@@ -275,7 +275,13 @@ fn add_repairs_a_bad_given_name_instead_of_refusing() {
     assert!(said.is_some());
     let (n, said) = add_as("Key lookalike", "app-k3m9x2qa");
     assert_eq!(n.slug().as_deref(), Some("app-k3m9x2qa-2"));
-    assert!(said.is_none(), "{said:?}");
+    assert_eq!(said.as_deref(), Some("slug app-k3m9x2qa-2, app-k3m9x2qa reads like an item's board key"));
     let (_, said) = add_as("Fine", "plain-name");
     assert!(said.is_none());
+    let (n, said) = add_as("Fine again", "plain-name");
+    assert_eq!(n.slug().as_deref(), Some("plain-name-2"));
+    assert_eq!(said.as_deref(), Some("slug plain-name-2, plain-name is taken"));
+    let (n, said) = add_as("Long words", &format!("{0}-{0}-{0}", "w".repeat(20)));
+    assert_eq!(n.slug().as_deref(), Some(format!("{0}-{0}", "w".repeat(20)).as_str()));
+    assert_eq!(said.as_deref(), Some(format!("slug shortened to {0}-{0}", "w".repeat(20)).as_str()), "words dropped for length are a shortening");
 }

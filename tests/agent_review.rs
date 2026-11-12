@@ -152,7 +152,7 @@ fn an_agent_pass_ticks_its_steps_and_leaves_user_steps_for_the_user() {
     assert!(backlog::is_user_step("[x] user: done") && !backlog::is_user_step("users can log in"));
 
     let (_, out, _) = crumb(&v, &["review", "--all"]);
-    assert!(out.contains("2. [user] USER: install it on the laptop") && out.contains("1. Run it") && out.contains("Steps marked [user] are the user's"), "{out}");
+    assert!(out.contains("2. [user] install it on the laptop") && out.contains("1. Run it") && out.contains("Steps marked [user] are the user's"), "{out}");
 
     let (ok, out, err) = crumb(&v, &["review", "pass", &a.id, "--by", "reviewer", "--evidence", "ran it, log is clean"]);
     assert!(ok, "{err}");

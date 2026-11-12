@@ -267,7 +267,23 @@ pub fn covered_by<'a>(h: &Note, live: &[&'a Note]) -> Option<&'a Note> {
 
 /// Why a live handoff no longer leads, covered by a newer one or settled. Covered wins, it names where to look.
 pub fn handoff_mark(h: &Note, live: &[&Note], all: &[Note]) -> Option<String> {
-    match covered_by(h, live) {
+    mark_text(h, covered_by(h, live), all)
+}
+
+/// `handoff_mark` of every live handoff by id, each handoff's words split once.
+pub fn handoff_marks(live: &[&Note], all: &[Note]) -> HashMap<String, String> {
+    let words: Vec<HashSet<String>> = live.iter().map(|n| name_words(n).into_iter().collect()).collect();
+    live.iter()
+        .filter_map(|h| {
+            let slug = h.slug();
+            let cover = live.iter().zip(&words).find(|(n, w)| (&n.created, &n.id) > (&h.created, &h.id) && (w.contains(&h.id) || slug.as_ref().is_some_and(|s| w.contains(s))));
+            mark_text(h, cover.map(|(n, _)| *n), all).map(|m| (h.id.clone(), m))
+        })
+        .collect()
+}
+
+fn mark_text(h: &Note, cover: Option<&Note>, all: &[Note]) -> Option<String> {
+    match cover {
         Some(n) => Some(format!("covered by {}", n.handle())),
         None => settled(h, all).map(|k| format!("settled, the {k} items it names landed")),
     }
@@ -309,7 +325,17 @@ pub fn find_handoff(v: &Vault, target: &str, project: Option<&str>) -> Result<Op
         let live = live_handoffs(&all, project, &lapsed);
         return match live.into_iter().find(|n| track(n).as_deref() == Some(t.as_str())) {
             Some(n) => Ok(Some(n.clone())),
-            None => bail!("no live handoff on track {t} in {}", project.unwrap_or("global")),
+            None => {
+                let mut elsewhere: Vec<&str> = all.iter().filter(|n| n.kind == HANDOFF && n.project.as_deref() != project && !n.is_archived() && !lapsed.hides(n) && track(n).as_deref() == Some(t.as_str())).map(|n| n.project.as_deref().unwrap_or("global")).collect();
+                elsewhere.sort_unstable();
+                elsewhere.dedup();
+                let hint = match elsewhere.as_slice() {
+                    [] => "pass -p <slug> (project in MCP) for another project's track".to_string(),
+                    [p] => format!("{p} has one, pass -p {p} (project in MCP)"),
+                    ps => format!("{} have one, pass -p with one of them (project in MCP)", ps.join(", ")),
+                };
+                bail!("no live handoff on track {t} in {}, {hint}", project.unwrap_or("global"))
+            }
         };
     }
     match v.resolve_id(target) {
@@ -322,9 +348,9 @@ pub fn find_handoff(v: &Vault, target: &str, project: Option<&str>) -> Result<Op
 }
 
 /// `claim` and `release` on a handoff or `track:<name>`, None when the target is no handoff and an item claim applies.
-pub fn claim_handoff(v: &Vault, target: &str, project: Option<&str>, by: Option<&str>, release: bool) -> Result<Option<Note>> {
+pub fn claim_handoff(v: &Vault, target: &str, project: Option<&str>, by: Option<&str>, release: bool, force: bool) -> Result<Option<Note>> {
     match find_handoff(v, target, project)? {
-        Some(h) => take_handoff(v, &h.id, by, release).map(Some),
+        Some(h) => take_handoff(v, &h.id, by, release, force).map(Some),
         None => Ok(None),
     }
 }
@@ -335,20 +361,28 @@ pub fn take_text(h: &Note, release: bool) -> String {
     format!("{verb} {}\n{}", handoff_line(h), if release { "nobody holds it now" } else { "the digest names you as its holder, write a new handoff on the track when you hand it on" })
 }
 
-/// The session `by` takes over the work a handoff hands on, or with `release` lets it go. Returns the handoff.
-pub fn take_handoff(v: &Vault, id: &str, by: Option<&str>, release: bool) -> Result<Note> {
+/// The session `by` takes over the work a handoff hands on, or with `release` lets it go, only its holder or `force`. Returns the handoff.
+pub fn take_handoff(v: &Vault, id: &str, by: Option<&str>, release: bool, force: bool) -> Result<Note> {
     let _g = v.lock()?;
     let mut n = v.get(id)?;
+    let named = |s: Option<String>| s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+    let who = named(by.map(str::to_string))
+        .or_else(|| named(std::env::var(crate::backlog::SESSION_ENV).ok()))
+        .or_else(crate::session::current)
+        .unwrap_or_else(|| crate::backlog::DEFAULT_ACTOR.to_string());
     if release {
+        let held = |k: &str| n.field(k).and_then(yaml_scalar_string).filter(|s| !s.trim().is_empty());
+        if let Some(h) = held(HELD_BY_KEY)
+            && !force
+            && !crate::session::same_holder(&h, &who)
+            && !held(HELD_AS_KEY).is_some_and(|a| crate::session::same_holder(&a, &who))
+        {
+            bail!("{} is held by {}, not {who}, `breadcrumb release {} --force` (MCP force) releases it anyway", n.handle(), holder(&n).unwrap_or(h), n.id);
+        }
         for k in [HELD_BY_KEY, HELD_AS_KEY, HELD_SINCE_KEY] {
             n.unset_field(k);
         }
     } else {
-        let named = |s: Option<String>| s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-        let who = named(by.map(str::to_string))
-            .or_else(|| named(std::env::var(crate::backlog::SESSION_ENV).ok()))
-            .or_else(crate::session::current)
-            .unwrap_or_else(|| crate::backlog::DEFAULT_ACTOR.to_string());
         let (who, name) = match crate::session::find(&who) {
             Some(s) => (s.id, s.name),
             None => (who, None),
@@ -386,8 +420,9 @@ pub fn handoff_report(v: &Vault, h: &Note, mcp: bool) -> String {
         (false, false) => s.push('\n'),
     }
     s.push_str("other live handoffs, each with the command that retires it if this handoff replaces it:");
+    let marks = handoff_marks(&live, &all);
     for n in others.iter().take(REPORT_MAX) {
-        let mark = handoff_mark(n, &live, &all).map(|m| format!(" [{m}]")).unwrap_or_default();
+        let mark = marks.get(&n.id).map(|m| format!(" [{m}]")).unwrap_or_default();
         let retire = if mcp { format!("update {{\"id\": \"{}\", \"supersedes\": [\"{}\"]}}", h.id, n.id) } else { format!("breadcrumb update {} --supersedes {}", h.id, n.id) };
         let _ = write!(s, "\n  {}{mark}\n    {retire}", handoff_line(n));
     }

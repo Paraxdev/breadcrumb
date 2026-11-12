@@ -261,8 +261,11 @@ fn one_push_carries_several_entries_and_one_read_closes_them() {
     assert!(!out.contains("also holds"), "{out}");
     assert_eq!(breadcrumb::backlog::state(&e.v.get(&b).unwrap()), "review");
     assert!(entries(&e).iter().all(|x| x.state == "green"));
+    let before = common::git(&e.v.root, &["rev-list", "--count", "HEAD"]);
     let out = ok(&e, "r", &["land", "-p", "fx", "read", S1, &S2[..8], "green"]);
     assert!(out.contains("1111111 was green already") && out.contains("2222222 was green already"), "{out}");
+    assert_eq!(common::git(&e.v.root, &["rev-list", "--count", "HEAD"]), before, "a read of green entries writes no commit");
+    assert_eq!(common::git(&e.v.root, &["status", "--porcelain"]), "");
 }
 
 #[test]

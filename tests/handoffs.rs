@@ -210,8 +210,11 @@ fn add_lists_the_others_with_their_marks_and_update_supersedes_retires_one_after
     assert!(out.contains(&format!(": Engine follow up\n    breadcrumb update {new} --supersedes {mid}\n  {old_h} aaaaaaaa ")), "{out}");
     assert!(out.trim_end().ends_with(&format!(": Engine state [covered by {mid_h}]\n    breadcrumb update {new} --supersedes {old}")), "{out}");
 
+    let written = v.get(&new).unwrap().updated;
+    tick();
     let out = crumb(&v, C, &["update", &new, "--supersedes", &old]);
     assert!(out.contains(&format!("\nsuperseded {old_h} aaaaaaaa ")), "{out}");
+    assert_eq!(v.get(&new).unwrap().updated, written, "a link only update keeps updated, so the handoff's age holds");
     assert_eq!(superseded(&v, &new), vec![old.clone()]);
     assert!(!v.get(&old).unwrap().pinned);
     let d = digest(&v);

@@ -208,7 +208,7 @@ fn a_rereview_replaces_open_steps_and_keeps_ticked_ones() {
     backlog::check(&v, &a.id, &backlog::Check::parse("1").unwrap()).unwrap();
     let (ok, out, err) = crumb(&v, &["move", &a.id, "review", "--step", "Close it", "--step", "Reload it"]);
     assert!(ok, "{err}");
-    assert!(out.contains("replaced 1 open steps with the ones given, ticked ones stay"), "{out}");
+    assert!(out.contains("replaced 1 open step with the ones given, ticked ones stay"), "{out}");
     let n = v.get(&a.id).unwrap();
     assert_eq!(backlog::unmet_acceptance(&n), ["Close it", "Reload it"]);
     let all: Vec<&str> = n.field("acceptance").and_then(|a| a.as_sequence()).unwrap().iter().filter_map(|c| c.as_str()).collect();
@@ -217,4 +217,35 @@ fn a_rereview_replaces_open_steps_and_keeps_ticked_ones() {
     let b = common::add(&v, "First time", "task", Some("app"), &[("acceptance", "[builds]")]);
     let r = to_review(&v, &b.id, &["Run it"]);
     assert_eq!((r.replaced, backlog::review_steps(&r.note).len()), (0, 2), "entering review adds as before");
+}
+
+#[test]
+fn review_numbers_steps_by_the_positions_check_takes() {
+    let (_d, v) = common::vault();
+    let a = common::add(&v, "Numbered", "task", Some("app"), &[]);
+    to_review(&v, &a.id, &["Open it", "Press it", "Close it"]);
+    backlog::check(&v, &a.id, &backlog::Check::parse("1").unwrap()).unwrap();
+    let (_, out, _) = crumb(&v, &["review", "--all"]);
+    assert!(out.contains("  2. Press it\n  3. Close it\n"), "{out}");
+    let (_, out, _) = crumb(&v, &["--json", "review", "--all"]);
+    let j: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(j["items"][0]["step_positions"], json!([2, 3]));
+    crumb(&v, &["check", &a.id, "3"]);
+    assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()), ["Press it"], "the number review showed is the one check ticks");
+}
+
+#[test]
+fn review_of_several_projects_words_each_by_its_own_review_by() {
+    let (_d, v) = common::vault();
+    let a = common::add(&v, "Agent checked", "task", Some("app"), &[]);
+    breadcrumb::config::set_in(&v, "app", "review_by", "agent").unwrap();
+    to_review(&v, &a.id, &["Run it", "user: install the build"]);
+    let (_, out, _) = crumb(&v, &["review", "--all"]);
+    assert!(out.contains("agents review here") && out.contains("  2. [user] install the build\n"), "every listed item is the agent's: {out}");
+    let b = common::add(&v, "User checked", "task", Some("web"), &[]);
+    to_review(&v, &b.id, &["Open it"]);
+    let (_, out, _) = crumb(&v, &["review", "--all"]);
+    assert!(out.starts_with("2 in review in all projects, agents review the items of app: ") && out.contains("--evidence") && out.contains("try the others"), "{out}");
+    let (_, out, _) = crumb(&v, &["review", "-p", "web"]);
+    assert!(out.contains(", try each, then") && !out.contains("--evidence"), "{out}");
 }
