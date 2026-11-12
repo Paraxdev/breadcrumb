@@ -335,10 +335,12 @@ pub fn unmerged_text(u: &Unmerged) -> String {
 const BODY_ALIKE: f64 = 0.3;
 /// Bodies shorter than this many words say too little to tell notes apart, the title decides.
 const BODY_MIN_WORDS: usize = 12;
+/// A body with fewer distinct words than this proves nothing by overlap, only an identical body or "duplicate of" lists the pair.
+const BODY_TINY_WORDS: usize = 8;
 
 /// Pairs of active notes that read like one fact, `(dup, keep)`, strongest first.
 /// A note that says it is a duplicate of the other always counts. Otherwise the titles look alike (or the path globs
-/// match with a shared title word) and the bodies share enough words. Code maps, workflows, and pairs linked to each
+/// match with a shared title word) and the bodies share enough words, or are identical when either has under 8 words. Code maps, workflows, and pairs linked to each
 /// other (someone looked and kept both), are left out.
 pub fn likely_duplicates(all: &[Note], lapsed: &crate::lifecycle::Lapsed) -> Vec<(usize, usize)> {
     let live: Vec<usize> = (0..all.len())
@@ -372,6 +374,14 @@ pub fn likely_duplicates(all: &[Note], lapsed: &crate::lifecycle::Lapsed) -> Vec
             if !(same_paths || alike.is_some()) {
                 continue;
             }
+            if distinct_words(&x.body).min(distinct_words(&y.body)) < BODY_TINY_WORDS {
+                let norm = |b: &str| b.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+                if !x.body.trim().is_empty() && norm(&x.body) == norm(&y.body) {
+                    let (dup, keep) = if (x.created, &x.id) > (y.created, &y.id) { (i, j) } else { (j, i) };
+                    out.push((1.5, dup, keep));
+                }
+                continue;
+            }
             let exact = alike.is_some_and(|(e, _)| e);
             let body = overlap(&words[i], &words[j]);
             let short = words[i].len().min(words[j].len()) < BODY_MIN_WORDS;
@@ -383,6 +393,10 @@ pub fn likely_duplicates(all: &[Note], lapsed: &crate::lifecycle::Lapsed) -> Vec
     }
     out.sort_by(|a, b| b.0.total_cmp(&a.0));
     out.into_iter().map(|(_, d, k)| (d, k)).collect()
+}
+
+fn distinct_words(body: &str) -> usize {
+    body.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect::<std::collections::HashSet<_>>().len()
 }
 
 fn body_words(body: &str) -> std::collections::HashSet<String> {
