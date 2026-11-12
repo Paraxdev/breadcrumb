@@ -22,6 +22,7 @@ const KEEP_GREEN: usize = 8;
 const DIGEST_ROWS: usize = 3;
 const DIGEST_MAX_ROWS: usize = 5;
 const NOTE_MAX: usize = 120;
+const DIGEST_NOTE: usize = 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Step {
@@ -45,6 +46,9 @@ pub struct Entry {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// What the session that added the entry wants known with it, apart from `note` so no step clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo: Option<String>,
     /// The session that holds the next step, as `name id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
@@ -156,11 +160,11 @@ fn holder(to: &str) -> String {
 #[derive(Clone, Debug)]
 pub enum Op {
     List { all: bool },
-    Add { sha: String, items: Vec<String>, to: Option<String> },
+    Add { sha: String, items: Vec<String>, note: Option<String>, to: Option<String> },
     Approve { sha: String, note: Option<String>, to: Option<String> },
     Verify { sha: String, to: Option<String> },
-    Pushed { sha: String, run: String, to: Option<String> },
-    Read { sha: String, green: bool, to: Option<String> },
+    Pushed { shas: Vec<String>, run: String, to: Option<String> },
+    Read { shas: Vec<String>, green: bool, to: Option<String> },
     Drop { sha: String },
     Move { sha: String, after: Option<String> },
 }
@@ -184,13 +188,24 @@ fn names(v: &Vault, e: &Entry) -> String {
     e.items.iter().map(|id| v.get(id).map(|n| n.handle()).unwrap_or_else(|_| id.clone())).collect::<Vec<_>>().join(", ")
 }
 
-fn head(e: &Entry) -> String {
+/// Other unread entries pushed on the same run, so a reader sees one push.
+fn peers(entries: &[Entry], e: &Entry) -> String {
+    let Some(r) = &e.run else { return String::new() };
+    let o: Vec<&str> = entries.iter().filter(|x| x.sha != e.sha && x.state == "pushed" && e.state == "pushed" && x.run.as_ref() == Some(r)).map(Entry::short).collect();
+    if o.is_empty() { String::new() } else { format!(" (with {})", o.join(", ")) }
+}
+
+fn memo_tail(e: &Entry, max: usize) -> String {
+    e.memo.as_ref().map(|m| format!(", note: \"{}\"", truncate_chars(m, max))).unwrap_or_default()
+}
+
+fn head(entries: &[Entry], e: &Entry) -> String {
     let mut s = format!("{} {}", e.short(), e.state);
     if let Some(n) = &e.note {
         s.push_str(&format!(" ({n})"));
     }
     if let Some(r) = &e.run {
-        s.push_str(&format!(", run {r}"));
+        s.push_str(&format!(", run {r}{}", peers(entries, e)));
     }
     s.push_str(&format!(", {} ago", short_age(&e.at)));
     if e.stale() {
@@ -207,8 +222,8 @@ fn due_text(e: &Entry) -> String {
     }
 }
 
-fn row(v: &Vault, i: usize, e: &Entry) -> String {
-    format!("{}. {}, {}, items: {}", i + 1, head(e), due_text(e), names(v, e))
+fn row(v: &Vault, entries: &[Entry], i: usize, e: &Entry) -> String {
+    format!("{}. {}, {}, items: {}{}", i + 1, head(entries, e), due_text(e), names(v, e), memo_tail(e, NOTE_MAX))
 }
 
 pub fn list_text(v: &Vault, entries: &[Entry], all: bool) -> String {
@@ -216,7 +231,7 @@ pub fn list_text(v: &Vault, entries: &[Entry], all: bool) -> String {
     if shown.is_empty() {
         return "the landing queue is empty".to_string();
     }
-    shown.iter().map(|(i, e)| row(v, *i, e)).collect::<Vec<_>>().join("\n")
+    shown.iter().map(|(i, e)| row(v, entries, *i, e)).collect::<Vec<_>>().join("\n")
 }
 
 fn mutate<T>(v: &Vault, slug: &str, f: impl FnOnce(&mut Vec<Entry>) -> Result<(String, T)>) -> Result<T> {
@@ -239,23 +254,40 @@ fn step_error(e: &Entry, verb: &str, want: &str) -> anyhow::Error {
     anyhow::anyhow!("{} is {}, {verb} needs {want}, `--force` does it anyway", e.short(), e.state)
 }
 
-/// The queue runs in order, so an earlier entry that is not landed yet holds this one back.
-fn blocker(entries: &[Entry], i: usize) -> Option<&Entry> {
-    entries[..i].iter().find(|e| e.is_open())
+/// The queue runs in order, so an earlier entry that is not landed yet holds this one back, unless this call
+/// pushes it too or it was pushed on the same run, which the entries of one push share.
+fn blocker<'a>(entries: &'a [Entry], i: usize, call: &[usize], run: &str) -> Option<&'a Entry> {
+    entries[..i].iter().enumerate().find(|(j, e)| e.is_open() && !call.contains(j) && !(e.state == "pushed" && e.run.as_deref() == Some(run))).map(|(_, e)| e)
+}
+
+/// The entries a call names, in queue order.
+fn find_all(entries: &[Entry], shas: &[String]) -> Result<Vec<usize>> {
+    let mut idx = shas.iter().map(|s| find(entries, s)).collect::<Result<Vec<_>>>()?;
+    idx.sort_unstable();
+    idx.dedup();
+    if idx.is_empty() {
+        bail!("give at least one commit sha");
+    }
+    Ok(idx)
 }
 
 pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
     let slug = slug_of(v, project)?;
     let by = session::attribute(req.by.as_deref());
     let force = req.force;
-    let state_out = |e: &Entry, extra: &str| Outcome { text: format!("{}\n  next: {}{extra}", head(e), due_text(e)), data: json!({"entry": e}) };
+    let state_out = |e: &Entry, extra: &str| {
+        let all = read(v, &slug).unwrap_or_default();
+        let memo = e.memo.as_ref().map(|m| format!("\n  note: {m}")).unwrap_or_default();
+        Outcome { text: format!("{}\n  next: {}{memo}{extra}", head(&all, e), due_text(e)), data: json!({"entry": e}) }
+    };
     match req.op {
         Op::List { all } => {
             let entries = read(v, &slug)?;
             let shown: Vec<&Entry> = entries.iter().filter(|e| all || e.state != "green").collect();
             Ok(Outcome { text: list_text(v, &entries, all), data: json!({"entries": shown}) })
         }
-        Op::Add { sha, items, to } => {
+        Op::Add { sha, items, note, to } => {
+            let memo = note.map(|n| truncate_chars(&one_line(&n), NOTE_MAX)).filter(|n| !n.is_empty());
             let sha = sha.trim().to_ascii_lowercase();
             if !is_commit_hex(&sha) {
                 bail!("{sha:?} is not a commit sha, give 7 to 40 hex characters");
@@ -279,6 +311,7 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                     at: t,
                     note: None,
                     run: None,
+                    memo,
                     next: to.as_deref().map(holder),
                     steps: vec![Step { state: "built".into(), at: t, by: by.clone() }],
                     extra: Map::new(),
@@ -318,59 +351,103 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
             })?;
             Ok(state_out(&e, ""))
         }
-        Op::Pushed { sha, run, to } => {
+        Op::Pushed { shas, run, to } => {
             let run = one_line(&run).trim().to_string();
             if run.is_empty() {
                 bail!("pushed needs the CI run id, `--run <id>`");
             }
-            let e = mutate(v, &slug, |entries| {
-                let i = find(entries, &sha)?;
+            let es = mutate(v, &slug, |entries| {
+                let idx = find_all(entries, &shas)?;
                 if !force {
-                    let e = &entries[i];
-                    if !matches!(e.state.as_str(), "approved" | "verified") {
-                        return Err(step_error(e, "pushed", "an approved entry"));
-                    }
-                    if let Some(b) = blocker(entries, i) {
-                        bail!("{} is ahead in the queue and still {}, push in order, or `--force`, or `crumb land move`/`drop`", b.short(), b.state);
+                    for &i in &idx {
+                        let e = &entries[i];
+                        if !matches!(e.state.as_str(), "approved" | "verified") {
+                            return Err(step_error(e, "pushed", "an approved entry"));
+                        }
+                        if let Some(b) = blocker(entries, i, &idx, &run) {
+                            let state = match &b.run {
+                                Some(r) if b.state == "pushed" => format!("pushed on run {r}"),
+                                _ => b.state.clone(),
+                            };
+                            let name = if matches!(b.state.as_str(), "approved" | "verified") { ", or name it in this call if the push carries it" } else { "" };
+                            bail!("{} is ahead in the queue and still {state}, push in order{name}, or `--force`, or `crumb land move`/`drop`", b.short());
+                        }
                     }
                 }
-                let e = &mut entries[i];
-                set_state(e, "pushed", &by);
-                e.run = Some(run);
-                e.note = None;
-                e.next = to.as_deref().map(holder).or_else(|| e.by("approved").map(str::to_string));
-                Ok((format!("land pushed {}", e.short()), e.clone()))
+                for &i in &idx {
+                    let e = &mut entries[i];
+                    set_state(e, "pushed", &by);
+                    e.run = Some(run.clone());
+                    e.note = None;
+                    e.next = to.as_deref().map(holder).or_else(|| e.by("approved").map(str::to_string));
+                }
+                let es: Vec<Entry> = idx.iter().map(|&i| entries[i].clone()).collect();
+                Ok((format!("land pushed {}", es.iter().map(Entry::short).collect::<Vec<_>>().join(" ")), es))
             })?;
-            Ok(state_out(&e, ""))
+            if let [e] = es.as_slice() {
+                return Ok(state_out(e, ""));
+            }
+            let all = read(v, &slug)?;
+            let text = es.iter().map(|e| format!("{}, next: {}", head(&all, e), due_text(e))).collect::<Vec<_>>().join("\n");
+            Ok(Outcome { text, data: json!({"entries": es}) })
         }
-        Op::Read { sha, green, to } => {
-            let mut retry = false;
-            let e = mutate(v, &slug, |entries| {
-                let i = find(entries, &sha)?;
-                let e = &mut entries[i];
-                if green && e.state == "green" {
-                    retry = true;
-                    return Ok((String::new(), e.clone()));
-                }
-                if !force && e.state != "pushed" {
+        Op::Read { shas, green, to } => {
+            let word = if green { "green" } else { "red" };
+            let (es, retried, others) = mutate(v, &slug, |entries| {
+                let idx = find_all(entries, &shas)?;
+                let again = |e: &Entry| green && e.state == "green";
+                if let Some(e) = idx.iter().map(|&i| &entries[i]).find(|e| !force && e.state != "pushed" && !again(e)) {
                     return Err(step_error(e, "read", "a pushed entry"));
                 }
-                set_state(e, if green { "green" } else { "red" }, &by);
-                e.next = if green { None } else { to.as_deref().map(holder).or_else(|| e.by("built").map(str::to_string)) };
-                Ok((format!("land read {} {}", e.short(), e.state), e.clone()))
+                let mut changed = vec![];
+                let mut retried = vec![];
+                for &i in &idx {
+                    let e = &mut entries[i];
+                    if again(e) {
+                        retried.push(e.sha.clone());
+                        continue;
+                    }
+                    set_state(e, word, &by);
+                    e.next = if green { None } else { to.as_deref().map(holder).or_else(|| e.by("built").map(str::to_string)) };
+                    changed.push(e.short().to_string());
+                }
+                let mut others: Vec<(String, Vec<String>)> = vec![];
+                for r in idx.iter().filter_map(|&i| entries[i].run.as_ref()) {
+                    let unread: Vec<String> = entries.iter().enumerate().filter(|(j, e)| !idx.contains(j) && e.state == "pushed" && e.run.as_ref() == Some(r)).map(|(_, e)| e.short().to_string()).collect();
+                    if !unread.is_empty() && !others.iter().any(|(o, _)| o == r) {
+                        others.push((r.clone(), unread));
+                    }
+                }
+                let msg = if changed.is_empty() { String::new() } else { format!("land read {} {word}", changed.join(" ")) };
+                Ok((msg, (idx.iter().map(|&i| entries[i].clone()).collect::<Vec<Entry>>(), retried, others)))
             })?;
-            let mut out = state_out(&e, "");
+            let multi = es.len() > 1;
+            let mut blocks = vec![];
+            let mut moved_all = vec![];
+            for e in &es {
+                let mut out = state_out(e, "");
+                if green {
+                    let (text, moved) = land_items(v, e, req.by.clone());
+                    out.text.push_str(&text);
+                    if retried.contains(&e.sha) {
+                        out.text.push_str(&format!("\n  {} green already, moved what was left", if multi { format!("{} was", e.short()) } else { "it was".to_string() }));
+                    }
+                    moved_all.extend(moved);
+                }
+                blocks.push(out.text);
+            }
+            let mut text = blocks.join("\n");
             if !green {
-                out.text.push_str("\n  its items stay where they are");
-                return Ok(out);
+                text.push_str(if multi { "\n  their items stay where they are" } else { "\n  its items stay where they are" });
             }
-            let (text, moved) = land_items(v, &e, req.by.clone());
-            out.text.push_str(&text);
-            out.data["items"] = json!(moved);
-            if retry {
-                out.text.push_str("\n  it was green already, moved what was left");
+            for (r, unread) in &others {
+                text.push_str(&format!("\n  run {r} also holds {} unread, `crumb land read {} {word}` reads {} too", unread.join(", "), unread.join(" "), if unread.len() > 1 { "them" } else { "it" }));
             }
-            Ok(out)
+            let mut data = if multi { json!({"entries": es}) } else { json!({"entry": es[0]}) };
+            if green {
+                data["items"] = json!(moved_all);
+            }
+            Ok(Outcome { text, data })
         }
         Op::Drop { sha } => {
             let e = mutate(v, &slug, |entries| {
@@ -450,7 +527,7 @@ pub fn digest_lines(v: &Vault, project: Option<&str>) -> Option<String> {
             continue;
         }
         shown += 1;
-        s.push_str(&format!("{}, {}\n", head(e), due_text(e)));
+        s.push_str(&format!("{}, {}{}\n", head(&entries, e), due_text(e), memo_tail(e, DIGEST_NOTE)));
     }
     if open.len() > shown {
         s.push_str(&format!("+{} more\n", open.len() - shown));
@@ -482,6 +559,9 @@ pub enum LandCmd {
         /// Backlog ids or slugs this merge lands, comma separated
         #[arg(long, value_delimiter = ',')]
         items: Vec<String>,
+        /// A note shown with the entry, like a condition or the worktree and branch it sits in
+        #[arg(long)]
+        note: Option<String>,
         /// Session that holds the next step
         #[arg(long)]
         to: Option<String>,
@@ -505,10 +585,11 @@ pub enum LandCmd {
         #[arg(long)]
         to: Option<String>,
     },
-    /// It was pushed and started a CI run
+    /// It was pushed and started a CI run, several commits for one push that carries them all
     Pushed {
-        /// The merge commit, 4 or more leading hex characters find a queued one
-        sha: String,
+        /// The merge commits, 4 or more leading hex characters find a queued one
+        #[arg(required = true, value_delimiter = ',')]
+        shas: Vec<String>,
         /// The CI run id
         #[arg(long)]
         run: String,
@@ -518,8 +599,9 @@ pub enum LandCmd {
     },
     /// The CI run was read, green moves the entry's items to review with commit:<sha> as a ref
     Read {
-        /// The merge commit, 4 or more leading hex characters find a queued one
-        sha: String,
+        /// The merge commits of one run, 4 or more leading hex characters find a queued one
+        #[arg(required = true, value_delimiter = ',')]
+        shas: Vec<String>,
         /// green or red
         result: String,
         /// Session that holds the next step
@@ -550,11 +632,11 @@ pub enum LandCmd {
 impl LandArgs {
     pub fn into_req(self) -> Result<Req> {
         let op = match self.cmd.unwrap_or(LandCmd::List { all: false }) {
-            LandCmd::Add { sha, items, to } => Op::Add { sha, items, to },
+            LandCmd::Add { sha, items, note, to } => Op::Add { sha, items, note, to },
             LandCmd::Approve { sha, note, to } => Op::Approve { sha, note, to },
             LandCmd::Verify { sha, to } => Op::Verify { sha, to },
-            LandCmd::Pushed { sha, run, to } => Op::Pushed { sha, run, to },
-            LandCmd::Read { sha, result, to } => Op::Read { sha, green: parse_result(&result)?, to },
+            LandCmd::Pushed { shas, run, to } => Op::Pushed { shas, run, to },
+            LandCmd::Read { shas, result, to } => Op::Read { shas, green: parse_result(&result)?, to },
             LandCmd::List { all } => Op::List { all },
             LandCmd::Drop { sha } => Op::Drop { sha },
             LandCmd::Move { sha, after } => Op::Move { sha, after },
@@ -578,13 +660,14 @@ pub fn mcp(v: &Vault, project: Option<&str>, a: &Map<String, Value>) -> Result<S
     let flag = |k: &str| a.get(k).and_then(Value::as_bool).unwrap_or(false);
     let items: Vec<String> = a.get("items").and_then(Value::as_array).map(|xs| xs.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
     let to = s("to");
+    let shas = || -> Result<Vec<String>> { Ok(need("sha")?.split(|c: char| c == ',' || c.is_whitespace()).filter(|x| !x.is_empty()).map(str::to_string).collect()) };
     let op = match s("action").as_deref().unwrap_or("list") {
         "list" => Op::List { all: false },
-        "add" => Op::Add { sha: need("sha")?, items, to },
+        "add" => Op::Add { sha: need("sha")?, items, note: s("note"), to },
         "approve" => Op::Approve { sha: need("sha")?, note: s("note"), to },
         "verify" => Op::Verify { sha: need("sha")?, to },
-        "pushed" => Op::Pushed { sha: need("sha")?, run: need("run")?, to },
-        read @ ("green" | "red") => Op::Read { sha: need("sha")?, green: read == "green", to },
+        "pushed" => Op::Pushed { shas: shas()?, run: need("run")?, to },
+        read @ ("green" | "red") => Op::Read { shas: shas()?, green: read == "green", to },
         "drop" => Op::Drop { sha: need("sha")? },
         "move" => Op::Move { sha: need("sha")?, after: s("after") },
         other => bail!("unknown land action {other:?}, use list, add, approve, verify, pushed, green, red, drop or move"),
