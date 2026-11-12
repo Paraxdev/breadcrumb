@@ -315,3 +315,35 @@ fn a_session_cannot_close_an_item_waiting_for_review_without_a_verdict() {
     let (ok, _, err) = crumb_in_session(&v, &["move", &c.id, "done"]);
     assert!(!ok && err.contains("waits for the user's steps") && err.contains(&format!("`breadcrumb review pass {} --by user`", c.id)), "{err}");
 }
+
+#[test]
+fn a_session_update_cannot_tick_drop_or_reword_the_users_steps_where_agents_review() {
+    use breadcrumb::ops::{FieldInput, UpdateReq, update};
+    let (_d, mut v) = common::vault();
+    agents(&mut v);
+    let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
+    user_steps(&v, &a.id);
+    let set = |steps: &[&str], by_user: bool| {
+        let list = serde_yaml::Value::Sequence(steps.iter().map(|s| serde_yaml::Value::String(s.to_string())).collect());
+        update(&v, &a.id, UpdateReq { fields: vec![("acceptance".into(), FieldInput::Value(list))], by_user, ..Default::default() })
+    };
+    let e = set(&["[ ] Run it", "[x] USER: install it on the laptop", "[ ] Check the log"], false).unwrap_err().to_string();
+    assert!(e.contains("step 'USER: install it on the laptop' of") && e.contains("only the user ticks it (review_by = agent)"), "{e}");
+    for steps in [&["[ ] Run it", "[ ] Check the log"][..], &["[ ] Run it", "[ ] user: skip the laptop", "[ ] Check the log"][..]] {
+        let e = set(steps, false).unwrap_err().to_string();
+        assert!(e.contains("is in review and its step 'USER: install it on the laptop' waits for the user") && e.contains("review fail"), "{e}");
+    }
+    assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()).len(), 3, "refusals change nothing");
+
+    set(&["[x] Run it", "[ ] USER: install it on the laptop", "[ ] Check the log", "[ ] Read the diff"], false).unwrap();
+    assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()).len(), 3, "the other steps are free to edit");
+    set(&["[x] Run it", "[x] USER: install it on the laptop", "[ ] Check the log"], true).unwrap();
+    assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()), vec!["[ ] Check the log"], "the user's own edit holds");
+
+    let b = common::add(&v, "Not in review", "feature", Some("app"), &[]);
+    let list = |steps: &[&str]| serde_yaml::Value::Sequence(steps.iter().map(|s| serde_yaml::Value::String(s.to_string())).collect());
+    update(&v, &b.id, UpdateReq { fields: vec![("acceptance".into(), FieldInput::Value(list(&["[ ] user: try it"])))], ..Default::default() }).unwrap();
+    update(&v, &b.id, UpdateReq { fields: vec![("acceptance".into(), FieldInput::Value(list(&["[ ] user: try it twice"])))], ..Default::default() }).unwrap();
+    let e = update(&v, &b.id, UpdateReq { fields: vec![("acceptance".into(), FieldInput::Value(list(&["[x] user: try it twice"])))], ..Default::default() }).unwrap_err().to_string();
+    assert!(e.contains("only the user ticks it"), "before review a session rewords but never ticks: {e}");
+}

@@ -314,7 +314,22 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
     }
     out.extend(project_files(v, &projects));
     out.extend(crate::config::vault_problems(v).into_iter().map(|message| Problem { path: crate::vault::CONFIG_FILE.into(), id: None, severity: "warning", message }));
+    out.extend(local_dir_problem(v));
     Run { problems: out, checked, scope: scope.clone() }
+}
+
+/// `.local` holds machine state, the serve token among it, and every write commits with `git add -A`.
+fn local_dir_problem(v: &Vault) -> Option<Problem> {
+    let text = std::fs::read_to_string(v.root.join(".gitignore")).unwrap_or_default();
+    if text.lines().any(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".local") {
+        return None;
+    }
+    Some(Problem {
+        path: ".gitignore".into(),
+        id: None,
+        severity: "error",
+        message: "`.local/` is not ignored, it holds machine state like the serve token and the next write would commit it, add the line `.local/` to .gitignore".into(),
+    })
 }
 
 /// A global note's scope words that match no registered project, which hide it from every project.

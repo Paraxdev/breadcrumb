@@ -243,7 +243,7 @@ fn handoff_section(h: &Note, commits: &str, stale_days: u64, max: usize) -> Stri
 fn shown_others<'a>(others: &[&'a Note], days: u64) -> Vec<&'a Note> {
     // A huge hand-edited value would overflow the date math.
     let cutoff = crate::util::now() - chrono::Duration::days(days.min(36_500) as i64);
-    others.iter().copied().filter(|n| n.pinned || n.created >= cutoff).collect()
+    others.iter().copied().filter(|n| n.pinned || n.updated >= cutoff).collect()
 }
 
 /// One line each, with the commits since it was written and why it does not lead.

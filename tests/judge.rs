@@ -361,3 +361,21 @@ fn a_judgment_reply_says_when_its_slug_was_repaired() {
     let (ok, out, err) = crumb_in(&v, d.path(), &["add", "-k", "judgment", "-t", "list cut the title", "--slug", "Cut Title!", "--field", "verdict=hindered"]);
     assert!(ok && out.contains("slug fixed to cut-title"), "{out}{err}");
 }
+
+#[test]
+fn the_verdict_field_of_the_judgment_kind_cannot_be_redefined_and_the_rest_can() {
+    let (_d, v) = common::vault();
+    let mut k = breadcrumb::kind::seed_kinds().into_iter().find(|k| k.name == "judgment").unwrap();
+    let f = k.fields.iter_mut().find(|f| f.name == "verdict").unwrap();
+    f.values = vec!["good".into(), "bad".into()];
+    f.default = None;
+    let e = breadcrumb::ops::define_kind(&v, k, false, &[]).unwrap_err().to_string();
+    assert!(e.starts_with("the verdict field of judgment is built in (hindered, confusing, missing, helped") && e.contains("other fields are free to change"), "{e}");
+
+    let mut more = breadcrumb::kind::KindDef::new("judgment", "Verdicts on the tool");
+    more.fields.push(breadcrumb::kind::parse_field_spec("area:string").unwrap());
+    let (k, _) = breadcrumb::ops::define_kind(&v, more, false, &["verdict".to_string()]).unwrap();
+    assert!(k.field("area").is_some(), "another field is added");
+    assert!(k.field("verdict").is_some_and(|f| f.values.iter().any(|x| x == "unrated")), "and the reply shows the verdict field that holds, removing it does nothing");
+    assert!(std::fs::read_to_string(v.root.join("kinds/judgment.toml")).unwrap().contains("unrated"), "the file says the same");
+}

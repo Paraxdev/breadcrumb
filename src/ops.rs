@@ -61,6 +61,9 @@ pub(crate) fn check_slug(slug: &str) -> Result<String> {
         Ok(s)
     } else {
         let suggestion = slugify(&s, 60);
+        if RESERVED_SLUGS.contains(&suggestion.as_str()) {
+            bail!("invalid project slug '{slug}', use lowercase [a-z0-9-], and '{suggestion}' names a scope, so pick another word");
+        }
         bail!("invalid project slug '{slug}', use lowercase [a-z0-9-] (for example '{suggestion}')")
     }
 }
@@ -716,6 +719,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         {
             bail!("{} is in review and {why}", note.id);
         }
+        if let Some(why) = crate::backlog::user_steps_hold(v, &before, &note, req.by_user) {
+            bail!("{why}");
+        }
         crate::backlog::record_state_change(&mut note, &from, &new_state, req.by.as_deref());
     }
     let mut was = before;
@@ -1283,6 +1289,13 @@ pub fn define_kind(v: &Vault, def: KindDef, replace: bool, remove_fields: &[Stri
         _ => def,
     };
     k.fields.retain(|f| !remove_fields.contains(&f.name));
+    if k.name == crate::judge::JUDGMENT {
+        let given = k.field("verdict").map(|f| serde_json::to_value(f).ok());
+        k = crate::judge::current_kind(k);
+        if given.is_some_and(|g| g != k.field("verdict").map(|f| serde_json::to_value(f).ok()).unwrap_or_default()) {
+            bail!("the verdict field of judgment is built in ({}), `breadcrumb judge` and the digest count by it, the kind's other fields are free to change", crate::judge::VERDICTS.join(", "));
+        }
+    }
     let p = v.write_kind(&k)?;
     v.commit(&[p], &format!("breadcrumb: {} kind {}", if created { "define" } else { "update" }, k.name))?;
     Ok((k, created))

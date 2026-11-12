@@ -181,3 +181,15 @@ fn doctor_reports_settings_overrides_that_do_not_hold_and_a_scope_slug() {
     let all = at("projects/all/project.toml");
     assert!(all.len() == 1 && all[0].contains("project slug 'all' names a scope, so -p all never reaches its notes"), "{all:?}");
 }
+
+#[test]
+fn doctor_reports_a_gitignore_that_lets_the_local_directory_through() {
+    let (_d, v) = common::vault();
+    let found = |v: &Vault| breadcrumb::doctor::check_with(v, None).into_iter().filter(|p| p.path == ".gitignore").map(|p| format!("{}: {}", p.severity, p.message)).collect::<Vec<_>>();
+    assert!(found(&v).is_empty(), "a fresh vault ignores it");
+    std::fs::write(v.root.join(".gitignore"), "*.lock\n*.tmp\n").unwrap();
+    let ps = found(&v);
+    assert!(ps.len() == 1 && ps[0].starts_with("error: `.local/` is not ignored, it holds machine state like the serve token"), "{ps:?}");
+    std::fs::write(v.root.join(".gitignore"), "*.lock\n/.local\n").unwrap();
+    assert!(found(&v).is_empty(), "any spelling of the directory counts");
+}

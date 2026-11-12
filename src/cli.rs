@@ -2048,7 +2048,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 Some(ConfigCmd::Get { key }) => {
                     let list = crate::config::settings(&v, p)?;
                     let it = list.iter().find(|s| s.key == key.trim()).ok_or_else(|| anyhow::anyhow!("unknown setting '{key}', `breadcrumb config` lists them"))?;
-                    out.emit(format!("{}\n", it.value), json!({"key": it.key, "value": it.value, "source": it.source}));
+                    out.emit(format!("{}\n", if it.value.is_empty() { "unset" } else { &it.value }), json!({"key": it.key, "value": it.value, "source": it.source}));
                 }
                 Some(ConfigCmd::Set { key, value }) => {
                     let (before, after) = match p {

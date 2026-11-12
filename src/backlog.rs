@@ -1027,6 +1027,29 @@ pub fn review_hold(v: &Vault, n: &Note, by_user: bool) -> Option<String> {
     })
 }
 
+/// Why a session's edit of the acceptance list does not hold where agents review: it ticks a `user:` step, or drops
+/// or rewords one that is open on an item in review.
+pub fn user_steps_hold(v: &Vault, before: &Note, after: &Note, by_user: bool) -> Option<String> {
+    if by_user || !is_item(after) || !crate::config::agent_review(v, after.project.as_deref()) {
+        return None;
+    }
+    let steps = |n: &Note, met: bool| -> Vec<String> {
+        match n.field("acceptance") {
+            Some(Value::Sequence(s)) => s.iter().filter_map(yaml_scalar_string).filter(|c| is_user_step(c) && is_met(c) == met).map(|c| criterion_text(&c).to_string()).collect(),
+            _ => vec![],
+        }
+    };
+    let had = steps(before, true);
+    if let Some(t) = steps(after, true).into_iter().find(|t| !had.contains(t)) {
+        return Some(format!("step '{t}' of {} is the user's, only the user ticks it (review_by = agent), on the Review page of `breadcrumb serve` or with `breadcrumb check` in a terminal of their own", after.id));
+    }
+    if state(before) != "review" {
+        return None;
+    }
+    let open = steps(after, false);
+    steps(before, false).into_iter().find(|t| !open.contains(t)).map(|t| format!("{} is in review and its step '{t}' waits for the user (review_by = agent), a session cannot drop or reword it, `breadcrumb review fail {} --reason \"...\"` sends the item back to change its steps", after.id, after.id))
+}
+
 fn criterion_text(c: &str) -> &str {
     let t = c.trim();
     ["[x]", "[X]", "[ ]"].iter().find_map(|p| t.strip_prefix(p)).unwrap_or(t).trim()

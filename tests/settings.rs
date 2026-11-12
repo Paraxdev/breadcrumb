@@ -239,6 +239,7 @@ fn mcp_project_config_lists_reads_sets_and_drops() {
 fn age(v: &Vault, id: &str, days: i64) {
     let mut n = v.get(id).unwrap();
     n.created = breadcrumb::util::now() - chrono::Duration::days(days);
+    n.updated = n.created;
     v.write_note(&mut n).unwrap();
 }
 
@@ -477,4 +478,13 @@ fn a_digest_value_in_breadcrumb_toml_that_does_not_hold_is_listed_as_ignored_and
     std::fs::write(v.root.join("projects/app/settings.toml"), "digest_sections = [\"pins\", \"recent\"]\n").unwrap();
     let (_, out, _) = crumb_in(&v, d.path(), &["config", "--project", "app"], "");
     assert!(out.contains(" ignored, digest_sections takes text, section names separated by commas"), "{out}");
+}
+
+#[test]
+fn config_get_of_a_setting_without_a_value_prints_unset() {
+    let (d, v, _) = setup();
+    let (_, out, _) = crumb_in(&v, d.path(), &["config", "get", "digest_recent"], "");
+    assert_eq!(out, "unset\n");
+    let (_, out, _) = crumb_in(&v, d.path(), &["--json", "config", "get", "digest_recent"], "");
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["value"], "", "JSON keeps the empty value");
 }

@@ -441,3 +441,14 @@ fn main() {
     assert!(out.status.success() && d.contains("Latest handoff") && !d.contains("since"), "{d}");
     assert!(took < std::time::Duration::from_secs(30), "the grandchild kept stdout open for {took:?}");
 }
+
+#[test]
+fn the_handoff_window_counts_from_the_last_write() {
+    let e = setup(&[]);
+    let old = aged_handoff(&e.v, "Long running", "Still going.", 30 * 24, 3);
+    aged_handoff(&e.v, "Forgotten", "Old.", 30 * 24, 9 * 24);
+    aged_handoff(&e.v, "Current state", "Where we are.", 1, 1);
+    let d = digest(&e);
+    assert_eq!(others_block(&d), vec![format!("{} 3h: Long running", old.handle())], "{d}");
+    assert!(!d.contains("Forgotten"), "{d}");
+}

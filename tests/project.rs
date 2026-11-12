@@ -234,3 +234,12 @@ fn project_add_binds_like_link_and_the_move_reply_says_what_moved() {
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(j["moved"], serde_json::json!([{"from": "second", "path": false, "remotes": ["github.com/me/app"]}]), "{j}");
 }
+
+#[test]
+fn a_bad_slug_is_never_answered_with_a_scope_word_as_the_example() {
+    let (_d, v) = common::vault();
+    let e = ops::project_add(&v, "Global", None, None, &[]).unwrap_err().to_string();
+    assert!(e.contains("'global' names a scope, so pick another word") && !e.contains("for example"), "{e}");
+    let e = ops::project_add(&v, "My App", None, None, &[]).unwrap_err().to_string();
+    assert!(e.contains("(for example 'my-app')"), "{e}");
+}

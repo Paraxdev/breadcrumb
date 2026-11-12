@@ -42,6 +42,7 @@ fn tick() {
 fn age(v: &Vault, id: &str, days: i64) {
     let mut n = v.get(id).unwrap();
     n.created = breadcrumb::util::now() - chrono::Duration::days(days);
+    n.updated = n.created;
     v.write_note(&mut n).unwrap();
 }
 
