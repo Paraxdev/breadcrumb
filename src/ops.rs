@@ -706,6 +706,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         }
     }
     k.validate(&mut note.extra)?;
+    if let Some(why) = crate::backlog::user_steps_hold(v, &before, &note, req.by_user) {
+        bail!("{why}");
+    }
     if crate::backlog::is_item(&note) {
         let new_state = crate::backlog::state(&note);
         let from = old_state.unwrap_or_else(|| new_state.clone());
@@ -713,13 +716,10 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         if new_state == "rejected" && from != "rejected" && !has_resolution {
             bail!("moving to rejected requires a resolution explaining why, set the resolution field too");
         }
-        if from == "review"
+        if from != new_state
             && (new_state == "done" || new_state == "shipped")
-            && let Some(why) = crate::backlog::review_hold(v, &before, req.by_user)
+            && let Some(why) = crate::backlog::close_hold(v, &before, req.by_user)
         {
-            bail!("{} is in review and {why}", note.id);
-        }
-        if let Some(why) = crate::backlog::user_steps_hold(v, &before, &note, req.by_user) {
             bail!("{why}");
         }
         crate::backlog::record_state_change(&mut note, &from, &new_state, req.by.as_deref());
@@ -1293,7 +1293,7 @@ pub fn define_kind(v: &Vault, def: KindDef, replace: bool, remove_fields: &[Stri
         let given = k.field("verdict").map(|f| serde_json::to_value(f).ok());
         k = crate::judge::current_kind(k);
         if given.is_some_and(|g| g != k.field("verdict").map(|f| serde_json::to_value(f).ok()).unwrap_or_default()) {
-            bail!("the verdict field of judgment is built in ({}), `breadcrumb judge` and the digest count by it, the kind's other fields are free to change", crate::judge::VERDICTS.join(", "));
+            bail!("the verdict field of judgment is built in ({}), `breadcrumb judge` and the digest count by it, the kind's other fields are free to change", k.field("verdict").map(|f| f.values.join(", ")).unwrap_or_default());
         }
     }
     let p = v.write_kind(&k)?;

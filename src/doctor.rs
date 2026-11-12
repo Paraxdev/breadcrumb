@@ -324,6 +324,10 @@ fn local_dir_problem(v: &Vault) -> Option<Problem> {
     if text.lines().any(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".local") {
         return None;
     }
+    // Other spellings such as `.local/*` ignore it too, git knows them all.
+    if crate::git::available() && crate::git::run(&v.root, &["check-ignore", "-q", ".local/probe"]).is_ok_and(|o| o.status.success()) {
+        return None;
+    }
     Some(Problem {
         path: ".gitignore".into(),
         id: None,

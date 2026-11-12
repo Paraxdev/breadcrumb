@@ -370,7 +370,7 @@ fn the_verdict_field_of_the_judgment_kind_cannot_be_redefined_and_the_rest_can()
     f.values = vec!["good".into(), "bad".into()];
     f.default = None;
     let e = breadcrumb::ops::define_kind(&v, k, false, &[]).unwrap_err().to_string();
-    assert!(e.starts_with("the verdict field of judgment is built in (hindered, confusing, missing, helped") && e.contains("other fields are free to change"), "{e}");
+    assert!(e.starts_with("the verdict field of judgment is built in (hindered, confusing, missing, helped, unrated)") && e.contains("other fields are free to change"), "{e}");
 
     let mut more = breadcrumb::kind::KindDef::new("judgment", "Verdicts on the tool");
     more.fields.push(breadcrumb::kind::parse_field_spec("area:string").unwrap());

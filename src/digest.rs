@@ -335,6 +335,35 @@ fn assemble(head: String, blocks: Vec<(Option<&'static str>, String)>, order: &[
     order.iter().fold(head + &top, |out, n| out + &texts.remove(n).unwrap_or_default() + &tails.remove(n).unwrap_or_default())
 }
 
+/// What a digest still over its budget gives up last of all, whole lines from the end of each block in this order, so
+/// the header and the lines that ask the agent to act stay.
+const GIVE_UP: [&str; 10] = ["recent", "todos", "landing", "machine", "prefs", "handoffs", "workflows", "pins", "backlog", "handoff"];
+
+fn trim_to_budget(head: &str, mut blocks: Vec<(Option<&'static str>, String)>, order: &[&str], budget: usize) -> String {
+    let text = assemble(head.to_string(), blocks.clone(), order);
+    if chars(&text) <= budget {
+        return text;
+    }
+    let note = format!("[cut to fit digest_budget = {budget}, lines are missing, `breadcrumb config set digest_budget <chars>` gives the digest more room]\n");
+    let room = budget.saturating_sub(chars(&note));
+    for name in GIVE_UP {
+        let Some(i) = blocks.iter().position(|(n, _)| *n == Some(name)) else { continue };
+        loop {
+            let text = assemble(head.to_string(), blocks.clone(), order);
+            if chars(&text) <= room {
+                return text + &note;
+            }
+            let b = &mut blocks[i].1;
+            if b.is_empty() {
+                break;
+            }
+            let body = b.trim_end_matches('\n');
+            *b = body.rfind('\n').map(|at| body[..=at].to_string()).unwrap_or_default();
+        }
+    }
+    assemble(head.to_string(), blocks, order) + &note
+}
+
 /// Compact digest agents read at session start.
 pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String> {
     context_with(v, project, ContextOpts { recent: limit, ..Default::default() })
@@ -528,5 +557,5 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         (None, review),
         (Some("recent"), recent),
     ];
-    Ok(assemble(head, blocks, &order) + &kinds)
+    Ok(trim_to_budget(&head, blocks, &order, budget) + &kinds)
 }

@@ -81,7 +81,7 @@ pub fn report(v: &Vault, project: &str, commits: &[Commit], by_user: bool) -> Re
         hit.extend(found);
         if matches!(backlog::state(n).as_str(), "shipped" | "rejected") {
             r.closed.push(n.clone());
-        } else if let Some(why) = backlog::ship_blocker(n, &idx).or_else(|| backlog::review_hold(v, n, by_user)) {
+        } else if let Some(why) = backlog::ship_blocker(n, &idx).or_else(|| backlog::review_hold(v, n, by_user)).or_else(|| backlog::user_hold(v, n, by_user)) {
             r.not_landed.push((n.clone(), why));
         } else {
             r.open.push(n.clone());

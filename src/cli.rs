@@ -1270,7 +1270,18 @@ impl Out {
 
 pub fn main_entry() -> i32 {
     crate::upgrade::cleanup_old_exes();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => {
+            if e.kind() == clap::error::ErrorKind::UnknownArgument
+                && let Some(m) = mistyped_flag()
+            {
+                eprintln!("error: {m}");
+                return 2;
+            }
+            e.exit()
+        }
+    };
     if let Cmd::Hook(h) = &cli.cmd {
         run_hook(cli.vault.as_deref(), h);
         return 0;
@@ -2154,6 +2165,21 @@ fn not_a_flag(text: &str, usage: &str) -> Result<()> {
         bail!("unknown flag {flag}, text that starts with -- goes last, after a lone --: `breadcrumb {usage} -- \"{flag} ...\"`");
     }
     Ok(())
+}
+
+/// add and idea take a title with a leading hyphen, so clap reads a mistyped flag before it as the title and blames
+/// the next word. This names the flag instead.
+fn mistyped_flag() -> Option<String> {
+    use clap::CommandFactory;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--") {
+        return None;
+    }
+    let root = Cli::command();
+    let sub = args.iter().find_map(|a| ["add", "idea"].contains(&a.as_str()).then(|| root.find_subcommand(a)).flatten())?;
+    let known: Vec<&str> = root.get_arguments().chain(sub.get_arguments()).flat_map(|a| a.get_long().into_iter().chain(a.get_all_aliases().unwrap_or_default())).chain(["help"]).collect();
+    let flag = args.iter().map(|a| a.split('=').next().unwrap_or_default()).find(|a| a.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()) && !r.contains(char::is_whitespace) && !known.contains(&r)))?;
+    Some(format!("unknown flag {flag}, `breadcrumb {} --help` lists the flags, and text that starts with -- goes last, after a lone --", sub.get_name()))
 }
 
 fn track_project(v: &Vault, id: &str, project: Option<&str>, cwd: &Path) -> Result<Option<String>> {

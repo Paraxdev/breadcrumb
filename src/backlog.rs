@@ -1027,10 +1027,24 @@ pub fn review_hold(v: &Vault, n: &Note, by_user: bool) -> Option<String> {
     })
 }
 
+/// Why a session cannot close an item outside review where agents review: its open `user:` steps are the user's.
+pub fn user_hold(v: &Vault, n: &Note, by_user: bool) -> Option<String> {
+    if by_user || matches!(state(n).as_str(), "review" | "done" | "shipped") || !crate::config::agent_review(v, n.project.as_deref()) {
+        return None;
+    }
+    let open: Vec<String> = open_user_steps(n).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
+    (!open.is_empty()).then(|| format!("has steps only the user ticks ({}), so a session cannot close it (review_by = agent), `breadcrumb move {} review --by <name>` sends it to review, where the user passes them", open.join("; "), n.id))
+}
+
+/// The refusal for a session's move to done or shipped, from `review_hold` or `user_hold`.
+pub fn close_hold(v: &Vault, n: &Note, by_user: bool) -> Option<String> {
+    review_hold(v, n, by_user).map(|why| format!("{} is in review and {why}", n.id)).or_else(|| user_hold(v, n, by_user).map(|why| format!("{} {why}", n.id)))
+}
+
 /// Why a session's edit of the acceptance list does not hold where agents review: it ticks a `user:` step, or drops
-/// or rewords one that is open on an item in review.
+/// or rewords one that is open on an item in review. The tick is refused on any kind, a kind change is no way around.
 pub fn user_steps_hold(v: &Vault, before: &Note, after: &Note, by_user: bool) -> Option<String> {
-    if by_user || !is_item(after) || !crate::config::agent_review(v, after.project.as_deref()) {
+    if by_user || !crate::config::agent_review(v, after.project.as_deref()) {
         return None;
     }
     let steps = |n: &Note, met: bool| -> Vec<String> {
@@ -1043,11 +1057,11 @@ pub fn user_steps_hold(v: &Vault, before: &Note, after: &Note, by_user: bool) ->
     if let Some(t) = steps(after, true).into_iter().find(|t| !had.contains(t)) {
         return Some(format!("step '{t}' of {} is the user's, only the user ticks it (review_by = agent), on the Review page of `breadcrumb serve` or with `breadcrumb check` in a terminal of their own", after.id));
     }
-    if state(before) != "review" {
+    if !is_item(before) || state(before) != "review" {
         return None;
     }
     let open = steps(after, false);
-    steps(before, false).into_iter().find(|t| !open.contains(t)).map(|t| format!("{} is in review and its step '{t}' waits for the user (review_by = agent), a session cannot drop or reword it, `breadcrumb review fail {} --reason \"...\"` sends the item back to change its steps", after.id, after.id))
+    steps(before, false).into_iter().find(|t| !open.contains(t)).map(|t| format!("{} is in review and its step '{t}' waits for the user (review_by = agent), a session cannot drop or reword it, `breadcrumb move {} queued` takes the item out of review to change its steps", after.id, after.id))
 }
 
 fn criterion_text(c: &str) -> &str {
@@ -1084,15 +1098,16 @@ fn add_steps(n: &mut Note, steps: &[String]) -> usize {
     changed
 }
 
-/// A re-review's steps replace the open ones, ticked ones stay. Returns (open steps dropped, steps added or reopened).
-fn replace_open_steps(n: &mut Note, steps: &[String]) -> (usize, usize) {
+/// A re-review's steps replace the open ones, ticked ones stay, and with `keep_user` (a session where agents review)
+/// so do the open `user:` steps. Returns (open steps dropped, steps added or reopened).
+fn replace_open_steps(n: &mut Note, steps: &[String], keep_user: bool) -> (usize, usize) {
     let wanted: Vec<String> = steps.iter().map(|s| criterion_text(&crate::util::one_line(s)).to_ascii_lowercase()).collect();
     let mut dropped = 0;
     if let Some(Value::Sequence(items)) = n.field("acceptance").cloned() {
         let kept: Vec<Value> = items
             .into_iter()
             .filter(|v| match yaml_scalar_string(v) {
-                Some(c) if !is_met(&c) && !wanted.contains(&criterion_text(&c).to_ascii_lowercase()) => {
+                Some(c) if !is_met(&c) && !(keep_user && is_user_step(&c)) && !wanted.contains(&criterion_text(&c).to_ascii_lowercase()) => {
                     dropped += 1;
                     false
                 }
@@ -1318,9 +1333,9 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     }
     if req.verdict.is_none()
         && (to == "done" || to == "shipped")
-        && let Some(why) = review_hold(v, &n, req.by_user)
+        && let Some(why) = close_hold(v, &n, req.by_user)
     {
-        bail!("{} is in review and {why}", n.id);
+        bail!("{why}");
     }
     let evidence = req.evidence.as_deref().map(str::trim).filter(|e| !e.is_empty()).map(crate::util::normalize_newlines);
     let agent_mode = crate::config::agent_review(v, n.project.as_deref());
@@ -1350,7 +1365,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
         None => 0,
     };
     let kept_for_user = if keep_user && waiting_for_user.is_empty() && req.check == Some(Check::All) { open_user_steps(&n) } else { vec![] };
-    let (replaced, added) = if from == "review" && to == "review" && !req.steps.is_empty() { replace_open_steps(&mut n, &req.steps) } else { (0, add_steps(&mut n, &req.steps)) };
+    let (replaced, added) = if from == "review" && to == "review" && !req.steps.is_empty() { replace_open_steps(&mut n, &req.steps, keep_user) } else { (0, add_steps(&mut n, &req.steps)) };
     let mut ref_edits = req.refs.clone();
     if let Some(sha) = shipped_in.as_deref().filter(|s| (to == "done" || to == "shipped") && is_sha(s)) {
         ref_edits.push(format!("commit:{sha}"));
@@ -1478,7 +1493,7 @@ pub fn ship_items(v: &Vault, ids: &[String], shipped_in: Option<&str>, by: Optio
     for id in ids {
         let mut n = get_item(v, id)?;
         let from = state(&n);
-        if ship_blocker(&n, &idx).is_some() || review_hold(v, &n, by_user).is_some() {
+        if ship_blocker(&n, &idx).is_some() || close_hold(v, &n, by_user).is_some() {
             continue;
         }
         n.set_field("state", Value::String("shipped".into()));

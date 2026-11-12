@@ -331,7 +331,7 @@ fn a_session_update_cannot_tick_drop_or_reword_the_users_steps_where_agents_revi
     assert!(e.contains("step 'USER: install it on the laptop' of") && e.contains("only the user ticks it (review_by = agent)"), "{e}");
     for steps in [&["[ ] Run it", "[ ] Check the log"][..], &["[ ] Run it", "[ ] user: skip the laptop", "[ ] Check the log"][..]] {
         let e = set(steps, false).unwrap_err().to_string();
-        assert!(e.contains("is in review and its step 'USER: install it on the laptop' waits for the user") && e.contains("review fail"), "{e}");
+        assert!(e.contains("is in review and its step 'USER: install it on the laptop' waits for the user") && e.contains(&format!("`breadcrumb move {} queued` takes the item out of review", a.id)), "{e}");
     }
     assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()).len(), 3, "refusals change nothing");
 
@@ -346,4 +346,50 @@ fn a_session_update_cannot_tick_drop_or_reword_the_users_steps_where_agents_revi
     update(&v, &b.id, UpdateReq { fields: vec![("acceptance".into(), FieldInput::Value(list(&["[ ] user: try it twice"])))], ..Default::default() }).unwrap();
     let e = update(&v, &b.id, UpdateReq { fields: vec![("acceptance".into(), FieldInput::Value(list(&["[x] user: try it twice"])))], ..Default::default() }).unwrap_err().to_string();
     assert!(e.contains("only the user ticks it"), "before review a session rewords but never ticks: {e}");
+}
+
+#[test]
+fn a_session_keeps_the_users_open_steps_in_a_re_review_and_cannot_close_past_them_from_any_state() {
+    use breadcrumb::ops::{FieldInput, UpdateReq, update};
+    let (_d, mut v) = common::vault();
+    agents(&mut v);
+    let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
+    user_steps(&v, &a.id);
+    let (ok, out, err) = crumb_in_session(&v, &["move", &a.id, "review", "--by", "builder", "--step", "Run it again", "--step", "Check the log"]);
+    assert!(ok && out.contains("replaced 1 open step with the ones given"), "{out}{err}");
+    let n = v.get(&a.id).unwrap();
+    let mut open = backlog::review_steps(&n);
+    open.sort();
+    assert_eq!(open, vec!["Check the log", "Run it again", "USER: install it on the laptop"], "the user's step stays");
+    backlog::move_item(&v, &a.id, MoveReq { state: "review".into(), steps: vec!["Only this".into()], by: Some("builder".into()), ..Default::default() }).unwrap();
+    assert_eq!(backlog::open_user_steps(&v.get(&a.id).unwrap()).len(), 1, "the MCP move keeps it too");
+
+    let (ok, _, err) = crumb_in_session(&v, &["move", &a.id, "queued"]);
+    assert!(ok, "{err}");
+    let holds = format!("{} has steps only the user ticks (", a.id);
+    let to_review = format!("`breadcrumb move {} review --by <name>` sends it to review, where the user passes them", a.id);
+    for args in [&["move", &a.id, "done"][..], &["move", &a.id, "shipped"][..], &["update", &a.id, "--field", "state=done"][..], &["update", &a.id, "--field", "state=shipped"][..]] {
+        let (ok, _, err) = crumb_in_session(&v, args);
+        assert!(!ok && err.contains(&holds) && err.contains("USER: install it on the laptop") && err.contains(&to_review), "{args:?}: {err}");
+    }
+    let (ok, _, err) = crumb_in_session(&v, &["update", &a.id, "--field", "state=in-progress"]);
+    assert!(ok, "{err}");
+    let e = backlog::move_item(&v, &a.id, MoveReq { state: "done".into(), ..Default::default() }).unwrap_err().to_string();
+    assert!(e.starts_with(&holds), "from in-progress as well: {e}");
+    assert_eq!(backlog::state(&v.get(&a.id).unwrap()), "in-progress");
+
+    let list = |steps: &[&str]| FieldInput::Value(serde_yaml::Value::Sequence(steps.iter().map(|s| serde_yaml::Value::String(s.to_string())).collect()));
+    let (ok, _, err) = crumb_in_session(&v, &["update", &a.id, "--kind", "note", "--unset", "state"]);
+    assert!(ok, "{err}");
+    let e = update(&v, &a.id, UpdateReq { fields: vec![("acceptance".into(), list(&["[x] USER: install it on the laptop"]))], ..Default::default() }).unwrap_err().to_string();
+    assert!(e.contains("only the user ticks it"), "a kind change is no way to tick it: {e}");
+
+    let b = common::add(&v, "Theirs", "feature", Some("app"), &[]);
+    user_steps(&v, &b.id);
+    backlog::move_item(&v, &b.id, MoveReq { state: "review".into(), steps: vec!["Only this".into()], by: Some("builder".into()), by_user: true, ..Default::default() }).unwrap();
+    assert!(backlog::open_user_steps(&v.get(&b.id).unwrap()).is_empty(), "the user's own re-review replaces every open step");
+    let c = common::add(&v, "Plain", "feature", Some("app"), &[("state", "queued")]);
+    update(&v, &c.id, UpdateReq { fields: vec![("acceptance".into(), list(&["[ ] user: try it"]))], ..Default::default() }).unwrap();
+    let (ok, _, err) = crumb(&v, &["move", &c.id, "done"]);
+    assert!(ok, "the user's terminal closes it: {err}");
 }

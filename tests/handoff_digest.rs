@@ -392,7 +392,8 @@ fn a_project_in_a_subdirectory_counts_only_commits_under_it() {
 }
 
 /// A git.exe that answers every call from the real git but `log`, where it starts a grandchild and sleeps, like a
-/// launcher style git that hangs. Windows only, that is where a grandchild keeps the hook's stdout open.
+/// launcher style git that hangs, or with FAKE_MODE=exit leaves at once and lets the grandchild live on with the
+/// handles it got. Windows only, that is where a grandchild keeps the hook's stdout open.
 #[cfg(windows)]
 #[test]
 fn a_slow_git_and_what_it_started_are_ended_so_the_digest_returns() {
@@ -414,8 +415,11 @@ fn main() {
         let s = Command::new(std::env::var("REAL_GIT").unwrap()).args(&args).status().unwrap();
         std::process::exit(s.code().unwrap_or(1));
     }
-    Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    std::thread::sleep(std::time::Duration::from_secs(60));
+    let leave = std::env::var("FAKE_MODE").is_ok_and(|m| m == "exit");
+    Command::new("ping").args(["-n", if leave { "20" } else { "60" }, "127.0.0.1"]).current_dir(std::env::temp_dir()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    if !leave {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
 }
 "#,
     )
@@ -425,21 +429,24 @@ fn main() {
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let mut paths = vec![fake.clone()];
     paths.extend(std::env::split_paths(&path));
-    let start = std::time::Instant::now();
-    let out = Command::new(env!("CARGO_BIN_EXE_crumb"))
-        .args(["context", "-p", "app"])
-        .current_dir(&e.work)
-        .env("BREADCRUMB_HOME", &e.v.root)
-        .env("BREADCRUMB_CLAUDE_DIR", &e.claude)
-        .env("REAL_GIT", &real)
-        .env("PATH", std::env::join_paths(paths).unwrap())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    let took = start.elapsed();
-    let d = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success() && d.contains("Latest handoff") && !d.contains("since"), "{d}");
-    assert!(took < std::time::Duration::from_secs(30), "the grandchild kept stdout open for {took:?}");
+    for (mode, limit) in [("hang", 30), ("exit", 10)] {
+        let start = std::time::Instant::now();
+        let out = Command::new(env!("CARGO_BIN_EXE_crumb"))
+            .args(["context", "-p", "app"])
+            .current_dir(&e.work)
+            .env("BREADCRUMB_HOME", &e.v.root)
+            .env("BREADCRUMB_CLAUDE_DIR", &e.claude)
+            .env("REAL_GIT", &real)
+            .env("FAKE_MODE", mode)
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let took = start.elapsed();
+        let d = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && d.contains("Latest handoff") && !d.contains("since"), "{mode}: {d}");
+        assert!(took < std::time::Duration::from_secs(limit), "{mode}: the grandchild kept stdout open for {took:?}");
+    }
 }
 
 #[test]

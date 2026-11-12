@@ -202,9 +202,30 @@ fn kill_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Windows hands a child every inheritable handle, our stdout and stderr among them, and a process that outlives git
+/// would keep the hook's reader waiting on them. std passes a child fresh copies for the stdio it asks for, so this
+/// only stops the handing on to processes that never asked.
+#[cfg(windows)]
+fn keep_own_output() {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    for h in [std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle()] {
+        if !h.is_null() {
+            unsafe {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 /// Like `run` but killed after `limit`, with what it started, None on any failure, for callers that must never wait on git.
 fn run_within(dir: &Path, args: &[&str], limit: std::time::Duration) -> Option<Vec<u8>> {
     use std::io::Read;
+    #[cfg(windows)]
+    keep_own_output();
     let mut cmd = Command::new("git");
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
@@ -221,14 +242,16 @@ fn run_within(dir: &Path, args: &[&str], limit: std::time::Duration) -> Option<V
         .ok()?;
     let mut out = child.stdout.take()?;
     // Read on a thread, a full pipe would block git and turn every call into a timeout.
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = vec![];
-        out.read_to_end(&mut buf).ok().map(|_| buf)
+        let _ = tx.send(out.read_to_end(&mut buf).ok().map(|_| buf));
     });
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return reader.join().ok().flatten().filter(|_| status.success()),
+            // A process git left behind can hold the pipe open after git is gone, so the output gets the time left, not forever.
+            Ok(Some(status)) => return rx.recv_timeout(limit.saturating_sub(start.elapsed()).max(std::time::Duration::from_millis(100))).ok().flatten().filter(|_| status.success()),
             Ok(None) if start.elapsed() < limit => std::thread::sleep(std::time::Duration::from_millis(5)),
             _ => {
                 kill_tree(&mut child);

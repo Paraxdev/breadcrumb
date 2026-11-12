@@ -192,4 +192,8 @@ fn doctor_reports_a_gitignore_that_lets_the_local_directory_through() {
     assert!(ps.len() == 1 && ps[0].starts_with("error: `.local/` is not ignored, it holds machine state like the serve token"), "{ps:?}");
     std::fs::write(v.root.join(".gitignore"), "*.lock\n/.local\n").unwrap();
     assert!(found(&v).is_empty(), "any spelling of the directory counts");
+    for spelling in [".local/*", ".local/**", "**/.local"] {
+        std::fs::write(v.root.join(".gitignore"), format!("*.lock\n{spelling}\n")).unwrap();
+        assert!(found(&v).is_empty(), "{spelling}: git is asked about the rest");
+    }
 }

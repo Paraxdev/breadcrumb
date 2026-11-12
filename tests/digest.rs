@@ -312,3 +312,31 @@ fn a_digest_over_budget_cuts_todo_and_board_rows_first_and_keeps_the_lines_that_
     let wide = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(20000), ..Default::default() }).unwrap();
     assert!(!wide.contains("more, breadcrumb list -k todo") && !wide.contains("more, breadcrumb backlog") && wide.contains("Todo 59"), "{wide}");
 }
+
+#[test]
+fn a_digest_filled_by_pins_and_handoffs_still_fits_and_keeps_the_lines_that_ask_to_act() {
+    let (_d, mut v) = common::vault();
+    breadcrumb::config::set(&mut v, "review_by", "agent").unwrap();
+    for i in 0..12 {
+        let n = common::add(&v, &format!("Decision {i:02} that every session has to know about, written out at its full length here"), "decision", Some("app"), &[]);
+        pin(&v, &n.id);
+    }
+    for t in 1..=4 {
+        common::add(&v, &format!("State of track {t}, a handoff title that goes on for quite a while longer"), "handoff", Some("app"), &[("track", &format!("t{t}"))]);
+    }
+    for i in 0..20 {
+        common::add(&v, &format!("Todo {i:02} with a title of some length"), "todo", Some("app"), &[]);
+    }
+    let built = common::add(&v, "Thing to check", "feature", Some("app"), &[]);
+    breadcrumb::backlog::move_item(&v, &built.id, breadcrumb::backlog::MoveReq { state: "review".into(), steps: vec!["Run it".into()], by: Some("builder".into()), ..Default::default() }).unwrap();
+
+    for budget in [700, 1000, 1500] {
+        let d = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(budget), ..Default::default() }).unwrap();
+        assert!(d.chars().count() <= budget, "{budget}: {} chars\n{d}", d.chars().count());
+        assert_eq!(breadcrumb::hooks::cap(d.trim_end(), budget), d.trim_end(), "the hook has nothing to cut");
+        assert!(d.contains("Review: 1 waiting for an agent check") && d.starts_with("breadcrumb context: app"), "{budget}: {d}");
+        assert!(budget == 1500 || d.ends_with(&format!("[cut to fit digest_budget = {budget}, lines are missing, `breadcrumb config set digest_budget <chars>` gives the digest more room]\n")), "{budget}: {d}");
+    }
+    let wide = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(20000), ..Default::default() }).unwrap();
+    assert!(!wide.contains("[cut to fit") && wide.contains("Decision 11") && wide.contains("Todo 19"), "{wide}");
+}

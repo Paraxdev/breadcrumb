@@ -238,3 +238,17 @@ fn mcp_help_says_what_it_speaks_and_tools_lists_every_tool_from_its_schema() {
     let j: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(j["tools"].as_array().unwrap().len(), breadcrumb::mcp::tool_defs().len());
 }
+
+#[test]
+fn a_mistyped_flag_before_the_title_of_add_or_idea_is_named() {
+    let (_d, v) = common::vault();
+    for (args, flag, sub) in [(&["add", "--kinds", "gotcha", "title x"][..], "--kinds", "add"), (&["add", "--globl", "title y"][..], "--globl", "add"), (&["idea", "--bdy=x", "an idea", "--global"][..], "--bdy", "idea"), (&["add", "title z", "--pinn"][..], "--pinn", "add")] {
+        let (ok, _, err) = crumb(&v, args);
+        assert!(!ok && err.contains(&format!("error: unknown flag {flag}, `breadcrumb {sub} --help` lists the flags, and text that starts with -- goes last, after a lone --")), "{args:?}: {err}");
+    }
+    assert!(v.load_notes().is_empty(), "nothing was saved");
+    let (ok, _, err) = crumb(&v, &["add", "title", "more words"]);
+    assert!(!ok && err.contains("unexpected argument 'more words'"), "clap's own message stays for the rest: {err}");
+    let (ok, _, err) = crumb(&v, &["add", "-k", "gotcha", "--global", "--", "--kinds of trouble"]);
+    assert!(ok, "{err}");
+}
