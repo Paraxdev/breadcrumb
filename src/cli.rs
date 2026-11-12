@@ -2034,8 +2034,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                     out.emit(backlog::review_text(&items, &sc.label(), review_by == "agent"), json!({"scope": sc.label(), "review_by": review_by, "items": items}));
                     return Ok(0);
                 }
-                Some(ReviewCmd::Pass { id, by, evidence, .. }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by, evidence, by_user: false })?,
-                Some(ReviewCmd::Fail { id, reason, by, evidence, .. }) => backlog::review_fail(&v, &id, &reason, backlog::ReviewBy { by, evidence, by_user: false })?,
+                Some(ReviewCmd::Pass { id, by, evidence, .. }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by_user: backlog::typed_by_user(by.as_deref()), by, evidence })?,
+                Some(ReviewCmd::Fail { id, reason, by, evidence, .. }) => backlog::review_fail(&v, &id, &reason, backlog::ReviewBy { by_user: backlog::typed_by_user(by.as_deref()), by, evidence })?,
             };
             out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "waiting_for_user": waiting_json(&r), "note": r.note.to_json()}));
         }

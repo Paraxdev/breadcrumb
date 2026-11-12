@@ -174,6 +174,30 @@ fn an_agent_pass_ticks_its_steps_and_leaves_user_steps_for_the_user() {
 }
 
 #[test]
+fn a_session_cannot_review_as_the_user() {
+    let (_d, mut v) = common::vault();
+    agents(&mut v);
+    let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
+    user_steps(&v, &a.id);
+    let refused = "only the user reviews as user";
+    for (key, val) in [("CLAUDE_CODE_SESSION_ID", "aaaaaaaa-0000-4000-8000-000000000001"), ("BREADCRUMB_SESSION", "night-shift")] {
+        for args in [vec!["review", "pass", &a.id, "--by", "user"], vec!["review", "pass", &a.id, "--by", "USER", "--evidence", "looked fine"], vec!["review", "fail", &a.id, "--reason", "nope", "--by", "user"]] {
+            let o = Command::new(env!("CARGO_BIN_EXE_crumb")).args(&args).env("BREADCRUMB_HOME", &v.root).env_remove("CLAUDE_CODE_SESSION_ID").env_remove("BREADCRUMB_SESSION").env(key, val).output().unwrap();
+            assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains(refused), "{key} {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        }
+    }
+    let err = backlog::move_item(&v, &a.id, MoveReq { state: "done".into(), verdict: Some(backlog::Verdict::Pass), by: Some(" User ".into()), evidence: Some("fine".into()), ..Default::default() }).unwrap_err().to_string();
+    assert!(err.starts_with(refused), "the MCP move carries no user either: {err}");
+    assert_eq!(backlog::state(&v.get(&a.id).unwrap()), "review");
+
+    let b = common::add(&v, "Other", "feature", Some("app"), &[]);
+    built_by(&v, &b.id, "builder");
+    let (ok, _, err) = crumb(&v, &["review", "pass", &b.id, "--by", "user"]);
+    assert!(ok, "a terminal with no session is the user's: {err}");
+    assert_eq!(backlog::state(&v.get(&b.id).unwrap()), "done");
+}
+
+#[test]
 fn user_steps_are_plain_steps_for_a_user_review_and_the_web_pass_finishes_them() {
     let (_d, mut v) = common::vault();
     let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
