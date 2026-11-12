@@ -331,6 +331,12 @@ impl Vault {
                     return Ok(k);
                 }
                 let names: Vec<String> = self.load_kinds().into_iter().map(|k| k.name).collect();
+                if let Ok(state) = crate::backlog::check_state(name) {
+                    bail!(
+                        "'{name}' is a state, not a kind: give a kind like task, bug, feature or epic and --field state={state} (MCP fields state), `breadcrumb move <id> {state}` for an existing item. Kinds: {}",
+                        names.join(", ")
+                    );
+                }
                 let suggested = kind::suggest_kind_name(name);
                 if suggested != name && names.contains(&suggested) {
                     bail!("unknown kind '{name}', did you mean '{suggested}'? Kind names are lowercase");

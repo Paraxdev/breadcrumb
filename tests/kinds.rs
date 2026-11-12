@@ -51,6 +51,17 @@ fn unknown_kind_tells_agent_how_to_define_it() {
 }
 
 #[test]
+fn a_state_given_as_kind_is_named_a_state_with_the_kinds_and_the_state_field() {
+    let (_d, v) = common::vault();
+    for (kind, state) in [("backlog", "backlog"), ("Queued", "queued"), ("wip", "in-progress"), ("review", "review")] {
+        let err = try_add(&v, kind, &[]).unwrap_err().to_string();
+        assert!(err.starts_with(&format!("'{kind}' is a state, not a kind")) && err.contains(&format!("--field state={state}")) && err.contains("Kinds: bug,") && !err.contains("kind define"), "{err}");
+    }
+    assert!(try_add(&v, "task", &[("state", "queued")]).is_ok());
+    assert!(try_add(&v, "idea", &[]).is_ok(), "idea is a kind and a state, the kind wins");
+}
+
+#[test]
 fn define_kind_required_fields_and_redefinition() {
     let (_d, v) = common::vault();
     let mut k = KindDef::new("meeting", "Meeting notes");
