@@ -208,3 +208,29 @@ fn unknown_project_and_config_keys_survive_a_write() {
     let after = std::fs::read_to_string(&c).unwrap();
     assert!(after.contains("newer_setting = 3") && after.contains("stale_days = 40"), "{after}");
 }
+
+#[test]
+fn project_add_binds_like_link_and_the_move_reply_says_what_moved() {
+    let (d, v) = common::vault();
+    let repo = d.path().join("app");
+    let clone = d.path().join("app-copy");
+    for r in [&repo, &clone] {
+        std::fs::create_dir_all(r).unwrap();
+        common::git(r, &["init", "-q"]);
+        common::git(r, &["remote", "add", "origin", "git@github.com:me/app.git"]);
+    }
+    let (first, _) = ops::project_add(&v, "first", None, None, &[repo.to_str().unwrap().to_string()]).unwrap();
+    assert_eq!(first.remotes, vec!["github.com/me/app"], "add records the remote like link");
+    let e = ops::project_add(&v, "second", None, None, &[clone.to_str().unwrap().to_string()]).unwrap_err().to_string();
+    assert!(e.contains("is a clone of github.com/me/app, which project first already holds") && e.contains("project link second --path") && e.contains("--move"), "{e}");
+    assert!(v.load_project("second").unwrap().is_none(), "a refusal creates nothing");
+    assert!(ops::project_link(&v, "second", &clone, None).is_err(), "a later link of another clone is refused too");
+
+    let out = crumb(&v, &["project", "link", "second", "--path", clone.to_str().unwrap(), "--move"]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success() && text.contains("\n  moved remote github.com/me/app from project first, every clone of that repo now detects as second") && !text.contains("moved the path"), "{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(v.detect_project(&repo).as_deref(), Some("second"), "the reply is true, the remote decides");
+    let out = crumb(&v, &["--json", "project", "link", "first", "--path", repo.to_str().unwrap(), "--move"]);
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(j["moved"], serde_json::json!([{"from": "second", "path": false, "remotes": ["github.com/me/app"]}]), "{j}");
+}

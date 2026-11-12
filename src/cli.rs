@@ -2195,13 +2195,18 @@ fn project_cmd(out: &Out, v: &Vault, pc: ProjectCmd, cwd: &Path) -> Result<()> {
             for rm in &r.added_remotes {
                 text.push_str(&format!("\n  added remote {rm}"));
             }
-            for from in &r.moved_from {
-                text.push_str(&format!("\n  moved the path from project {from}"));
+            for m in &r.moved {
+                if m.path {
+                    text.push_str(&format!("\n  moved the path from project {}", m.from));
+                }
+                for rm in &m.remotes {
+                    text.push_str(&format!("\n  moved remote {rm} from project {}, every clone of that repo now detects as {}", m.from, r.project.slug));
+                }
             }
             if r.added_path.is_none() && r.added_remotes.is_empty() && r.moved_from.is_empty() {
                 text.push_str("\n  (path and remotes were already linked)");
             }
-            out.emit(text, json!({"project": format::project_json(&r.project), "created": r.created, "added_path": r.added_path, "added_remotes": r.added_remotes, "moved_from": r.moved_from}));
+            out.emit(text, json!({"project": format::project_json(&r.project), "created": r.created, "added_path": r.added_path, "added_remotes": r.added_remotes, "moved_from": r.moved_from, "moved": r.moved}));
         }
     }
     Ok(())

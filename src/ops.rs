@@ -134,18 +134,6 @@ pub(crate) fn ensure_project(v: &Vault, slug: &str) -> Result<Option<PathBuf>> {
     Ok(Some(v.write_project(&Project::new(slug, None))?))
 }
 
-/// Refuses `path` when another project holds it exactly, naming the holder and the way to take it over.
-fn path_holder(v: &Vault, slug: &str, path: &str) -> Result<()> {
-    let n = crate::project::normalize_path(path);
-    let mut names: Vec<String> = v.load_projects().into_iter().filter(|q| q.slug != slug && q.paths.iter().any(|x| crate::project::normalize_path(x) == n)).map(|q| q.slug).collect();
-    if names.is_empty() {
-        return Ok(());
-    }
-    names.sort();
-    let quoted = if path.contains(' ') { format!("\"{path}\"") } else { path.to_string() };
-    bail!("{path} is already a path of project {}, `breadcrumb project link {slug} --path {quoted} --move` takes it over", names.join(", "))
-}
-
 #[derive(Clone, Debug)]
 pub enum FieldInput {
     /// Text from the command line, parsed per the declared field type.
@@ -1113,6 +1101,7 @@ pub fn prefs_line(prefs: &[&Note], global: usize) -> String {
 
 pub fn project_add(v: &Vault, slug: &str, name: Option<&str>, description: Option<&str>, paths: &[String]) -> Result<(Project, bool)> {
     let slug = check_new_slug(slug)?;
+    let dirs: Vec<Dir> = paths.iter().map(|p| probe(Path::new(p))).collect();
     let _g = v.lock()?;
     let (mut p, created) = match v.load_project(&slug)? {
         Some(p) => (p, false),
@@ -1124,10 +1113,8 @@ pub fn project_add(v: &Vault, slug: &str, name: Option<&str>, description: Optio
     if let Some(d) = description {
         p.description = d.to_string();
     }
-    for path in paths {
-        let ps = path_str(&crate::util::absolutize(Path::new(path)));
-        path_holder(v, &slug, &ps)?;
-        p.add_path(&ps);
+    for d in dirs {
+        bind(v, &mut p, d, false)?;
     }
     let f = v.write_project(&p)?;
     v.commit(&[f], &format!("breadcrumb: project {} {}", if created { "add" } else { "update" }, slug))?;
@@ -1142,39 +1129,51 @@ pub struct LinkReport {
     pub added_remotes: Vec<String>,
     /// Projects the directory was taken from by a move.
     pub moved_from: Vec<String>,
+    pub moved: Vec<Moved>,
 }
 
-/// Binds a directory (and its git remotes) to a project, creating the project if needed.
-/// A directory another project holds is refused.
-pub fn project_link(v: &Vault, slug: &str, path: &Path, description: Option<&str>) -> Result<LinkReport> {
-    project_link_with(v, slug, path, description, false)
+/// What a move took from one project: the path, remotes, or both.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Moved {
+    pub from: String,
+    pub path: bool,
+    pub remotes: Vec<String>,
 }
 
-/// With `take`, the directory leaves the projects that hold it and goes to this one in the same commit.
-/// Only the exact directory counts, a project bound to a parent or child keeps it, detection picks the longest path.
-pub fn project_link_with(v: &Vault, slug: &str, path: &Path, description: Option<&str>, take: bool) -> Result<LinkReport> {
-    let slug = check_new_slug(slug)?;
+struct Dir {
+    ps: String,
+    canonical: Option<String>,
+    remotes: Vec<String>,
+}
+
+struct Bound {
+    added_path: Option<String>,
+    added_remotes: Vec<String>,
+    moved: Vec<Moved>,
+    files: Vec<PathBuf>,
+}
+
+fn probe(path: &Path) -> Dir {
     // Detection compares against the cwd as the shell reports it, so store that form. The canonical form
     // (junction or symlink target, UNC share behind a mapped drive) is recorded too when it differs.
     let abs = crate::util::absolutize(path);
     let canonical = std::fs::canonicalize(&abs).ok().map(|p| path_str(&p));
     let remotes = if crate::git::toplevel(&abs).is_some() { crate::git::remote_urls(&abs) } else { vec![] };
-    let _g = v.lock()?;
-    let (mut p, created) = match v.load_project(&slug)? {
-        Some(p) => (p, false),
-        None => (Project::new(&slug, None), true),
-    };
-    if let Some(d) = description {
-        p.description = d.to_string();
-    }
-    let ps = path_str(&abs);
+    Dir { ps: path_str(&abs), canonical, remotes }
+}
+
+/// Adds the directory and its remotes to `p`, the caller holds the lock and writes `p`. Without `take` a path or
+/// remote another project holds is refused, with it the other projects are rewritten here.
+fn bind(v: &Vault, p: &mut Project, d: Dir, take: bool) -> Result<Bound> {
+    let Dir { ps, canonical, remotes } = d;
+    let slug = p.slug.clone();
     let dirs: Vec<String> = std::iter::once(crate::project::normalize_path(&ps)).chain(canonical.iter().map(|c| crate::project::normalize_path(c))).collect();
     let holds = |q: &Project| q.paths.iter().any(|x| dirs.contains(&crate::project::normalize_path(x)));
     let repos: Vec<String> = remotes.iter().map(|r| crate::project::normalize_remote(r).to_ascii_lowercase()).filter(|r| !r.is_empty()).collect();
     let has_repo = |x: &String| repos.contains(&crate::project::normalize_remote(x).to_ascii_lowercase());
     let mut others: Vec<Project> = v.load_projects().into_iter().filter(|q| q.slug != slug && (holds(q) || q.remotes.iter().any(has_repo))).collect();
     others.sort_by(|a, b| a.slug.cmp(&b.slug));
-    let mine = holds(&p);
+    let mine = holds(p);
     let quoted = if ps.contains(' ') { format!("\"{ps}\"") } else { ps.clone() };
     let path_others: Vec<&str> = others.iter().filter(|q| holds(q)).map(|q| q.slug.as_str()).collect();
     if !take && !mine && !path_others.is_empty() {
@@ -1184,14 +1183,15 @@ pub fn project_link_with(v: &Vault, slug: &str, path: &Path, description: Option
         let r = q.remotes.iter().find(|x| has_repo(x)).cloned().unwrap_or_default();
         bail!("{ps} is a clone of {r}, which project {} already holds as its remote, `breadcrumb project link {slug} --path {quoted} --move` takes the repo over", q.slug);
     }
-    let mut moved: Vec<PathBuf> = vec![];
-    let mut moved_from = vec![];
+    let mut files: Vec<PathBuf> = vec![];
+    let mut moved = vec![];
     if take {
         for o in &mut others {
+            let lost = Moved { from: o.slug.clone(), path: holds(o), remotes: o.remotes.iter().filter(|x| has_repo(x)).map(|x| crate::project::normalize_remote(x)).collect() };
             o.paths.retain(|x| !dirs.contains(&crate::project::normalize_path(x)));
             o.remotes.retain(|x| !has_repo(x));
-            moved.push(v.write_project(o)?);
-            moved_from.push(o.slug.clone());
+            files.push(v.write_project(o)?);
+            moved.push(lost);
         }
     }
     let added_path = if p.add_path(&ps) { Some(ps) } else { None };
@@ -1204,9 +1204,33 @@ pub fn project_link_with(v: &Vault, slug: &str, path: &Path, description: Option
             added_remotes.push(crate::project::normalize_remote(&r));
         }
     }
-    moved.push(v.write_project(&p)?);
-    v.commit(&moved, &format!("breadcrumb: project link {slug}"))?;
-    Ok(LinkReport { project: p, created, added_path, added_remotes, moved_from })
+    Ok(Bound { added_path, added_remotes, moved, files })
+}
+
+/// Binds a directory (and its git remotes) to a project, creating the project if needed.
+/// A directory another project holds is refused.
+pub fn project_link(v: &Vault, slug: &str, path: &Path, description: Option<&str>) -> Result<LinkReport> {
+    project_link_with(v, slug, path, description, false)
+}
+
+/// With `take`, the directory leaves the projects that hold it and goes to this one in the same commit.
+/// Only the exact directory counts, a project bound to a parent or child keeps it, detection picks the longest path.
+pub fn project_link_with(v: &Vault, slug: &str, path: &Path, description: Option<&str>, take: bool) -> Result<LinkReport> {
+    let slug = check_new_slug(slug)?;
+    let dir = probe(path);
+    let _g = v.lock()?;
+    let (mut p, created) = match v.load_project(&slug)? {
+        Some(p) => (p, false),
+        None => (Project::new(&slug, None), true),
+    };
+    if let Some(d) = description {
+        p.description = d.to_string();
+    }
+    let Bound { added_path, added_remotes, moved, mut files } = bind(v, &mut p, dir, take)?;
+    files.push(v.write_project(&p)?);
+    v.commit(&files, &format!("breadcrumb: project link {slug}"))?;
+    let moved_from = moved.iter().map(|m| m.from.clone()).collect();
+    Ok(LinkReport { project: p, created, added_path, added_remotes, moved_from, moved })
 }
 
 /// Creates or updates a kind. With `replace` false, fields merge by name into the existing definition.
