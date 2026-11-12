@@ -391,8 +391,14 @@ pub fn handoff_report(v: &Vault, h: &Note, mcp: bool) -> String {
         let retire = if mcp { format!("update {{\"id\": \"{}\", \"supersedes\": [\"{}\"]}}", h.id, n.id) } else { format!("breadcrumb update {} --supersedes {}", h.id, n.id) };
         let _ = write!(s, "\n  {}{mark}\n    {retire}", handoff_line(n));
     }
-    if others.len() > REPORT_MAX {
-        let _ = write!(s, "\n  +{} more", others.len() - REPORT_MAX);
+    let rest: Vec<&Note> = others.iter().skip(REPORT_MAX).map(|n| **n).collect();
+    if !rest.is_empty() {
+        let retire = if mcp {
+            format!("update {{\"id\": \"{}\", \"supersedes\": [{}]}}", h.id, rest.iter().map(|n| format!("\"{}\"", n.id)).collect::<Vec<_>>().join(", "))
+        } else {
+            format!("breadcrumb update {}{}", h.id, rest.iter().map(|n| format!(" --supersedes {}", n.id)).collect::<String>())
+        };
+        let _ = write!(s, "\n  +{} more: {}\n    {retire}", rest.len(), rest.iter().map(|n| n.handle()).collect::<Vec<_>>().join(", "));
     }
     s
 }

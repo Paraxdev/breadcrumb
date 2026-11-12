@@ -630,6 +630,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         if to == note.id {
             bail!("a note cannot supersede itself");
         }
+        if v.get(&to).is_ok_and(|t| t.links.iter().any(|l| l.to == note.id && l.rel == SUPERSEDES)) {
+            bail!("{to} already supersedes {}, a note cannot supersede the one that replaced it", note.id);
+        }
         if !note.links.iter().any(|l| l.to == to && l.rel == SUPERSEDES) {
             note.links.push(Link { to, rel: SUPERSEDES.into() });
         }

@@ -220,6 +220,26 @@ fn add_lists_the_others_with_their_marks_and_update_supersedes_retires_one_after
 }
 
 #[test]
+fn add_names_every_live_handoff_past_the_listed_ones_in_one_retire_command_and_a_mutual_supersede_is_refused() {
+    let (_d, v) = common::vault();
+    let mut ids = vec![];
+    for t in ["one", "two", "three", "four", "five"] {
+        ids.push(handoff(&v, A, &format!("State {t}"), &["--track", t]).0);
+        tick();
+    }
+    let (new, out) = handoff(&v, A, "State six", &["--track", "six"]);
+    let (h1, h2) = (v.get(&ids[0]).unwrap().handle(), v.get(&ids[1]).unwrap().handle());
+    assert!(out.trim_end().ends_with(&format!("\n  +2 more: {h2}, {h1}\n    breadcrumb update {new} --supersedes {} --supersedes {}", ids[1], ids[0])), "{out}");
+    for id in &ids[2..] {
+        assert!(out.contains(&format!("\n    breadcrumb update {new} --supersedes {id}\n")), "{out}");
+    }
+
+    crumb(&v, A, &["update", &new, "--supersedes", &ids[1], "--supersedes", &ids[0]]);
+    let err = breadcrumb::ops::update(&v, &ids[0], breadcrumb::ops::UpdateReq { supersedes: vec![new.clone()], ..Default::default() }).unwrap_err().to_string();
+    assert_eq!(err, format!("{new} already supersedes {}, a note cannot supersede the one that replaced it", ids[0]));
+}
+
+#[test]
 fn the_mcp_add_names_the_retire_call_and_update_takes_supersedes() {
     let (d, v) = common::vault();
     let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
