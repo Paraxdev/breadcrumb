@@ -985,18 +985,22 @@ pub fn is_pref(n: &Note) -> bool {
     n.kind == "feedback" || n.kind == "user"
 }
 
-pub fn prefs_line(prefs: &[&Note]) -> String {
+/// `global` counts unpinned global prefs a project digest leaves out, named only as `+N global` at the end.
+pub fn prefs_line(prefs: &[&Note], global: usize) -> String {
     let mut s = "Prefs (unpinned):".to_string();
+    let tail = if global > 0 { format!(", +{global} global") } else { String::new() };
+    let room = PREFS_LINE_MAX - 12 - tail.chars().count();
     for (i, n) in prefs.iter().enumerate() {
         let item = format!(" {} {};", n.id, crate::util::truncate_chars(&crate::util::one_line(&n.title), PREF_TITLE_MAX));
         let more = prefs.len() - i;
-        if s.chars().count() + item.chars().count() > PREFS_LINE_MAX - 12 && more > 1 {
+        if s.chars().count() + item.chars().count() > room && more > 1 {
             s.push_str(&format!(" +{more} more"));
-            return s;
+            break;
         }
         s.push_str(&item);
     }
-    s.trim_end_matches(';').to_string()
+    let s = s.trim_end_matches(';');
+    if prefs.is_empty() { format!("{s}{}", tail.trim_start_matches(',')) } else { format!("{s}{tail}") }
 }
 
 pub fn project_add(v: &Vault, slug: &str, name: Option<&str>, description: Option<&str>, paths: &[String]) -> Result<(Project, bool)> {

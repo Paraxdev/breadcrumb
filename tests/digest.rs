@@ -142,3 +142,64 @@ fn the_digest_fits_its_budget_with_every_pin_and_a_cut_handoff() {
     let small = ops::context_with(&v, Some("app"), ContextOpts { budget: 2000, ..Default::default() }).unwrap();
     assert!(small.contains("more pinned: ") && small.contains(&h.id), "{small}");
 }
+
+#[test]
+fn a_project_digest_counts_unscoped_globals_and_a_scope_brings_a_global_note_in() {
+    let (d, v) = common::vault();
+    let global = |title: &str, kind: &str, pinned: bool, fields: &[(&str, &str)]| {
+        ops::add(&v, AddReq { title: title.into(), kind: Some(kind.into()), pinned, fields: fields.iter().map(|(k, x)| (k.to_string(), FieldInput::Raw(x.to_string()))).collect(), ..Default::default() }).unwrap()
+    };
+    let homelab = global("Homelab proxmox layout", "note", false, &[]);
+    let pack = global("Biohazard pack VRAM crashes", "note", false, &[]);
+    let cooking = global("Cookidoo dedupe recipes", "feedback", false, &[]);
+    let rule = global("No AI attribution in commits", "feedback", true, &[]);
+    let forge = global("Forge mappings need a rerun after an update", "gotcha", false, &[("scope", "create-*")]);
+    let mod_pref = global("Mods ship with a changelog", "feedback", false, &[("scope", "web, create-laser")]);
+    let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let mut a = serde_json::Map::new();
+    for (k, x) in [("title", serde_json::json!("Deploy with the staging key")), ("kind", "decision".into()), ("project", "global".into()), ("pinned", true.into()), ("fields", serde_json::json!({"scope": ["web", "api-*"]}))] {
+        a.insert(k.into(), x);
+    }
+    srv.call_tool("add", &a).unwrap();
+    let web_rule = v.load_notes().into_iter().find(|n| n.title == "Deploy with the staging key").unwrap();
+    assert_eq!(breadcrumb::recall::scope_of(&web_rule), vec!["web", "api-*"]);
+    for i in 0..3 {
+        common::add(&v, &format!("Fact {i}"), "note", Some("create-laser"), &[]);
+    }
+
+    let ctx = ops::context(&v, Some("create-laser"), 15).unwrap();
+    for gone in [&homelab, &pack, &cooking, &web_rule] {
+        assert!(!ctx.contains(&gone.id), "{} must not show: {ctx}", gone.title);
+    }
+    assert!(ctx.contains(&format!("{} feedback (inferred) No AI attribution in commits (global)\n", rule.id)), "{ctx}");
+    assert!(ctx.contains(&format!("Prefs (unpinned): {} Mods ship with a changelog, +1 global\n", mod_pref.id)), "{ctx}");
+    assert!(ctx.contains(&format!("{} gotcha Forge mappings need a rerun after an update (global)\n", forge.id)), "{ctx}");
+    assert!(ctx.ends_with("Global: 2 more notes, breadcrumb list -p global\n"), "{ctx}");
+    assert!(ctx.contains("Recent:\n"), "own notes and the scoped one all fit, so no count: {ctx}");
+
+    let small = ops::context(&v, Some("create-laser"), 3).unwrap();
+    assert!(small.contains("Recent (2 of 4):\n"), "of counts the project's own notes and scoped ones: {small}");
+
+    let other = ops::context(&v, Some("app"), 15).unwrap();
+    assert!(!other.contains(&forge.id) && !other.contains(&mod_pref.id) && other.contains("Prefs (unpinned): +1 global\n"), "{other}");
+    assert!(ops::context(&v, Some("web"), 15).unwrap().contains(&format!("{} decision Deploy with the staging key (global)", web_rule.id)));
+
+    let home = ops::context(&v, None, 15).unwrap();
+    for shown in [&homelab, &pack, &cooking, &rule, &forge, &mod_pref, &web_rule] {
+        assert!(home.contains(&shown.id), "{} shows in the global digest: {home}", shown.title);
+    }
+    assert!(!home.contains("Global:") && !home.contains("global\n"), "{home}");
+
+    ops::update(&v, &forge.id, UpdateReq { unset: vec!["scope".into()], ..Default::default() }).unwrap();
+    assert!(ops::context(&v, Some("create-laser"), 15).unwrap().contains("Global: 3 more notes"));
+}
+
+#[test]
+fn scope_matches_slugs_and_globs() {
+    use breadcrumb::recall::scope_matches;
+    let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert!(scope_matches(&s(&[]), "app"));
+    assert!(scope_matches(&s(&["create-*"]), "create-laser") && scope_matches(&s(&["create-*"]), "Create-Laser"));
+    assert!(!scope_matches(&s(&["create-*"]), "app") && !scope_matches(&s(&["web"]), "webapp"));
+    assert!(scope_matches(&s(&["web", "*-mod"]), "neo-mod"));
+}

@@ -260,7 +260,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     };
     let all = v.load_notes();
     let lapsed = Lapsed::of(&all);
-    let mut notes: Vec<Note> = filter_notes(all.clone(), &scope, &Filter::default())?.into_iter().filter(|n| !lapsed.hides(n)).collect();
+    let mut notes: Vec<Note> = filter_notes(all.clone(), &scope, &Filter::default())?.into_iter().filter(|n| !lapsed.hides(n) && !crate::recall::scope_hides(n, project)).collect();
     sort_notes(&mut notes, SortKey::Updated);
     if notes.is_empty() {
         writeln!(head, "No notes yet.")?;
@@ -270,8 +270,10 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     notes.retain(|n| n.kind != ENV);
     let days = v.config.stale_days;
     let pins = pins_section(&notes, project, days, opts.budget / 2);
-    let prefs: Vec<&Note> = notes.iter().filter(|n| !n.pinned && is_pref(n)).collect();
-    let mut prefs_text = if prefs.is_empty() { String::new() } else { format!("{}\n", prefs_line(&prefs)) };
+    // An unpinned global note without a scope is about no project in particular, a project digest only counts it.
+    let foreign = |n: &Note| project.is_some() && n.project.is_none() && !n.pinned && crate::recall::scope_of(n).is_empty();
+    let (prefs, global_prefs): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| !n.pinned && is_pref(n)).partition(|n| !foreign(n));
+    let mut prefs_text = if prefs.is_empty() && global_prefs.is_empty() { String::new() } else { format!("{}\n", prefs_line(&prefs, global_prefs.len())) };
     if env > 0 {
         writeln!(prefs_text, "Machine facts: {env} for {machine}, `breadcrumb env` or list kind env")?;
     }
@@ -300,10 +302,15 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         writeln!(prefs_text, "{l}")?;
     }
 
-    let rest: Vec<&Note> = notes
+    let (rest, global_rest): (Vec<&Note>, Vec<&Note>) = notes
         .iter()
         .filter(|n| !n.pinned && !is_pref(n) && !is_open_todo(n) && !crate::backlog::in_digest(n) && n.kind != HANDOFF)
-        .collect();
+        .partition(|n| !foreign(n));
+    let global_more = match global_rest.len() {
+        0 => String::new(),
+        1 => "Global: 1 more note, breadcrumb list -p global\n".to_string(),
+        k => format!("Global: {k} more notes, breadcrumb list -p global\n"),
+    };
     // Prefs used to sit in Recent, so they still count against it and the digest does not grow.
     let want = opts.recent.saturating_sub(prefs.len().min(opts.recent / 2));
     let recent_rows: Vec<String> = rest.iter().take(want).map(|n| format!("{}{}\n", row(n, project, false), crate::recall::stale_mark(n, days))).collect();
@@ -316,7 +323,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     }
     let lead_settled = live.first().is_some_and(|h| lifecycle::settled(h, &all).is_some());
     let others = other_handoffs(if lead_settled { &live[..] } else { live.get(1..).unwrap_or_default() }, &all);
-    let fixed = chars(&head) + chars(&pins) + chars(&others) + chars(&prefs_text) + chars(&todos) + chars(&backlog);
+    let fixed = chars(&head) + chars(&pins) + chars(&others) + chars(&prefs_text) + chars(&todos) + chars(&backlog) + chars(&global_more);
     let mut left = opts.budget.saturating_sub(fixed);
     let handoff = match live.first().filter(|_| !lead_settled) {
         Some(h) => {
@@ -326,27 +333,22 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         None => String::new(),
     };
     left = left.saturating_sub(chars(&handoff));
-    let mut recent = String::new();
+    let mut rows = String::new();
     let mut shown = 0;
     for r in &recent_rows {
-        if chars(&recent) + chars(r) + 24 > left {
+        if chars(&rows) + chars(r) + 24 > left {
             break;
         }
-        recent.push_str(r);
+        rows.push_str(r);
         shown += 1;
     }
-    let mut out = format!("{head}{pins}{handoff}{others}{prefs_text}{todos}{backlog}");
-    if shown > 0 {
-        if rest.len() > shown {
-            writeln!(out, "Recent ({shown} of {}):", rest.len())?;
-        } else {
-            writeln!(out, "Recent:")?;
-        }
-        out.push_str(&recent);
-    }
-    if opts.kinds {
-        writeln!(out, "Kinds:")?;
-        out.push_str(&crate::format::kinds_compact(&v.load_kinds()));
-    }
-    Ok(out)
+    let mut recent = match shown {
+        0 => String::new(),
+        _ if rest.len() > shown => format!("Recent ({shown} of {}):\n{rows}", rest.len()),
+        _ => format!("Recent:\n{rows}"),
+    };
+    recent.push_str(&global_more);
+    let kinds = if opts.kinds { format!("Kinds:\n{}", crate::format::kinds_compact(&v.load_kinds())) } else { String::new() };
+    let sections = [("pins", pins), ("handoff", handoff), ("handoffs", others), ("prefs", prefs_text), ("todos", todos), ("backlog", backlog), ("recent", recent), ("kinds", kinds)];
+    Ok(sections.into_iter().fold(head, |out, (_, s)| out + &s))
 }

@@ -680,7 +680,7 @@ pub fn tool_defs() -> Vec<Value> {
     let scope = || json!({"project": {"type": "string", "description": "slug, global or all"}});
     let target = || json!({"project": {"type": "string", "description": "slug or global"}});
     let filters = || json!({"kind": st(), "tags": arr(), "limit": int()});
-    let fields = || json!({"type": "object", "description": "summary: pin's digest line, expires: date, 3d or until:id, said: user's quote"});
+    let fields = || json!({"type": "object", "description": "summary: pin's digest line, expires: date, 3d or until:id, said: user's quote, scope: projects"});
     let links = || json!({"type": "array", "items": {"type": ["string", "object"]}, "description": "ids or {to, rel}"});
     let id = || json!({"id": st()});
     let refs = || json!({"type": "array", "items": {"type": "string"}, "description": "type:value, -ref drops"});
