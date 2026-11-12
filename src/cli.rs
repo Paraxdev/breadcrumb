@@ -545,25 +545,50 @@ pub enum Cmd {
         #[arg(long)]
         by: Option<String>,
     },
-    /// Judge breadcrumb itself: one line on what got in your way, confused you, was missing or helped, filed in judge_project
+    /// Judge breadcrumb itself: one line on what got in your way, confused you, was missing or stood out as helpful, filed in judge_project
     Judge {
-        /// What happened, in a sentence or two
-        text: Option<String>,
-        /// hindered, confusing, missing or helped
-        #[arg(long, short = 'v', default_value = "hindered")]
-        verdict: String,
+        /// What happened, in a sentence or two. With --file, --to or --dismiss, the judgment ids
+        #[arg(value_name = "TEXT_OR_IDS")]
+        text: Vec<String>,
+        /// hindered, confusing, missing or helped, required. A helped with the about of an earlier helped one counts on that note
+        #[arg(long, short = 'v')]
+        verdict: Option<String>,
         /// The command, tool or part of breadcrumb it is about, like search or the digest
         #[arg(long, short = 'a')]
         about: Option<String>,
-        /// List the judgments left to triage instead, grouped by what they are about
+        /// List the judgments left to triage instead, grouped by what they are about, helped ones as counts
         #[arg(long)]
         list: bool,
-        /// With --list, the triaged ones too
+        /// List the helped judgments with their counts
+        #[arg(long)]
+        helped: bool,
+        /// With --list, the triaged and archived ones too
         #[arg(long)]
         all: bool,
         /// With --list, only those filed since a date, an RFC3339 time, or 3d, 2h ago
         #[arg(long)]
         since: Option<String>,
+        /// Make one backlog item in the judge project from the named judgments and link each filed-as to it
+        #[arg(long, conflicts_with_all = ["to", "dismiss"])]
+        file: bool,
+        /// With --file, the item's kind: bug (default), idea, feature or task
+        #[arg(long = "as", value_name = "KIND", requires = "file")]
+        as_kind: Option<String>,
+        /// With --file, the item's title (default: the first judgment's)
+        #[arg(long, requires = "file")]
+        title: Option<String>,
+        /// With --file, the item's priority, p0 to p3
+        #[arg(long, requires = "file")]
+        priority: Option<String>,
+        /// Link the named judgments filed-as this existing item and name each on it
+        #[arg(long, value_name = "ITEM", conflicts_with = "dismiss")]
+        to: Option<String>,
+        /// Archive the named judgments with the reason from --why
+        #[arg(long, requires = "why")]
+        dismiss: bool,
+        /// Why the judgments are dismissed, appended to each
+        #[arg(long)]
+        why: Option<String>,
     },
     /// What waits for a check, and the verdict: pass moves to done, fail back to queued (review_by says who checks)
     Review {
@@ -1305,24 +1330,32 @@ pub fn run(cli: Cli) -> Result<i32> {
                 None => false,
             };
             let links = a.supersedes.into_iter().map(|to| crate::note::Link { to, rel: ops::SUPERSEDES.into() }).collect();
-            let (n, slug_note) = ops::add_noted(
-                &v,
-                AddReq {
-                    title: a.title,
-                    kind: a.kind,
-                    project,
-                    tags: a.tags,
-                    fields: ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires), a.said, a.said_on),
-                    pinned: a.pin,
-                    body: read_body_arg(a.body, a.body_file)?,
-                    source: a.source,
-                    links,
-                    paths: a.paths,
-                    slug: a.slug,
-                    track: a.track,
-                    require_existing_project: false,
-                },
-            )?;
+            let judgment = a.kind.as_deref().is_some_and(|k| k.trim() == crate::judge::JUDGMENT);
+            let req = AddReq {
+                title: a.title,
+                kind: a.kind,
+                project,
+                tags: a.tags,
+                fields: ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires), a.said, a.said_on),
+                pinned: a.pin,
+                body: read_body_arg(a.body, a.body_file)?,
+                source: a.source,
+                links,
+                paths: a.paths,
+                slug: a.slug,
+                track: a.track,
+                require_existing_project: false,
+            };
+            let (n, slug_note) = if judgment {
+                let j = crate::judge::add(&v, req)?;
+                if j.counted {
+                    out.emit(j.text(), j.note.to_json());
+                    return Ok(0);
+                }
+                (j.note, None)
+            } else {
+                ops::add_noted(&v, req)?
+            };
             let mut created = if new_project { format!("\n(created new project {})", n.scope_label()) } else { String::new() };
             if let Some(m) = slug_note {
                 created.push_str(&format!("\n{m}"));
@@ -1341,6 +1374,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
             if n.kind == ops::HANDOFF {
                 created.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n)));
+            }
+            if let Some(h) = crate::judge::unrated_hint(&n, false) {
+                created.push_str(&format!("\n{h}"));
             }
             let name = n.slug().map(|s| format!("  [{s}]")).unwrap_or_default();
             let landed = ops::landed(&n).map(|l| format!("  {l}")).unwrap_or_default();
@@ -1823,17 +1859,43 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
             out.emit(text, data);
         }
-        Cmd::Judge { text, verdict, about, list, all, since } => {
+        Cmd::Judge { text, verdict, about, list, helped, all, since, file, as_kind, title, priority, to, dismiss, why } => {
             let v = open()?;
-            if list || text.is_none() {
-                let since = since.as_deref().map(ops::parse_since).transpose()?;
-                let rows = crate::judge::list(&v, since, all);
-                out.emit(crate::judge::list_text(&rows), json!({"judgments": rows}));
+            let ids_of = |what: &str| -> Result<Vec<String>> {
+                if text.is_empty() {
+                    bail!("name the judgments to {what} by id, `breadcrumb judge --list` shows them");
+                }
+                Ok(text.clone())
+            };
+            if file {
+                let (item, js) = crate::judge::file(&v, &ids_of("file")?, as_kind.as_deref(), title.as_deref(), priority.as_deref())?;
+                out.emit(format!("{} from {}, each linked filed-as\n", format::ack(&format!("filed {}", item.kind), &item), crate::judge::plural(js.len(), "judgment")), item.to_json());
                 return Ok(0);
             }
-            let text = read_body_arg(text, None)?.unwrap_or_default();
-            let n = crate::judge::judge(&v, &text, &verdict, about.as_deref(), v.detect_project(&cwd).as_deref())?;
-            out.emit(format!("{}\n", format::ack("judged", &n)), n.to_json());
+            if let Some(item) = to {
+                let (item, js) = crate::judge::file_to(&v, &item, &ids_of("file")?)?;
+                let ids: Vec<&str> = js.iter().map(|j| j.id.as_str()).collect();
+                out.emit(format!("linked {} filed-as {}, a line for each on it\n", ids.join(", "), item.handle()), item.to_json());
+                return Ok(0);
+            }
+            if dismiss {
+                let js = crate::judge::dismiss(&v, &ids_of("dismiss")?, why.as_deref().unwrap_or_default())?;
+                let ids: Vec<&str> = js.iter().map(|j| j.id.as_str()).collect();
+                out.emit(format!("dismissed and archived {}\n", ids.join(", ")), json!({"dismissed": ids}));
+                return Ok(0);
+            }
+            if list || helped || text.is_empty() {
+                let since = since.as_deref().map(ops::parse_since).transpose()?;
+                let rows = crate::judge::list(&v, since, all);
+                out.emit(crate::judge::list_text(&rows, helped), json!({"judgments": rows}));
+                return Ok(0);
+            }
+            let Some(verdict) = verdict else {
+                bail!("say the verdict, --verdict {}", crate::judge::VERDICTS.join("|"));
+            };
+            let text = read_body_arg(Some(text.join(" ")), None)?.unwrap_or_default();
+            let j = crate::judge::judge(&v, &text, &verdict, about.as_deref(), v.detect_project(&cwd).as_deref())?;
+            out.emit(format!("{}\n", j.text()), j.note.to_json());
         }
         Cmd::Config { action, project } => {
             let mut v = open()?;

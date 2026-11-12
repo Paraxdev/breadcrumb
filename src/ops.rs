@@ -340,6 +340,7 @@ pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
         }
         req.project = crate::judge::home(v);
     }
+    let k = if k.name == crate::judge::JUDGMENT { crate::judge::current_kind(k) } else { k };
     let project = match &req.project {
         Some(p) => Some(check_slug(p)?),
         None => None,
@@ -405,6 +406,9 @@ pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
         unpin = all.into_iter().filter(|n| n.kind == HANDOFF && n.pinned && note.links.iter().any(|l| l.to == n.id && l.rel == SUPERSEDES)).collect();
     }
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
+    if note.kind == crate::judge::JUDGMENT {
+        touched.extend(crate::judge::upgrade_kind_file(v)?);
+    }
     if let Some(p) = &project
         && let Some(created) = ensure_project(v, p)? {
             touched.push(created);
@@ -863,6 +867,8 @@ fn note_values(n: &Note, key: &str) -> Vec<String> {
         "source" => vec![n.source.clone().unwrap_or_default()],
         "tags" => n.tags.clone(),
         "links" => n.links.iter().map(|l| l.to.clone()).collect(),
+        "verdict" if n.kind == crate::judge::JUDGMENT => vec![crate::judge::verdict(n)],
+        "about" if n.kind == crate::judge::JUDGMENT => vec![crate::judge::about(n)],
         _ => match n.field(key) {
             None | Some(Value::Null) => vec![String::new()],
             Some(Value::Sequence(s)) => s.iter().map(yaml_display).collect(),

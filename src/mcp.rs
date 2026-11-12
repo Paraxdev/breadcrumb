@@ -251,28 +251,34 @@ impl Server {
             }
             "add" => {
                 let project = self.target_project(&v, a)?;
-                let (n, slug_note) = ops::add_noted(
-                    &v,
-                    AddReq {
-                        title: req_s(a, "title")?,
-                        kind: s(a, "kind"),
-                        project,
-                        tags: strs(a, "tags"),
-                        fields: note_fields(a)?,
-                        pinned: b(a, "pinned"),
-                        body: s(a, "body").map(|x| crate::util::normalize_newlines(&x)),
-                        source: s(a, "source"),
-                        links: {
-                            let mut l = links(a)?;
-                            l.extend(strs(a, "supersedes").into_iter().map(|to| Link { to, rel: ops::SUPERSEDES.into() }));
-                            l
-                        },
-                        paths: strs(a, "paths"),
-                        slug: s(a, "slug"),
-                        track: s(a, "track"),
-                        require_existing_project: true,
+                let req = AddReq {
+                    title: req_s(a, "title")?,
+                    kind: s(a, "kind"),
+                    project,
+                    tags: strs(a, "tags"),
+                    fields: note_fields(a)?,
+                    pinned: b(a, "pinned"),
+                    body: s(a, "body").map(|x| crate::util::normalize_newlines(&x)),
+                    source: s(a, "source"),
+                    links: {
+                        let mut l = links(a)?;
+                        l.extend(strs(a, "supersedes").into_iter().map(|to| Link { to, rel: ops::SUPERSEDES.into() }));
+                        l
                     },
-                )?;
+                    paths: strs(a, "paths"),
+                    slug: s(a, "slug"),
+                    track: s(a, "track"),
+                    require_existing_project: true,
+                };
+                let (n, slug_note) = if req.kind.as_deref().is_some_and(|k| k.trim() == crate::judge::JUDGMENT) {
+                    let j = crate::judge::add(&v, req)?;
+                    if j.counted {
+                        return Ok(j.text());
+                    }
+                    (j.note, None)
+                } else {
+                    ops::add_noted(&v, req)?
+                };
                 let mut out = format::ack("saved", &n);
                 if let Some(l) = ops::landed(&n) {
                     out.push_str(&format!(" {l}"));
@@ -294,6 +300,9 @@ impl Server {
                 }
                 if n.kind == ops::HANDOFF {
                     out.push_str(&format!("\n{}", crate::lifecycle::handoff_report(&v, &n)));
+                }
+                if let Some(h) = crate::judge::unrated_hint(&n, true) {
+                    out.push_str(&format!("\n{h}"));
                 }
                 Ok(out)
             }
