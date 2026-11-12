@@ -15,6 +15,6 @@ Memory and backlog for agent sessions. Use MCP or CLI, not hand edits.
 - Notes have a `slug` beside the id, either works, name notes to the user by it.
 - `-` reads stdin on `add`, `append`, `update --body`.
 - `crumb lease <name>` holds a build dir or runner, `leases` lists.
-- `crumb judge "..." -v <verdict>` rates crumb, `crumb config` tunes it.
+- `crumb judge "..." -v <verdict>` rates crumb, `config` tunes it.
 - Notes belong to the cwd's project, or global. Never store secrets.
 "#;
