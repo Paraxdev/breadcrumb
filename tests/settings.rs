@@ -279,7 +279,7 @@ fn the_digest_settings_default_to_the_digest_as_it_was() {
     let (d, mut v, _) = setup();
     rich(&v, d.path());
     let before = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
-    let heads = ["Pinned", "Latest handoff", "Other live handoffs:", "Prefs (unpinned)", "Machine facts", "Todos:", "Backlog:", "answer arrived on", "Review: 1 waiting", "Recent (", "Global: 1 more note"];
+    let heads = ["Pinned", "Latest handoff", "Other live handoffs:", "Prefs (unpinned)", "Machine facts", "Todos:", "Backlog:", "answer arrived on", "Review: 1 waiting", "Recent (", "Global: 1 more unscoped note"];
     let pos: Vec<usize> = heads.iter().map(|h| at(&before, h)).collect();
     assert!(pos.windows(2).all(|w| w[0] < w[1]), "{before}");
     assert_eq!(recent_rows(&before), 14, "15 less one for the pref: {before}");
@@ -305,7 +305,7 @@ fn digest_sections_leave_blocks_out_and_reorder_them_but_calls_to_act_stay() {
         assert!(!dg.contains(gone), "{gone}: {dg}");
     }
     assert!(dg.starts_with("breadcrumb context: app\nRecent ("), "{dg}");
-    assert!(at(&dg, "Global: 1 more note") < at(&dg, "Pinned") && at(&dg, "Pinned") < at(&dg, "answer arrived on") && at(&dg, "answer arrived on") < at(&dg, "Review: 1 waiting"), "{dg}");
+    assert!(at(&dg, "Global: 1 more unscoped note") < at(&dg, "Pinned") && at(&dg, "Pinned") < at(&dg, "answer arrived on") && at(&dg, "answer arrived on") < at(&dg, "Review: 1 waiting"), "{dg}");
     assert_eq!(recent_rows(dg.split("Pinned").next().unwrap()), 15, "no pref block, so no row goes to it: {dg}");
 
     config::set(&mut v, "digest_sections", "todos").unwrap();
@@ -408,6 +408,17 @@ fn listings_mark_overrides_that_do_not_hold_and_a_broken_file_names_its_fix() {
     assert!(out.contains("  review_by = agent (project, default user)\n"), "{out}");
     let (_, out, _) = crumb_in(&v, d.path(), &["config", "--project", "app", "--json"], "");
     assert!(out.contains("\"ignored\": \"soon ignored, stale_days takes a whole number of 0 or more\""), "{out}");
+
+    std::fs::write(v.root.join("projects/app/settings.toml"), "digest_budget = 10\ndigest_recent = 0\ndigest_sections = \"pins,bogus\"\n").unwrap();
+    let names = "sections are: workflows, pins, handoff, handoffs, prefs, machine, landing, todos, backlog, recent";
+    let (_, out, _) = crumb_in(&v, d.path(), &["config", "--project", "app"], "");
+    assert!(out.contains("  digest_budget = 6000 (project value 10 ignored, digest_budget takes a whole number of 1000 or more)\n"), "{out}");
+    assert!(out.contains("  digest_recent = unset (project value 0 ignored, digest_recent takes a whole number of 1 or more)\n"), "{out}");
+    assert!(out.contains(&format!("(project value pins,bogus ignored, unknown digest section 'bogus', {names})\n")), "{out}");
+    let (_, out, _) = crumb_in(&v, &app, &["doctor"], "");
+    assert!(out.contains("warning: projects/app/settings.toml: digest_budget = 10 is ignored, digest_budget takes a whole number of 1000 or more\n"), "{out}");
+    assert!(out.contains("warning: projects/app/settings.toml: digest_recent = 0 is ignored, digest_recent takes a whole number of 1 or more\n"), "{out}");
+    assert!(out.contains(&format!("warning: projects/app/settings.toml: digest_sections = \"pins,bogus\" is ignored, unknown digest section 'bogus', {names}\n")), "{out}");
 
     std::fs::write(v.root.join("projects/app/settings.toml"), "not toml [").unwrap();
     let (_, out, _) = crumb_in(&v, &app, &["config"], "");

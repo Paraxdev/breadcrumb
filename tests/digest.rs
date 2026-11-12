@@ -174,7 +174,7 @@ fn a_project_digest_counts_unscoped_globals_and_a_scope_brings_a_global_note_in(
     assert!(ctx.contains(&format!("{} feedback (inferred) No AI attribution in commits (global)\n", rule.id)), "{ctx}");
     assert!(ctx.contains(&format!("Prefs (unpinned): {} Mods ship with a changelog, +1 global\n", mod_pref.id)), "{ctx}");
     assert!(ctx.contains(&format!("{} gotcha Forge mappings need a rerun after an update (global)\n", forge.id)), "{ctx}");
-    assert!(ctx.ends_with("Global: 2 more notes, breadcrumb list --global\n"), "{ctx}");
+    assert!(ctx.ends_with("Global: 2 more unscoped notes, breadcrumb list --global lists all global notes\n"), "{ctx}");
     assert!(ctx.contains("Recent:\n"), "own notes and the scoped one all fit, so no count: {ctx}");
 
     let small = ops::context(&v, Some("create-laser"), 3).unwrap();
@@ -191,7 +191,7 @@ fn a_project_digest_counts_unscoped_globals_and_a_scope_brings_a_global_note_in(
     assert!(!home.contains("Global:") && !home.contains("global\n"), "{home}");
 
     ops::update(&v, &forge.id, UpdateReq { unset: vec!["scope".into()], ..Default::default() }).unwrap();
-    assert!(ops::context(&v, Some("create-laser"), 15).unwrap().contains("Global: 3 more notes"));
+    assert!(ops::context(&v, Some("create-laser"), 15).unwrap().contains("Global: 3 more unscoped notes, "));
 }
 
 #[test]
@@ -210,7 +210,7 @@ fn global_todos_and_backlog_items_follow_the_scope_rule_in_a_project_digest() {
     assert!(!ctx.contains(&todo.id) && !ctx.contains(&item.id), "{ctx}");
     assert!(ctx.contains(&format!("Todos:\nbump-laser-mod {} Bump the laser mod p2 (global)\nBacklog: queued 2\n", scoped_todo.id)), "{ctx}");
     assert!(ctx.contains(&scoped_item.id), "{ctx}");
-    assert!(ctx.ends_with("Global: 2 more notes, breadcrumb list --global\n"), "the hidden ones are counted: {ctx}");
+    assert!(ctx.ends_with("Global: 2 more unscoped notes, breadcrumb list --global lists all global notes\n"), "the hidden ones are counted: {ctx}");
 
     let home = ops::context(&v, None, 15).unwrap();
     for shown in [&todo, &item, &scoped_todo, &scoped_item] {
@@ -227,4 +227,67 @@ fn scope_matches_slugs_and_globs() {
     assert!(scope_matches(&s(&["create-*"]), "create-laser") && scope_matches(&s(&["create-*"]), "Create-Laser"));
     assert!(!scope_matches(&s(&["create-*"]), "app") && !scope_matches(&s(&["web"]), "webapp"));
     assert!(scope_matches(&s(&["web", "*-mod"]), "neo-mod"));
+}
+
+#[test]
+fn doctor_warns_once_about_a_global_scope_word_that_matches_no_project() {
+    let (d, v) = common::vault();
+    for p in ["app", "web"] {
+        std::fs::create_dir_all(d.path().join(p)).unwrap();
+        ops::project_link(&v, p, &d.path().join(p), None).unwrap();
+    }
+    let typo = common::add(&v, "Deploy with the staging key", "decision", None, &[("scope", "webb")]);
+    let partly = common::add(&v, "Mods ship with a changelog", "feedback", None, &[("scope", "web, apx, zz-*")]);
+    let fine = [common::add(&v, "Glob fits", "note", None, &[("scope", "a*")]), common::add(&v, "No scope", "note", None, &[]), common::add(&v, "Own note", "note", Some("app"), &[("scope", "nope")])];
+    let mut gone = common::add(&v, "Archived typo", "note", None, &[("scope", "nope")]);
+    gone.status = "archived".into();
+    v.write_note(&mut gone).unwrap();
+
+    let doc = breadcrumb::doctor::check(&v);
+    let about = |id: &str| doc.iter().filter(|p| p.id.as_deref() == Some(id) && p.message.starts_with("scope ")).map(|p| p.message.clone()).collect::<Vec<_>>();
+    assert_eq!(about(&typo.id), vec![format!("scope 'webb' matches no project, so only the global digest shows the note, projects: app, web, fix it with `breadcrumb update {} --field scope=<slugs>`", typo.id)]);
+    assert_eq!(about(&partly.id), vec![format!("scope words 'apx', 'zz-*' match no project, projects: app, web, fix it with `breadcrumb update {} --field scope=<slugs>`", partly.id)]);
+    for n in fine.iter().chain([&gone]) {
+        assert!(about(&n.id).is_empty(), "{}: {doc:?}", n.title);
+    }
+}
+
+#[test]
+fn a_digest_over_budget_cuts_todo_and_board_rows_first_and_keeps_the_lines_that_ask_to_act() {
+    use breadcrumb::question::{self, AskReq, Opt};
+    let (_d, mut v) = common::vault();
+    breadcrumb::config::set(&mut v, "review_by", "agent").unwrap();
+    breadcrumb::config::set(&mut v, "judge_nudge", "session").unwrap();
+    for i in 0..60 {
+        common::add(&v, &format!("Todo {i:02} with a long title that runs on and on until the digest cuts it off"), "todo", Some("app"), &[]);
+    }
+    for i in 0..12 {
+        common::add(&v, &format!("Feature {i:02} that someone is building, its title as long as they come"), "feature", Some("app"), &[("state", "in-progress")]);
+    }
+    let asked = common::add(&v, "Pick the palette", "task", Some("app"), &[("state", "queued")]);
+    let options = ["red", "blue"].iter().map(|l| Opt { label: l.to_string(), desc: String::new() }).collect();
+    let (n, q) = question::ask(&v, AskReq { id: asked.id.clone(), text: "Which colour?".into(), options, multi: false, free: false, by: None }).unwrap();
+    question::answer(&v, &question::qid(&n, &q), &[2], None, "user").unwrap();
+    let built = common::add(&v, "Thing to check", "feature", Some("app"), &[]);
+    breadcrumb::backlog::move_item(&v, &built.id, breadcrumb::backlog::MoveReq { state: "review".into(), steps: vec!["Run it".into()], by: Some("builder".into()), ..Default::default() }).unwrap();
+    let body = "Where it stands. ".repeat(150);
+    ops::add(&v, AddReq { title: "Engine state".into(), kind: Some("handoff".into()), project: Some("app".into()), body: Some(body), ..Default::default() }).unwrap();
+
+    for budget in [1000, 6000] {
+        let d = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(budget), ..Default::default() }).unwrap();
+        assert!(d.chars().count() <= budget, "{budget}: {} chars\n{d}", d.chars().count());
+        assert_eq!(breadcrumb::hooks::cap(d.trim_end(), budget), d.trim_end(), "the hook has nothing to cut");
+        for line in [breadcrumb::judge::NUDGE, "Latest handoff", "Todos:\n", "Backlog: ", "answer arrived on", "Review: 1 waiting for an agent check"] {
+            assert!(d.contains(line), "{budget}, {line}: {d}");
+        }
+        let more = |hint: &str| d.lines().find_map(|l| l.strip_suffix(hint).and_then(|l| l.strip_prefix('+')).and_then(|l| l.strip_suffix(" more, ")).map(|k| k.parse::<usize>().unwrap()));
+        let todos = d.lines().filter(|l| l.starts_with("todo-")).count();
+        let (hidden_todos, hidden_items) = (more("breadcrumb list -k todo").expect(&d), more("breadcrumb backlog").unwrap_or(0));
+        assert!(hidden_items > 0 || budget == 6000, "{d}");
+        assert_eq!(todos + hidden_todos, 60, "{d}");
+        assert_eq!(d.lines().filter(|l| l.contains(" feature p2 Feature ") || l.contains(" task p2 Pick the palette")).count() + hidden_items, 13, "12 in progress and 1 queued: {d}");
+        assert!(d.find("+").unwrap() < d.find("answer arrived on").unwrap() && d.find("answer arrived on").unwrap() < d.find("Review: 1 waiting").unwrap(), "{d}");
+    }
+    let wide = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(20000), ..Default::default() }).unwrap();
+    assert!(!wide.contains("more, breadcrumb list -k todo") && !wide.contains("more, breadcrumb backlog") && wide.contains("Todo 59"), "{wide}");
 }

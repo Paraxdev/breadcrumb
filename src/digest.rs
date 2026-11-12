@@ -275,15 +275,45 @@ pub fn checkout(p: &crate::project::Project, cwd: Option<&Path>) -> Option<PathB
     holding.or_else(|| p.paths.iter().find(in_git)).map(PathBuf::from)
 }
 
-/// Commits on the checkout since each handoff was last written, one git call for all of them. Empty when unknown.
+/// Commits on the checkout touching the project's directory since each handoff was last written, one git call for all of
+/// them. Empty when unknown.
 fn commits_since(dir: Option<PathBuf>, hs: &[&Note]) -> HashMap<String, usize> {
     let (Some(dir), Some(oldest)) = (dir, hs.iter().map(|h| h.updated).min()) else { return HashMap::new() };
-    let Some(times) = crate::git::commit_times(&dir, oldest, &[], GIT_LIMIT) else { return HashMap::new() };
+    let only_here = if crate::git::is_repo_root(&dir) { vec![] } else { vec![".".to_string()] };
+    let Some(times) = crate::git::commit_times(&dir, oldest, &only_here, GIT_LIMIT) else { return HashMap::new() };
     hs.iter().map(|h| (h.id.clone(), times.iter().filter(|&&t| t > h.updated.timestamp()).count())).collect()
 }
 
 fn chars(s: &str) -> usize {
     s.chars().count()
+}
+
+/// `lines` (row or header, each with its newline) within `room` chars: the rows that fit in order, a header only above a
+/// row that stays, then `+N more, <hint>` for the rest. All of them when they fit.
+fn fit_rows(lines: &[(bool, String)], room: usize, hint: &str) -> String {
+    if lines.iter().map(|(_, l)| chars(l)).sum::<usize>() <= room {
+        return lines.iter().map(|(_, l)| l.as_str()).collect();
+    }
+    let rows = lines.iter().filter(|(row, _)| *row).count();
+    let room = room.saturating_sub(chars(&format!("+{rows} more, {hint}\n")));
+    let (mut out, mut header, mut kept) = (String::new(), "", 0);
+    for (row, l) in lines {
+        if !row {
+            header = l;
+            continue;
+        }
+        if chars(&out) + chars(header) + chars(l) > room {
+            break;
+        }
+        out.push_str(header);
+        out.push_str(l);
+        header = "";
+        kept += 1;
+    }
+    if kept < rows {
+        let _ = writeln!(out, "+{} more, {hint}", rows - kept);
+    }
+    out
 }
 
 /// The digest from its blocks in their default order, the ones named by `order` in that order. A block with no name is
@@ -372,22 +402,29 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         writeln!(machine_text, "{l}")?;
     }
     let landing = crate::land::digest_lines(v, project).unwrap_or_default();
-    let mut todos = String::new();
+    let mut todo_rows: Vec<(bool, String)> = vec![];
     for n in notes.iter().filter(|n| !n.pinned && is_open_todo(n) && !foreign(n)) {
-        if todos.is_empty() {
-            todos.push_str("Todos:\n");
-        }
         let prio = n.field("priority").map(yaml_display).map(|p| format!(" {p}")).unwrap_or_default();
-        writeln!(todos, "{} {}{prio}{}", n.handle(), crate::format::fit_title(&n.title, n.slug().as_deref()), scope_suffix(n, project))?;
+        todo_rows.push((true, format!("{} {}{prio}{}\n", n.handle(), crate::format::fit_title(&n.title, n.slug().as_deref()), scope_suffix(n, project))));
     }
-    let mut backlog = crate::backlog::context_section(&notes.iter().filter(|n| crate::backlog::is_item(n) && !foreign(n)).cloned().collect::<Vec<_>>(), &all);
+    let items: Vec<Note> = notes.iter().filter(|n| crate::backlog::is_item(n) && !foreign(n)).cloned().collect();
+    let board = crate::backlog::context_section(&items, &all);
+    // Only the item rows of the board can be cut, its counts line and the questions it ends with always show.
+    let asks = crate::question::digest_lines(&items.iter().collect::<Vec<_>>());
+    let (lists, mut backlog_tail) = match board.strip_suffix(asks.as_str()) {
+        Some(l) => (l, asks),
+        None => (board.as_str(), String::new()),
+    };
+    let (board_head, board_rows) = lists.split_once('\n').map(|(h, r)| (format!("{h}\n"), r)).unwrap_or_default();
+    let handles: Vec<String> = items.iter().map(|n| format!("{} ", n.handle())).collect();
+    let board_rows: Vec<(bool, String)> = board_rows.lines().map(|l| (handles.iter().any(|h| l.starts_with(h.as_str())), format!("{l}\n"))).collect();
     if crate::config::agent_review(v, project) {
         let (users, waiting): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| crate::backlog::is_item(n) && crate::backlog::state(n) == "review").partition(|n| crate::backlog::only_user_steps_open(n));
         let user = if users.is_empty() { String::new() } else { format!(", {} waiting for the user", users.len()) };
         if !waiting.is_empty() {
             writeln!(review, "Review: {} waiting for an agent check{user} (review_by = agent), `breadcrumb review` lists the steps, check only what you did not build", waiting.len())?;
         } else if !users.is_empty() {
-            writeln!(backlog, "Review: 0 waiting for an agent check{user} (review_by = agent), the user passes them on the Review page of `breadcrumb serve`")?;
+            writeln!(backlog_tail, "Review: 0 waiting for an agent check{user} (review_by = agent), the user passes them on the Review page of `breadcrumb serve`")?;
         }
     }
     let mut judge = String::new();
@@ -402,8 +439,8 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         .partition(|n| !foreign(n));
     let global_more = match global_rest.len() {
         0 => String::new(),
-        1 => "Global: 1 more note, breadcrumb list --global\n".to_string(),
-        k => format!("Global: {k} more notes, breadcrumb list --global\n"),
+        1 => "Global: 1 more unscoped note, breadcrumb list --global lists all global notes\n".to_string(),
+        k => format!("Global: {k} more unscoped notes, breadcrumb list --global lists all global notes\n"),
     };
     // Prefs used to sit in Recent, so they still count against it and the digest does not grow.
     let want = if !listed("recent") { 0 } else if listed("prefs") { opts.recent.saturating_sub(prefs.len().min(opts.recent / 2)) } else { opts.recent };
@@ -417,20 +454,44 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         live.insert(0, lead);
     }
     let lead_marked = live.first().is_some_and(|h| marks.contains_key(&h.id));
-    let shown = if listed("handoffs") { shown_others(if lead_marked { &live[..] } else { live.get(1..).unwrap_or_default() }, v.config.handoff_digest_days) } else { vec![] };
+    let mut shown = if listed("handoffs") { shown_others(if lead_marked { &live[..] } else { live.get(1..).unwrap_or_default() }, v.config.handoff_digest_days) } else { vec![] };
+    lifecycle::unmarked_first(&mut shown, &marks);
     let lead = live.first().copied().filter(|_| !lead_marked && listed("handoff"));
     let counted: Vec<&Note> = lead.into_iter().chain(shown.iter().take(OTHER_HANDOFFS_MAX).copied()).collect();
     let cwd = opts.cwd.clone().or_else(|| std::env::current_dir().ok());
     let counts = if counted.is_empty() { HashMap::new() } else { commits_since(proj.as_ref().and_then(|p| checkout(p, cwd.as_deref())), &counted) };
     let commits = |n: &Note| counts.get(&n.id).map(|&k| lifecycle::commits_since_text(k)).filter(|t| !t.is_empty()).map(|t| format!(", {t}")).unwrap_or_default();
     let others = other_handoffs(&shown, &commits, &|n: &Note| marks.get(&n.id).cloned());
+    let todos_head = if todo_rows.is_empty() { "" } else { "Todos:\n" };
+    let rows_size = |rows: &[(bool, String)]| rows.iter().map(|(_, l)| chars(l)).sum::<usize>();
+    let need_t = if listed("todos") { rows_size(&todo_rows) } else { 0 };
+    let need_b = if listed("backlog") { rows_size(&board_rows) } else { 0 };
+    // What a digest over budget gives up first: todo and board rows, then the handoff text below HANDOFF_MIN, so the
+    // hook's cut at the budget never takes the lines that ask the agent to act, which come after them.
+    let (room_t, room_b) = {
+        let always = [head.as_str(), no_notes, &judge, &answered, &review];
+        let blocks = [("workflows", workflows.as_str()), ("pins", &pins), ("handoffs", &others), ("prefs", &prefs_text), ("machine", &machine_text), ("landing", &landing), ("todos", todos_head), ("backlog", &board_head), ("backlog", &backlog_tail), ("recent", &global_more)];
+        let kept = always.into_iter().map(chars).sum::<usize>() + blocks.iter().filter(|(n, _)| listed(n)).map(|(_, s)| chars(s)).sum::<usize>();
+        let floor = lead.map_or(0, |h| chars(&handoff_section(h, &commits(h), days, HANDOFF_MIN)));
+        let room = budget.saturating_sub(kept + floor);
+        let half = room / 2;
+        match (need_t, need_b) {
+            _ if need_t + need_b <= room => (need_t, need_b),
+            (t, _) if t <= half => (t, room - t),
+            (_, b) if b <= half => (room - b, b),
+            _ => (half, room - half),
+        }
+    };
+    let todos = format!("{todos_head}{}", fit_rows(&todo_rows, room_t, "breadcrumb list -k todo"));
+    let backlog = format!("{board_head}{}{backlog_tail}", fit_rows(&board_rows, room_b, "breadcrumb backlog"));
     let parts = [("workflows", &workflows), ("pins", &pins), ("handoffs", &others), ("prefs", &prefs_text), ("machine", &machine_text), ("landing", &landing), ("todos", &todos), ("backlog", &backlog), ("recent", &global_more)];
     let fixed = chars(&head) + chars(no_notes) + chars(&judge) + chars(&answered) + chars(&review) + parts.iter().filter(|(n, _)| listed(n)).map(|(_, s)| chars(s)).sum::<usize>();
     let mut left = budget.saturating_sub(fixed);
     let handoff = match lead {
         Some(h) => {
             let reserve = RECENT_RESERVE.min(recent_rows.iter().map(|r| chars(r)).sum());
-            handoff_section(h, &commits(h), days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX))
+            let full = handoff_section(h, &commits(h), days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX));
+            if chars(&full) <= left { full } else { handoff_section(h, &commits(h), days, left) }
         }
         None => String::new(),
     };

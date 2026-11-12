@@ -236,6 +236,9 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
             && !slugs.contains(p) {
                 err(path.clone(), id.clone(), "warning", format!("project '{p}' has no project.toml"));
             }
+        if n.project.is_none() && !n.is_archived() && !lapsed.hides(n) && let Some(m) = scope_miss(n, &slugs) {
+            err(path.clone(), id.clone(), "warning", m);
+        }
         for l in &n.links {
             if !ids.contains_key(&l.to) {
                 err(path.clone(), id.clone(), "error", format!("broken link to '{}' (rel {})", l.to, l.rel));
@@ -311,6 +314,23 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
     }
     out.extend(project_files(v, &projects));
     Run { problems: out, checked, scope: scope.clone() }
+}
+
+/// A global note's scope words that match no registered project, which hide it from every project.
+fn scope_miss(n: &crate::note::Note, slugs: &HashSet<String>) -> Option<String> {
+    let scope = crate::recall::scope_of(n);
+    let lost: Vec<&String> = scope.iter().filter(|w| !slugs.iter().any(|s| crate::recall::scope_matches(std::slice::from_ref(*w), s))).collect();
+    if lost.is_empty() {
+        return None;
+    }
+    let mut known: Vec<&str> = slugs.iter().map(String::as_str).collect();
+    known.sort_unstable();
+    let more = if known.len() > 10 { format!(" (+{})", known.len() - 10) } else { String::new() };
+    let known = if known.is_empty() { "none".to_string() } else { format!("{}{more}", known[..known.len().min(10)].join(", ")) };
+    let words = lost.iter().map(|w| format!("'{w}'")).collect::<Vec<_>>().join(", ");
+    let what = if lost.len() == 1 { format!("scope {words} matches") } else { format!("scope words {words} match") };
+    let only = if lost.len() == scope.len() { ", so only the global digest shows the note" } else { "" };
+    Some(format!("{what} no project{only}, projects: {known}, fix it with `breadcrumb update {} --field scope=<slugs>`", n.id))
 }
 
 /// A project whose slug names a scope, and settings.toml overrides that do not hold.

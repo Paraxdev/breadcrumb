@@ -171,10 +171,44 @@ pub fn ahead_of_origin(dir: &Path) -> usize {
     }
 }
 
-/// Like `run` but killed after `limit`, None on any failure, for callers that must never wait on git.
+/// Ends `child` and every process it started. A process git spawned (a launcher style git.exe starts the real one)
+/// inherits our handles, the hook's stdout among them on Windows, and would keep the hook's reader waiting.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        // Note: std cannot start a child suspended, so a job object would be assigned only after a launcher may have
+        // started the real git, taskkill walks the tree at kill time instead.
+        let _ = crate::util::hidden(&mut Command::new("taskkill"))
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        const SIGKILL: i32 = 9;
+        // run_within puts git in a process group of its own, a negative pid signals the whole group.
+        if let Ok(pid) = i32::try_from(child.id()) {
+            unsafe {
+                kill(-pid, SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Like `run` but killed after `limit`, with what it started, None on any failure, for callers that must never wait on git.
 fn run_within(dir: &Path, args: &[&str], limit: std::time::Duration) -> Option<Vec<u8>> {
     use std::io::Read;
-    let mut child = crate::util::hidden(&mut Command::new("git"))
+    let mut cmd = Command::new("git");
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = crate::util::hidden(&mut cmd)
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -197,8 +231,7 @@ fn run_within(dir: &Path, args: &[&str], limit: std::time::Duration) -> Option<V
             Ok(Some(status)) => return reader.join().ok().flatten().filter(|_| status.success()),
             Ok(None) if start.elapsed() < limit => std::thread::sleep(std::time::Duration::from_millis(5)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 return None;
             }
         }
