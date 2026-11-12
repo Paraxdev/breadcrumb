@@ -170,3 +170,50 @@ pub fn ahead_of_origin(dir: &Path) -> usize {
         }
     }
 }
+
+/// Like `run` but killed after `limit`, None on any failure, for callers that must never wait on git.
+fn run_within(dir: &Path, args: &[&str], limit: std::time::Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut child = crate::util::hidden(&mut Command::new("git"))
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    // Read on a thread, a full pipe would block git and turn every call into a timeout.
+    let reader = std::thread::spawn(move || {
+        let mut buf = vec![];
+        out.read_to_end(&mut buf).ok().map(|_| buf)
+    });
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return reader.join().ok().flatten().filter(|_| status.success()),
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(std::time::Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// Commit times (unix seconds) on HEAD of the checkout at `dir` since `since`, newest first, limited to `paths` when
+/// given. None when git is missing, `dir` is no checkout, git fails or takes longer than `limit`.
+pub fn commit_times(dir: &Path, since: chrono::DateTime<chrono::Utc>, paths: &[String], limit: std::time::Duration) -> Option<Vec<i64>> {
+    let since = format!("--since={}", since.format("%Y-%m-%d %H:%M:%S +0000"));
+    let mut args = vec!["log", "--format=%ct", since.as_str(), "HEAD"];
+    if !paths.is_empty() {
+        args.push("--");
+        args.extend(paths.iter().map(String::as_str));
+    }
+    let out = run_within(dir, &args, limit)?;
+    Some(String::from_utf8_lossy(&out).lines().filter_map(|l| l.trim().parse().ok()).collect())
+}

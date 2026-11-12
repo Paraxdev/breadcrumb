@@ -366,27 +366,22 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
         }
     }
     // A new handoff replaces only its own track's, parallel sessions keep theirs. What it replaces stops being pinned.
-    let mut unpin: Vec<Note> = vec![];
+    let mut all = vec![];
     if note.kind == HANDOFF {
-        let all = v.load_notes();
+        all = v.load_notes();
         let lapsed = crate::lifecycle::Lapsed::of(&all);
         for p in crate::lifecycle::live_handoffs(&all, note.project.as_deref(), &lapsed) {
             if crate::lifecycle::same_track(&note, p) && !note.links.iter().any(|l| l.to == p.id && l.rel == SUPERSEDES) {
                 note.links.push(Link { to: p.id.clone(), rel: SUPERSEDES.into() });
             }
         }
-        unpin = all.into_iter().filter(|n| n.kind == HANDOFF && n.pinned && note.links.iter().any(|l| l.to == n.id && l.rel == SUPERSEDES)).collect();
     }
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
     if let Some(p) = &project
         && let Some(created) = ensure_project(v, p)? {
             touched.push(created);
         }
-    for n in &mut unpin {
-        n.pinned = false;
-        n.clear_kept("pinned");
-        touched.push(v.write_note(n)?);
-    }
+    touched.extend(crate::lifecycle::unpin_superseded(v, &note, all)?);
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("add", &note))?;
     Ok(note)
@@ -470,6 +465,8 @@ pub struct UpdateReq {
     pub status: Option<String>,
     /// Replaces all links when set.
     pub links: Option<Vec<Link>>,
+    /// Ids or slugs this note replaces, added as `supersedes` links after `links`. A handoff unpins pinned handoffs among them.
+    pub supersedes: Vec<String>,
     /// `glob` or `+glob` adds, `-glob` removes.
     pub paths: Vec<String>,
     /// Replaces all path globs when set, before `paths`.
@@ -603,6 +600,15 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         }
         note.links = out;
     }
+    for s in &req.supersedes {
+        let to = v.resolve_id(s)?;
+        if to == note.id {
+            bail!("a note cannot supersede itself");
+        }
+        if !note.links.iter().any(|l| l.to == to && l.rel == SUPERSEDES) {
+            note.links.push(Link { to, rel: SUPERSEDES.into() });
+        }
+    }
     k.validate(&mut note.extra)?;
     if crate::backlog::is_item(&note) {
         let new_state = crate::backlog::state(&note);
@@ -617,6 +623,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
     crate::session::stamp_write(&mut note);
     note.updated = now();
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
+    if !req.supersedes.is_empty() {
+        touched.extend(crate::lifecycle::unpin_superseded(v, &note, v.load_notes())?);
+    }
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("update", &note))?;
     Ok(note)

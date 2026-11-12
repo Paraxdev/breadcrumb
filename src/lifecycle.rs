@@ -227,13 +227,18 @@ fn holding(n: &Note) -> String {
     }
 }
 
+/// The words of a note's title and body that can be an id or a slug.
+fn name_words(n: &Note) -> Vec<String> {
+    let text = format!("{}\n{}", n.title, n.body).to_ascii_lowercase();
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).map(|w| w.trim_matches('-').to_string()).filter(|w| !w.is_empty()).collect()
+}
+
 /// Backlog items a handoff names by id or slug in its title or body.
 pub fn named_items<'a>(h: &Note, all: &'a [Note]) -> Vec<&'a Note> {
     let by_id: HashMap<&str, &Note> = all.iter().map(|n| (n.id.as_str(), n)).collect();
     let by_slug: HashMap<String, &Note> = all.iter().filter_map(|n| n.slug().map(|s| (s, n))).collect();
-    let text = format!("{}\n{}", h.title, h.body).to_ascii_lowercase();
     let mut out: Vec<&Note> = vec![];
-    for word in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).map(|w| w.trim_matches('-')) {
+    for word in name_words(h).iter().map(String::as_str) {
         let hit = by_id.get(word).copied().or_else(|| word.contains('-').then(|| by_slug.get(word).copied()).flatten());
         if let Some(n) = hit.filter(|n| is_item(n) && n.id != h.id)
             && !out.iter().any(|o| o.id == n.id)
@@ -252,10 +257,40 @@ pub fn settled(h: &Note, all: &[Note]) -> Option<usize> {
     (!named.is_empty() && named.iter().all(landed)).then_some(named.len())
 }
 
+/// The newest live handoff created after `h` that names it by id or slug, so the work `h` handed on moved there.
+pub fn covered_by<'a>(h: &Note, live: &[&'a Note]) -> Option<&'a Note> {
+    let slug = h.slug();
+    live.iter().copied().filter(|n| (&n.created, &n.id) > (&h.created, &h.id)).find(|n| {
+        name_words(n).iter().any(|w| *w == h.id || (w.contains('-') && slug.as_deref() == Some(w.as_str())))
+    })
+}
+
+/// Why a live handoff no longer leads, covered by a newer one or settled. Covered wins, it names where to look.
+pub fn handoff_mark(h: &Note, live: &[&Note], all: &[Note]) -> Option<String> {
+    match covered_by(h, live) {
+        Some(n) => Some(format!("covered by {}", n.handle())),
+        None => settled(h, all).map(|k| format!("settled, the {k} items it names landed")),
+    }
+}
+
+/// `14 commits since`, nothing for 0.
+pub fn commits_since_text(k: usize) -> String {
+    match k {
+        0 => String::new(),
+        1 => "1 commit since".into(),
+        k => format!("{k} commits since"),
+    }
+}
+
 /// `slug id who track age: title`, the one line form of a handoff.
 pub fn handoff_line(n: &Note) -> String {
+    handoff_line_with(n, "")
+}
+
+/// `handoff_line` with `after_age` beside the age, like `, 14 commits since`.
+pub fn handoff_line_with(n: &Note, after_age: &str) -> String {
     let who = writer(n).map(|w| format!(" {w}")).unwrap_or_default();
-    format!("{}{who}{} {}: {}", n.handle(), holding(n), crate::util::short_age(&n.created), crate::format::fit_title(&n.title, n.slug().as_deref()))
+    format!("{}{who}{} {}{after_age}: {}", n.handle(), holding(n), crate::util::short_age(&n.created), crate::format::fit_title(&n.title, n.slug().as_deref()))
 }
 
 /// The head line's who part: `, neocad-91 (now neocad-50), track main-worker held by neocad-cb`.
@@ -330,29 +365,52 @@ pub fn take_handoff(v: &Vault, id: &str, by: Option<&str>, release: bool) -> Res
     Ok(n)
 }
 
-/// What `add` tells the writer about a new handoff: what it superseded, or that it left the others alone and which they are.
-pub fn handoff_report(v: &Vault, h: &Note) -> String {
+/// What `add` tells the writer about a new handoff: what it superseded, and which other handoffs stay live, each with
+/// the command that retires it, in the CLI's or the MCP tool's form.
+pub fn handoff_report(v: &Vault, h: &Note, mcp: bool) -> String {
     use std::fmt::Write;
     let all = v.load_notes();
     let by_id: HashMap<&str, &Note> = all.iter().map(|n| (n.id.as_str(), n)).collect();
     let replaced: Vec<String> = h.links.iter().filter(|l| l.rel == SUPERSEDES).map(|l| by_id.get(l.to.as_str()).map_or_else(|| l.to.clone(), |n| handoff_line(n))).collect();
-    if !replaced.is_empty() {
-        return replaced.iter().map(|r| format!("superseded {r}")).collect::<Vec<_>>().join("\n");
-    }
     let lapsed = Lapsed::of(&all);
     let live = live_handoffs(&all, h.project.as_deref(), &lapsed);
     let others: Vec<&&Note> = live.iter().filter(|n| n.id != h.id).collect();
-    if others.is_empty() {
-        return "superseded nothing, no other live handoff".into();
+    let mut s = replaced.iter().map(|r| format!("superseded {r}")).collect::<Vec<_>>().join("\n");
+    match (s.is_empty(), others.is_empty()) {
+        (true, true) => return "superseded nothing, no other live handoff".into(),
+        (false, true) => return s,
+        (true, false) => s.push_str("superseded nothing, "),
+        (false, false) => s.push('\n'),
     }
-    let mut s = "superseded nothing, other live handoffs (--supersedes <id> replaces one):".to_string();
+    s.push_str("other live handoffs, each with the command that retires it if this handoff replaces it:");
     for n in others.iter().take(REPORT_MAX) {
-        let _ = write!(s, "\n  {}", handoff_line(n));
+        let mark = handoff_mark(n, &live, &all).map(|m| format!(" [{m}]")).unwrap_or_default();
+        let retire = if mcp { format!("update {{\"id\": \"{}\", \"supersedes\": [\"{}\"]}}", h.id, n.id) } else { format!("breadcrumb update {} --supersedes {}", h.id, n.id) };
+        let _ = write!(s, "\n  {}{mark}\n    {retire}", handoff_line(n));
     }
     if others.len() > REPORT_MAX {
         let _ = write!(s, "\n  +{} more", others.len() - REPORT_MAX);
     }
     s
+}
+
+/// `\nsuperseded <line>` for each note `update --supersedes` named, empty for none.
+pub fn superseded_text(v: &Vault, targets: &[String]) -> String {
+    targets.iter().filter_map(|t| v.resolve_id(t).ok().and_then(|id| v.get(&id).ok())).map(|n| format!("\nsuperseded {}", if n.kind == HANDOFF { handoff_line(&n) } else { n.handle() })).collect()
+}
+
+/// A handoff `h` supersedes stops being pinned. Writes them and returns their files for the caller's commit.
+pub fn unpin_superseded(v: &Vault, h: &Note, all: Vec<Note>) -> Result<Vec<std::path::PathBuf>> {
+    let mut paths = vec![];
+    if h.kind != HANDOFF {
+        return Ok(paths);
+    }
+    for mut n in all.into_iter().filter(|n| n.kind == HANDOFF && n.pinned && h.links.iter().any(|l| l.to == n.id && l.rel == SUPERSEDES)) {
+        n.pinned = false;
+        n.clear_kept("pinned");
+        paths.push(v.write_note(&mut n)?);
+    }
+    Ok(paths)
 }
 
 /// An expired note that still reads as current: pinned, or a decision not marked superseded.
