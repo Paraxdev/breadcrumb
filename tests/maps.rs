@@ -102,8 +102,6 @@ src/a.rs:3 gamma, third [moved from 1]"), "{text}");
 
     let req = PutReq { area: "core".into(), project: "app".into(), drop: vec!["src/a.rs gamma".into()], ..Default::default() };
     assert_eq!(map::put(&v, req, &root).unwrap().dropped, 1);
-    let req = PutReq { area: "core".into(), project: "app".into(), lines: vec!["src/missing.rs:3 nope".into()], ..Default::default() };
-    assert!(map::put(&v, req, &root).is_err());
     let req = PutReq { area: "core".into(), project: "app".into(), lines: vec!["not a map line".into()], ..Default::default() };
     assert!(map::put(&v, req, &root).is_err());
     assert_eq!(get(&v, &root, "core").lines().count(), 3);
@@ -253,4 +251,56 @@ fn a_put_of_a_moved_line_makes_it_fresh_again() {
     let text = get(&v, &root, "overlay");
     assert!(text.contains("\nsrc/a.ts:3 setOverlay, turns it on\n"), "{text}");
     assert!(text.lines().next().unwrap().ends_with("3 lines, 1 fresh, 2 moved"), "{text}");
+}
+
+#[test]
+fn put_warns_about_each_line_that_misses_the_checkout_and_still_saves() {
+    let rows: Vec<String> = (1..=60).map(|i| if i == 57 { "export function setStressOverlay() { markWindow(); }".into() } else { format!("// row {i}") }).collect();
+    let (_vd, v, _rd, root) = setup(&[("src/view/overlay.ts", &rows.join("\n")), ("src/a.rs", "fn alpha() {}\nfn beta() {}\n")]);
+    let r = put(
+        &v,
+        &root,
+        "stress overlay",
+        &[
+            "src/view/overlay.ts:42 setStressOverlay, turns the overlay on",
+            "src/view/overlay.ts:56 markWindow, within the window",
+            "src/view/overlay.ts:99 elsewhere, past the end",
+            "src/view/overlay.ts:3 nowhereSymbol, not in the file",
+            "src/a.rs:1 alpha, fine",
+            "src/a.rs:2-9 beta, range past the end",
+            "src/gone.rs:3 nope, no such file",
+            "src/a.rs ranging, no line number",
+        ],
+    );
+    assert_eq!(r.added, 8, "{}", r.text());
+    let text = r.text();
+    let warned: Vec<&str> = text.lines().skip(1).collect();
+    assert_eq!(
+        warned,
+        [
+            "src/view/overlay.ts:42 setStressOverlay is at line 57",
+            "src/view/overlay.ts:99 is past the end, the file ends at line 60",
+            "src/view/overlay.ts:3 nowhereSymbol is not in the file",
+            "src/a.rs:2-9 is past the end, the file ends at line 2",
+            "src/gone.rs:3 file not found",
+        ],
+        "{text}"
+    );
+    assert!(get(&v, &root, "stress overlay").contains("src/gone.rs:3 nope"), "the line is saved anyway");
+    let clean = put(&v, &root, "stress overlay", &["src/view/overlay.ts:57 setStressOverlay, turns the overlay on"]);
+    assert_eq!(clean.text().lines().count(), 1, "{}", clean.text());
+}
+
+#[test]
+fn the_map_tool_reply_carries_the_warnings() {
+    let (vd, v, _rd, root) = setup(&[("src/a.rs", "fn alpha() {}\nfn beta() {}\n")]);
+    let srv = Server { vault_root: v.root.clone(), cwd: root.clone() };
+    let _keep = vd;
+    let args: Map<String, Value> = json!({"action": "put", "area": "core", "project": "app", "lines": "src/a.rs:40 alpha, first\nsrc/a.rs:2 beta, ok"}).as_object().unwrap().clone();
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "map", "arguments": args}});
+    let mut out = Vec::new();
+    srv.serve(std::io::Cursor::new(format!("{msg}\n")), &mut out).unwrap();
+    let reply: Value = serde_json::from_slice(&out).unwrap();
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.ends_with("\nsrc/a.rs:40 is past the end, the file ends at line 2"), "{text}");
 }
