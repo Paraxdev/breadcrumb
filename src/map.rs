@@ -499,8 +499,8 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
     m.note.mark_verified();
     crate::session::stamp_write(&mut m.note);
     m.note.updated = now();
-    let mut touched: Vec<PathBuf> = v.ensure_kind_file(MAP)?.into_iter().collect();
-    touched.extend(crate::ops::ensure_project(v, &project)?);
+    let mut touched: Vec<PathBuf> = crate::ops::ensure_project(v, &project)?.into_iter().collect();
+    touched.extend(v.ensure_kind_file(MAP)?);
     touched.push(v.write_note(&mut m.note)?);
     v.commit(&touched, &crate::ops::commit_msg(if created { "map add" } else { "map put" }, &m.note))?;
     r.map = m;

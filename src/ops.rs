@@ -106,6 +106,21 @@ pub fn digest_project(v: &Vault, project: Option<&str>, global: bool, cwd: &Path
     target_project(v, project, global, cwd)
 }
 
+/// The project a `claim` or `release` of `track:<name>` looks in, `project` only matters for a track.
+pub fn track_project(v: &Vault, target: &str, project: Option<&str>, global: bool, cwd: &Path) -> Result<Option<String>> {
+    let p = project.map(str::trim).map(str::to_ascii_lowercase);
+    Ok(match p.as_deref() {
+        _ if global => None,
+        Some("global") => None,
+        Some("all") | None => v.detect_project(cwd),
+        Some(slug) if target.trim().starts_with("track:") && v.load_project(slug)?.is_none() => {
+            let known: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
+            bail!("unknown project '{slug}', known projects: {}", if known.is_empty() { "(none)".into() } else { known.join(", ") });
+        }
+        Some(slug) => Some(slug.to_string()),
+    })
+}
+
 pub(crate) fn unknown_project_error(v: &Vault, slug: &str) -> anyhow::Error {
     let known: Vec<String> = v.load_projects().into_iter().map(|p| p.slug).collect();
     anyhow::anyhow!(
@@ -452,14 +467,14 @@ pub(crate) fn add_held(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)>
             }
         }
     }
-    let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
+    let mut touched: Vec<PathBuf> = match &project {
+        Some(p) => ensure_project(v, p)?.into_iter().collect(),
+        None => vec![],
+    };
+    touched.extend(v.ensure_kind_file(&note.kind)?);
     if note.kind == crate::judge::JUDGMENT {
         touched.extend(crate::judge::upgrade_kind_file(v)?);
     }
-    if let Some(p) = &project
-        && let Some(created) = ensure_project(v, p)? {
-            touched.push(created);
-        }
     touched.extend(crate::lifecycle::unpin_superseded(v, &note, all)?);
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("add", &note))?;

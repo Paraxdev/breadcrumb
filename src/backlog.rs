@@ -1192,6 +1192,9 @@ pub fn review_items(v: &Vault, scope: &Scope) -> Result<Vec<ReviewItem>> {
 /// `agents` says whether agents review the items of a project (None for global ones).
 pub fn review_text(items: &[ReviewItem], scope_label: &str, agents: impl Fn(Option<&str>) -> bool) -> String {
     if items.is_empty() {
+        if scope_label == "all projects" {
+            return "nothing in review in any project\n".to_string();
+        }
         return format!("nothing in review in {scope_label}, --all shows every project\n");
     }
     let by_agent: Vec<bool> = items.iter().map(|it| agents(it.project.as_deref())).collect();
@@ -1551,6 +1554,9 @@ pub fn unmet_numbered(n: &Note) -> Vec<(usize, String)> {
 pub fn promote(v: &Vault, id: &str, to: &str, by: Option<&str>) -> Result<Note> {
     let to = to.trim().to_ascii_lowercase();
     if !["feature", "epic", "task", "bug"].contains(&to.as_str()) {
+        if STATES.contains(&to.as_str()) {
+            bail!("{to} is a state, not a kind, promote takes feature, epic, task or bug and puts an idea in backlog, `breadcrumb move {id} {to}` sets the state");
+        }
         bail!("promote target must be feature, epic, task or bug");
     }
     let _g = v.lock()?;

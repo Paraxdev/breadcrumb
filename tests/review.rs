@@ -230,6 +230,10 @@ fn review_numbers_steps_by_the_positions_check_takes() {
     let (_, out, _) = crumb(&v, &["--json", "review", "--all"]);
     let j: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(j["items"][0]["step_positions"], json!([2, 3]));
+    let app = App::new(&v.root, 0);
+    assert_eq!(app.handle(&req("GET", "/api/review", "127.0.0.1", None)).body_json()["items"][0]["step_positions"], json!([2, 3]));
+    let page = String::from_utf8_lossy(&app.handle(&req("GET", "/review", "127.0.0.1", None)).body).to_string();
+    assert!(page.contains("h(\"li\", { value: String((it.step_positions || [])[i] || i + 1)"), "the Review page numbers a step as check takes it");
     let (_, out, _) = crumb(&v, &["check", &a.id, "3"]);
     assert_eq!(out, format!("{}: ticked step 3, still open: 2. Press it\n", a.id), "check names steps by the same positions");
     assert_eq!(backlog::unmet_acceptance(&v.get(&a.id).unwrap()), ["Press it"], "the number review showed is the one check ticks");

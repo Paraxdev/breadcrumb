@@ -153,6 +153,9 @@ fn tree_progress_promote_and_context() {
     let idea = backlog::capture_idea(&v, "Sync over LAN", None, Some("app".into()), vec![], false).unwrap();
     assert_eq!(backlog::state(&idea), "idea");
     ops::link(&v, &idea.id, &f1.id, Some("relates"), false).unwrap();
+    let e = backlog::promote(&v, &idea.id, "Backlog", None).unwrap_err().to_string();
+    assert_eq!(e, format!("backlog is a state, not a kind, promote takes feature, epic, task or bug and puts an idea in backlog, `breadcrumb move {} backlog` sets the state", idea.id));
+    assert!(backlog::promote(&v, &idea.id, "story", None).unwrap_err().to_string().starts_with("promote target must be"));
     let p = backlog::promote(&v, &idea.id, "feature", Some("me")).unwrap();
     assert_eq!(p.id, idea.id);
     assert_eq!(p.kind, "feature");

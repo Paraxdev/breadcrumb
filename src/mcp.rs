@@ -408,7 +408,7 @@ impl Server {
             }
             "claim" => {
                 let id = req_s(a, "id")?;
-                if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, self.current(&v, a).as_deref(), s(a, "by").as_deref(), b(a, "release"), b(a, "force"))? {
+                if let Some(h) = crate::lifecycle::claim_handoff(&v, &id, ops::track_project(&v, &id, s(a, "project").as_deref(), b(a, "global"), &self.cwd_of(a))?.as_deref(), s(a, "by").as_deref(), b(a, "release"), b(a, "force"))? {
                     return Ok(crate::lifecycle::take_text(&h, b(a, "release")));
                 }
                 let by = backlog::session_name(s(a, "by").as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.into());
@@ -782,7 +782,7 @@ pub fn tool_defs() -> Vec<Value> {
             "by": st(),
         })), &["id", "state"])),
         tool("next", "Top free queued item, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
-        tool("claim", "Claim an item, a handoff or track:name, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": bl()})), &["id"])),
+        tool("claim", "Claim an item, a handoff or track:name, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": {"type": "boolean", "description": "even if another holds it"}})), &["id"])),
         tool("question", "Ask the user about an item (locks it), or act on an answer.", obj(json!({
             "action": {"type": "string", "enum": ["ask", "list", "answer", "ack", "withdraw"]},
             "id": {"type": "string", "description": "item id, abc123.1 to answer"},
