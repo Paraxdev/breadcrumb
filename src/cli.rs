@@ -1468,6 +1468,10 @@ pub fn run(cli: Cli) -> Result<i32> {
                 o.entry("inbound").or_insert(format::inbound_json(&n, &all));
             }
             let merged = crate::merge::notice(&n, &all);
+            let drift = if body { None } else { crate::drift::get_line(&v, &n, &cwd) };
+            if let (Json::Object(o), Some(d)) = (&mut data, &drift) {
+                o.insert("paths_changed".into(), json!(d));
+            }
             let text = if body {
                 if let Some(m) = merged.as_ref().filter(|_| !out.json) {
                     eprintln!("{m}");
@@ -1484,7 +1488,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 let written = crate::session::written_line(&n).map(|w| format!("\n{w}\n")).unwrap_or_default();
                 let note = if full { format::note_full(shown) } else { format::note_reading(shown) };
                 let lead = merged.map(|m| format!("{m}\n\n")).unwrap_or_default();
-                format!("{lead}{note}{written}{}{}{notice}", format::inbound_text(&n, &all), if notice.is_empty() { "" } else { "\n" })
+                let drift = drift.map(|d| format!("\n{d}\n")).unwrap_or_default();
+                format!("{lead}{note}{written}{}{}{notice}{drift}", format::inbound_text(&n, &all), if notice.is_empty() { "" } else { "\n" })
             };
             out.emit(text, data);
         }
@@ -1719,7 +1724,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let v = open()?;
             let min = severity.as_deref().map(crate::doctor::parse_severity).transpose()?;
             let sc = crate::doctor::scope_of(&v, scope.project.as_deref(), scope.global, scope.all, &cwd)?;
-            let run = crate::doctor::run(&v, &sc, crate::importer::default_claude_dir().as_deref());
+            let run = crate::doctor::run_at(&v, &sc, crate::importer::default_claude_dir().as_deref(), &cwd);
             let errors = run.errors();
             out.emit(run.text(min, "`--all`"), json!({"notes": run.checked, "scope": sc.label(), "errors": errors, "problems": run.shown(min)}));
             return Ok(if errors > 0 { 1 } else { 0 });

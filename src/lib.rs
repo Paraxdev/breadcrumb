@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod digest;
 pub mod doctor;
+pub mod drift;
 pub mod export;
 pub mod fix;
 pub mod format;

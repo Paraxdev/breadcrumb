@@ -558,10 +558,11 @@ fn kind_rank(kind: &str) -> Option<usize> {
     ["gotcha", "decision", "feedback"].iter().position(|k| *k == kind)
 }
 
-fn note_text(n: &Note) -> String {
+fn note_text(n: &Note, mark: &str) -> String {
     let body: Vec<&str> = n.body.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
     let body = one_line(&body.join(" "));
-    let s = if body.is_empty() { format!("{} {} {}", n.kind, n.id, n.title) } else { format!("{} {} {}: {body}", n.kind, n.id, n.title) };
+    let mark = if mark.is_empty() { String::new() } else { format!(" {mark}") };
+    let s = if body.is_empty() { format!("{} {} {}{mark}", n.kind, n.id, n.title) } else { format!("{} {} {}{mark}: {body}", n.kind, n.id, n.title) };
     truncate_chars(&s, NOTE_MAX)
 }
 
@@ -637,10 +638,12 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
         }
     }
     let notes_section = chosen.len();
+    let mut found: HashMap<String, Note> = HashMap::new();
     for (o, (rank, _, _, id)) in hits.iter().enumerate() {
         let Ok(n) = v.get(id) else { continue };
         let class = [2, 4, 6][*rank];
-        items.push(Item { class, rank: o, section: notes_section, order: o, text: note_text(&n), of: n.id.clone(), is_note: true });
+        items.push(Item { class, rank: o, section: notes_section, order: o, text: note_text(&n, ""), of: n.id.clone(), is_note: true });
+        found.insert(n.id.clone(), n);
     }
 
     let shown_targets = targets.iter().map(|t| one_line(t)).collect::<Vec<_>>().join(", ");
@@ -650,7 +653,7 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
     }
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by_key(|i| (items[*i].class, items[*i].rank, items[*i].section, items[*i].order));
-    let select = |limit: usize| -> Vec<bool> {
+    let select = |items: &[Item], limit: usize| -> Vec<bool> {
         let mut used = head.len() + 1;
         let mut keep = vec![false; items.len()];
         for i in &order {
@@ -662,9 +665,23 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
         }
         keep
     };
-    let mut keep = select(budget.saturating_sub(NOTES_HEAD));
-    if keep.contains(&false) {
-        keep = select(budget.saturating_sub(NOTES_HEAD + CUT_RESERVE));
+    let fit = |items: &[Item]| {
+        let keep = select(items, budget.saturating_sub(NOTES_HEAD));
+        if keep.contains(&false) { select(items, budget.saturating_sub(NOTES_HEAD + CUT_RESERVE)) } else { keep }
+    };
+    let mut keep = fit(&items);
+    // Only notes that made the cut cost a git call, then the marks count against the budget too.
+    let mut marked = false;
+    for (it, _) in items.iter_mut().zip(&keep).filter(|(it, k)| it.is_note && **k) {
+        if let (Some(dir), Some(n)) = (repo, found.get(&it.of))
+            && let Some(d) = crate::drift::check(dir, n, crate::digest::GIT_LIMIT)
+        {
+            it.text = note_text(n, &d.mark());
+            marked = true;
+        }
+    }
+    if marked {
+        keep = fit(&items);
     }
     let mut out = head;
     out.push('\n');

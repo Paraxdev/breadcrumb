@@ -148,6 +148,15 @@ fn missing_line(missing: &[String], roots: &[PathBuf], cache: &mut HashMap<PathB
     format!("mentions {n} path{} missing from {from}: {shown}{more}", if n == 1 { "" } else { "s" })
 }
 
+/// `run` plus, for a project scope, the notes whose `paths` changed in the checkout picked for `cwd`.
+pub fn run_at(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>, cwd: &std::path::Path) -> Run {
+    let mut r = run(v, scope, claude_dir);
+    if let Scope::Project { slug, .. } = scope {
+        r.problems.extend(crate::drift::doctor_problems(v, slug, cwd, crate::drift::DOCTOR_BUDGET));
+    }
+    r
+}
+
 /// Vault level checks always run. Checks that need every note (links, ids, slugs, field refs) read all of them and report only for notes in `scope`.
 pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Run {
     let mut out = vec![];
