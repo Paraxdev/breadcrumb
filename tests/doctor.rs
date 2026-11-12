@@ -155,3 +155,24 @@ fn doctor_fix_still_covers_the_whole_vault() {
     assert!(o.status.success() && out.contains("dry run"), "{out}");
     assert!(out.matches("a/x.rs").count() >= 2, "alpha's and beta's note are both planned: {out}");
 }
+
+#[test]
+fn doctor_reports_settings_overrides_that_do_not_hold_and_a_scope_slug() {
+    let (_d, v) = common::vault();
+    for slug in ["app", "web", "all"] {
+        v.write_project(&breadcrumb::project::Project::new(slug, None)).unwrap();
+    }
+    std::fs::write(v.root.join("projects/app/settings.toml"), "stale_days = -3\nreview_by = \"robot\"\ntypo_key = 1\ndefault_kind = \"gone\"\n").unwrap();
+    std::fs::write(v.root.join("projects/web/settings.toml"), "stale_days = [").unwrap();
+    let ps = breadcrumb::doctor::check_with(&v, None);
+    let at = |path: &str| ps.iter().filter(|p| p.path == path).map(|p| format!("{}: {}", p.severity, p.message)).collect::<Vec<_>>();
+    let app = at("projects/app/settings.toml");
+    assert!(app.contains(&"warning: stale_days = -3 is ignored, stale_days takes a whole number of 0 or more".to_string()), "{app:?}");
+    assert!(app.contains(&"warning: review_by = \"robot\" is ignored, review_by is one of user, agent".to_string()), "{app:?}");
+    assert!(app.contains(&"warning: typo_key = 1 is ignored, typo_key is not a setting".to_string()), "{app:?}");
+    assert!(app.contains(&"error: default_kind = \"gone\" names no kind, so add without a kind fails in app".to_string()), "{app:?}");
+    let web = at("projects/web/settings.toml");
+    assert!(web.len() == 1 && web[0].starts_with("error: not valid TOML (") && web[0].ends_with("), none of its overrides hold, fix it or delete it"), "{web:?}");
+    let all = at("projects/all/project.toml");
+    assert!(all.len() == 1 && all[0].contains("project slug 'all' names a scope, so -p all never reaches its notes"), "{all:?}");
+}

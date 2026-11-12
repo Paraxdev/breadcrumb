@@ -14,6 +14,9 @@ pub struct Project {
     pub remotes: Vec<String>,
     #[serde(default = "crate::util::now")]
     pub created: DateTime<Utc>,
+    /// Keys this binary does not know, kept so a newer or hand edited project.toml survives a write.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 impl Project {
@@ -25,6 +28,7 @@ impl Project {
             paths: vec![],
             remotes: vec![],
             created: crate::util::now(),
+            extra: toml::Table::new(),
         }
     }
 

@@ -81,11 +81,14 @@ pub struct Config {
     /// How many notes the PreToolUse file hook names for a file, 0 silences it.
     #[serde(default = "default_file_notes")]
     pub file_notes: u64,
+    /// Keys this binary does not know, kept so a newer binary's settings survive a write by this one.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes() }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes(), extra: toml::Table::new() }
     }
 }
 

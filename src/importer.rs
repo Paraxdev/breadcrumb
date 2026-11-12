@@ -148,6 +148,8 @@ pub struct ImportReport {
     pub dry_run: bool,
     pub items: Vec<ImportItem>,
     pub projects_created: Vec<String>,
+    /// Directories left unbound as `(path, project holding it, project the import wanted it for)`.
+    pub paths_held: Vec<(String, String, String)>,
 }
 
 impl ImportReport {
@@ -194,6 +196,10 @@ impl ImportReport {
         if !self.projects_created.is_empty() {
             let _ = writeln!(s, "new projects: {}", self.projects_created.join(", "));
         }
+        for (p, holder, slug) in &self.paths_held {
+            let quoted = if p.contains(' ') { format!("\"{p}\"") } else { p.clone() };
+            let _ = writeln!(s, "{p} stays bound to project {holder}, not {slug}, `breadcrumb project link {slug} --path {quoted} --move` moves it");
+        }
         s
     }
 
@@ -213,7 +219,8 @@ impl ImportReport {
                 })
             })
             .collect();
-        serde_json::json!({"dry_run": self.dry_run, "counts": counts, "items": items, "projects_created": self.projects_created})
+        let held: Vec<serde_json::Value> = self.paths_held.iter().map(|(p, h, s)| serde_json::json!({"path": p, "held_by": h, "project": s})).collect();
+        serde_json::json!({"dry_run": self.dry_run, "counts": counts, "items": items, "projects_created": self.projects_created, "paths_held": held})
     }
 }
 
@@ -312,10 +319,7 @@ impl<'a> Importer<'a> {
                 })
         };
         let mut anc = root.parent();
-        while let Some(existing) = self.known_projects.get(&new_slug) {
-            if related(existing) {
-                break;
-            }
+        while crate::ops::RESERVED_SLUGS.contains(&new_slug.as_str()) || self.known_projects.get(&new_slug).is_some_and(|e| !related(e)) {
             let Some(a) = anc else { break };
             let an = a.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             new_slug = slugify(&format!("{an}-{new_slug}"), 60);
@@ -325,6 +329,22 @@ impl<'a> Importer<'a> {
     }
 
     fn ensure_project(&mut self, slug: &str, name: &str, path: Option<&Path>) -> Result<()> {
+        if !self.known_projects.contains_key(slug) {
+            crate::ops::check_new_slug(slug)?;
+        }
+        let mut path = path.map(path_str);
+        let holder = path.as_ref().and_then(|ps| {
+            let n = project::normalize_path(ps);
+            self.known_projects.values().find(|q| q.slug != slug && q.paths.iter().any(|x| project::normalize_path(x) == n)).map(|q| q.slug.clone())
+        });
+        if let Some(h) = holder
+            && let Some(ps) = path.take()
+        {
+            let held = (ps, h, slug.to_string());
+            if !self.report.paths_held.contains(&held) {
+                self.report.paths_held.push(held);
+            }
+        }
         let mut changed = false;
         let p = self.known_projects.entry(slug.to_string()).or_insert_with(|| {
             changed = true;
@@ -332,7 +352,7 @@ impl<'a> Importer<'a> {
             Project::new(slug, Some(name))
         });
         if let Some(path) = path {
-            changed |= p.add_path(&path_str(path));
+            changed |= p.add_path(&path);
         }
         if changed && !self.dry_run {
             let f = self.v.write_project(p)?;
@@ -534,6 +554,12 @@ pub fn import_claude(v: &Vault, opts: &ClaudeOpts) -> Result<ImportReport> {
         bail!("claude directory {} does not exist", cdir.display());
     }
     let home = dirs::home_dir();
+    for (_, s) in &opts.project_map {
+        let slug = slugify(s, 60);
+        if s != "global" && crate::ops::RESERVED_SLUGS.contains(&slug.as_str()) {
+            crate::ops::check_new_slug(&slug)?;
+        }
+    }
     let _g = v.lock()?;
     let mut imp = Importer::new(v, opts.dry_run);
     let mut mems: Vec<(String, String)> = vec![];

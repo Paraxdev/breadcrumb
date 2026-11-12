@@ -235,3 +235,53 @@ fn mcp_project_config_lists_reads_sets_and_drops() {
     let log = common::git(&v.root, &["log", "--format=%s"]);
     assert!(log.contains("breadcrumb: config review_by = agent in app\n") && log.contains("breadcrumb: config stale_days = 45\n"), "{log}");
 }
+
+#[test]
+fn listings_mark_overrides_that_do_not_hold_and_a_broken_file_names_its_fix() {
+    let (d, v, app) = setup();
+    std::fs::write(v.root.join("projects/app/settings.toml"), "review_by = \"agent\"\nstale_days = \"soon\"\njudge_project = \"x\"\nfuture_key = 3\n").unwrap();
+    let (_, out, _) = crumb_in(&v, &app, &["config"], "");
+    assert!(
+        out.ends_with("Project app (detected here) overrides review_by = agent and ignores future_key = 3 (future_key is not a setting), judge_project = x (judge_project is vault only), stale_days = soon (stale_days takes a whole number of 0 or more), `breadcrumb config --project app` lists its settings\n"),
+        "{out}"
+    );
+    let (_, out, _) = crumb_in(&v, d.path(), &["config", "--project", "app"], "");
+    assert!(out.contains("  stale_days = 60 (project value soon ignored, stale_days takes a whole number of 0 or more)\n"), "{out}");
+    assert!(out.contains("  review_by = agent (project, default user)\n"), "{out}");
+    let (_, out, _) = crumb_in(&v, d.path(), &["config", "--project", "app", "--json"], "");
+    assert!(out.contains("\"ignored\": \"soon ignored, stale_days takes a whole number of 0 or more\""), "{out}");
+
+    std::fs::write(v.root.join("projects/app/settings.toml"), "not toml [").unwrap();
+    let (_, out, _) = crumb_in(&v, &app, &["config"], "");
+    assert!(out.contains("Project app (detected here) overrides nothing, ") && out.contains("settings.toml is not valid TOML"), "{out}");
+    let (ok, _, err) = crumb_in(&v, d.path(), &["config", "set", "review_by", "agent", "-p", "app"], "");
+    assert!(!ok && err.contains("projects/app/settings.toml is not valid TOML (") && err.contains("fix it or delete it to drop the project's overrides"), "{err}");
+}
+
+#[test]
+fn default_kind_takes_only_a_kind_the_vault_has() {
+    let (d, mut v, _) = setup();
+    let e = config::set(&mut v, "default_kind", "nokind").unwrap_err().to_string();
+    assert!(e.starts_with("default_kind takes a kind the vault has, 'nokind' is none, kinds: ") && e.contains("gotcha"), "{e}");
+    let (ok, _, err) = crumb_in(&v, d.path(), &["config", "set", "default_kind", "nokind", "-p", "app"], "");
+    assert!(!ok && err.contains("default_kind takes a kind the vault has"), "{err}");
+    assert!(!v.root.join("projects/app/settings.toml").exists());
+
+    std::fs::write(v.root.join("projects/app/settings.toml"), "default_kind = \"gone\"\n").unwrap();
+    let e = ops::add(&v, AddReq { title: "x".into(), project: Some("app".into()), ..Default::default() }).unwrap_err().to_string();
+    assert!(e.starts_with("the note has no kind and project app's default_kind setting names 'gone', which is no kind") && e.contains("`breadcrumb config set default_kind <kind> --project app`"), "{e}");
+    let c = v.root.join("breadcrumb.toml");
+    std::fs::write(&c, std::fs::read_to_string(&c).unwrap().replace("default_kind = \"note\"", "default_kind = \"gone\"")).unwrap();
+    let v = Vault::open(&v.root).unwrap();
+    let e = ops::add(&v, AddReq { title: "x".into(), project: Some("web".into()), ..Default::default() }).unwrap_err().to_string();
+    assert!(e.starts_with("the note has no kind and the default_kind setting names 'gone'") && e.contains("`breadcrumb config set default_kind <kind>`."), "{e}");
+    let e = ops::add(&v, AddReq { title: "x".into(), kind: Some("gone".into()), ..Default::default() }).unwrap_err().to_string();
+    assert!(e.starts_with("unknown kind 'gone'"), "a kind given by the caller keeps its own error: {e}");
+}
+
+#[test]
+fn mcp_refusal_of_a_vault_only_key_says_to_drop_slug() {
+    let (d, v, _) = setup();
+    let (out, err) = mcp(&v, d.path(), json!({"slug": "app", "key": "judge_project", "value": "x"}));
+    assert!(err && out.contains("judge_project is vault only, a project cannot override it, call the same action without slug to set it for every project") && !out.contains("breadcrumb config"), "{out}");
+}

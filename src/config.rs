@@ -44,6 +44,9 @@ pub struct Setting {
     /// Where the value comes from: default, vault or project.
     pub source: String,
     pub overridable: bool,
+    /// The project's override when it does not hold, with why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignored: Option<String>,
 }
 
 fn table(c: &Config) -> Result<toml::Table> {
@@ -76,24 +79,61 @@ pub fn overrides(v: &Vault, slug: &str) -> Result<toml::Table> {
     if !p.exists() {
         return Ok(toml::Table::new());
     }
-    crate::util::read_text(&p)?.parse::<toml::Table>().with_context(|| format!("parsing {}", p.display()))
+    crate::util::read_text(&p)?
+        .parse::<toml::Table>()
+        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({}), fix it or delete it to drop the project's overrides", crate::util::path_str(&p), crate::util::one_line(e.message())))
+}
+
+/// Why `apply` skips the override `k = val` on top of the settings `t`, None when it holds.
+fn skip_reason(t: &toml::Table, k: &str, val: &toml::Value) -> Option<String> {
+    let Some(d) = SETTINGS.iter().find(|d| d.key == k) else { return Some(format!("{k} is not a setting")) };
+    if !d.project {
+        return Some(format!("{k} is vault only"));
+    }
+    if !d.words.is_empty() && !val.as_str().is_some_and(|s| d.words.contains(&s)) {
+        return Some(format!("{k} is one of {}", d.words.join(", ")));
+    }
+    let mut next = t.clone();
+    next.insert(k.to_string(), val.clone());
+    if next.try_into::<Config>().is_ok() {
+        return None;
+    }
+    Some(match t.get(k) {
+        Some(toml::Value::Integer(_)) => format!("{k} takes a whole number of 0 or more"),
+        Some(toml::Value::Boolean(_)) => format!("{k} takes true or false"),
+        _ => format!("{k} takes text"),
+    })
 }
 
 /// `base` with the overrides that name an overridable setting and hold a valid value, a bad one is skipped.
 fn apply(base: &Config, over: &toml::Table) -> Config {
     let Ok(mut t) = table(base) else { return base.clone() };
     for (k, val) in over {
-        let Some(d) = SETTINGS.iter().find(|d| d.key == k && d.project) else { continue };
-        if !d.words.is_empty() && !val.as_str().is_some_and(|s| d.words.contains(&s)) {
-            continue;
-        }
-        let mut next = t.clone();
-        next.insert(k.clone(), val.clone());
-        if next.clone().try_into::<Config>().is_ok() {
-            t = next;
+        if skip_reason(&t, k, val).is_none() {
+            t.insert(k.clone(), val.clone());
         }
     }
     t.try_into().unwrap_or_else(|_| base.clone())
+}
+
+/// What is wrong with a project's settings.toml, as `(key, problem)`, the key empty when the file does not parse.
+pub fn override_problems(v: &Vault, slug: &str) -> Vec<(String, String)> {
+    let p = settings_path(v, slug);
+    let over = match crate::util::read_text(&p).map(|t| t.parse::<toml::Table>()) {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return vec![(String::new(), format!("not valid TOML ({}), none of its overrides hold, fix it or delete it", crate::util::one_line(e.message())))],
+        Err(_) => return vec![],
+    };
+    let Ok(base) = table(&v.config) else { return vec![] };
+    let mut out = vec![];
+    for (k, val) in &over {
+        if let Some(why) = skip_reason(&base, k, val) {
+            out.push((k.clone(), format!("{k} = {val} is ignored, {why}")));
+        } else if k == "default_kind" && let Some(name) = val.as_str() && v.require_kind(name).is_err() {
+            out.push((k.clone(), format!("default_kind = {val} names no kind, so add without a kind fails in {slug}")));
+        }
+    }
+    out
 }
 
 /// The settings that hold in `project`: its override, else the vault's value, else the default. A hook must not fail
@@ -167,7 +207,8 @@ pub fn settings(v: &Vault, project: Option<&str>) -> Result<Vec<Setting>> {
             } else {
                 "default"
             };
-            Setting { key: d.key.to_string(), value, default, about: d.about.to_string(), source: source.into(), overridable: d.project }
+            let ignored = over.get(d.key).and_then(|x| skip_reason(&vault, d.key, x).map(|why| format!("{} ignored, {why}", shown(Some(x)))));
+            Setting { key: d.key.to_string(), value, default, about: d.about.to_string(), source: source.into(), overridable: d.project, ignored }
         })
         .collect())
 }
@@ -186,6 +227,9 @@ fn marks(it: &Setting, project: bool) -> String {
     }
     if !it.overridable {
         m.push("vault only".into());
+    }
+    if let Some(i) = &it.ignored {
+        m.push(format!("project value {i}"));
     }
     if m.is_empty() { String::new() } else { format!(" ({})", m.join(", ")) }
 }
@@ -211,13 +255,20 @@ pub fn text(list: &[Setting], project: Option<&str>, mcp: bool) -> String {
 
 /// The closing line of a vault listing when the detected project overrides anything.
 pub fn overrides_line(v: &Vault, slug: &str, mcp: bool) -> Option<String> {
-    let over = overrides(v, slug).ok()?;
-    let set: Vec<String> = SETTINGS.iter().filter(|d| d.project).filter_map(|d| over.get(d.key).map(|x| format!("{} = {}", d.key, shown(Some(x))))).collect();
-    if set.is_empty() {
+    let over = match overrides(v, slug) {
+        Ok(o) => o,
+        Err(e) => return Some(format!("Project {slug} (detected here) overrides nothing, {e}\n")),
+    };
+    let base = table(&v.config).ok()?;
+    let set: Vec<String> = SETTINGS.iter().filter_map(|d| over.get(d.key).filter(|x| skip_reason(&base, d.key, x).is_none()).map(|x| format!("{} = {}", d.key, shown(Some(x))))).collect();
+    let ignored: Vec<String> = over.iter().filter_map(|(k, x)| skip_reason(&base, k, x).map(|why| format!("{k} = {} ({why})", shown(Some(x))))).collect();
+    if set.is_empty() && ignored.is_empty() {
         return None;
     }
     let how = if mcp { format!("slug {slug} lists its settings") } else { format!("`breadcrumb config --project {slug}` lists its settings") };
-    Some(format!("Project {slug} (detected here) overrides {}, {how}\n", set.join(", ")))
+    let holds = if set.is_empty() { "nothing".to_string() } else { set.join(", ") };
+    let skips = if ignored.is_empty() { String::new() } else { format!(" and ignores {}", ignored.join(", ")) };
+    Some(format!("Project {slug} (detected here) overrides {holds}{skips}, {how}\n"))
 }
 
 fn parse_like(old: Option<&toml::Value>, key: &str, raw: &str) -> Result<Option<toml::Value>> {
@@ -235,7 +286,8 @@ fn parse_like(old: Option<&toml::Value>, key: &str, raw: &str) -> Result<Option<
 }
 
 /// Checks `raw` for `key` and returns the vault config with it in place, or None for an empty remote.
-fn checked(base: &Config, key: &str, raw: &str) -> Result<(Config, Option<toml::Value>)> {
+fn checked(v: &Vault, key: &str, raw: &str) -> Result<(Config, Option<toml::Value>)> {
+    let base = &v.config;
     let d = def(key)?;
     if !d.words.is_empty() && !d.words.contains(&raw.trim()) {
         bail!("{} is one of {}, got '{}'", d.key, d.words.join(", "), raw.trim());
@@ -256,6 +308,10 @@ fn checked(base: &Config, key: &str, raw: &str) -> Result<(Config, Option<toml::
     if d.key == "judge_project" {
         crate::ops::check_slug(&cfg.judge_project)?;
     }
+    if d.key == "default_kind" && v.require_kind(&cfg.default_kind).is_err() {
+        let names: Vec<String> = v.load_kinds().into_iter().map(|k| k.name).collect();
+        bail!("default_kind takes a kind the vault has, '{}' is none, kinds: {}", cfg.default_kind, names.join(", "));
+    }
     Ok((cfg, val))
 }
 
@@ -271,7 +327,7 @@ fn save_vault(v: &mut Vault, cfg: Config, msg: &str) -> Result<()> {
 pub fn set(v: &mut Vault, key: &str, raw: &str) -> Result<String> {
     let key = def(key)?.key;
     let before = shown(table(&v.config)?.get(key));
-    let (cfg, _) = checked(&v.config, key, raw)?;
+    let (cfg, _) = checked(v, key, raw)?;
     save_vault(v, cfg, &format!("breadcrumb: config {key} = {}", raw.trim()))?;
     Ok(before)
 }
@@ -308,7 +364,7 @@ pub fn set_in(v: &Vault, slug: &str, key: &str, raw: &str) -> Result<(String, St
     if raw.trim().is_empty() {
         return unset(&mut v.clone(), key, Some(&slug));
     }
-    let val = checked(&v.config, key, raw)?.1.with_context(|| format!("{key} cannot be empty"))?;
+    let val = checked(v, key, raw)?.1.with_context(|| format!("{key} cannot be empty"))?;
     let _g = v.lock()?;
     let mut over = overrides(v, &slug)?;
     let before = get(&apply(&v.config, &over), key);
@@ -371,6 +427,10 @@ pub fn mcp(v: &Vault, slug: Option<&str>, key: Option<&str>, value: Option<&str>
         }
         (Some(k), Some(raw)) => match slug {
             Some(p) => {
+                let d = def(k)?;
+                if !d.project {
+                    bail!("{} is vault only, a project cannot override it, call the same action without slug to set it for every project", d.key);
+                }
                 let (before, after) = set_in(v, p, k, raw)?;
                 Ok(change_text(def(k)?.key, Some(p), &before, &after))
             }

@@ -895,7 +895,7 @@ pub enum ProjectCmd {
         /// Directory to bind (default: current directory)
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Take the directory from the project that holds it
+        /// Take the directory and its git remotes from the project that holds them
         #[arg(long = "move")]
         r#move: bool,
     },
