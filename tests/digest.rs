@@ -174,7 +174,7 @@ fn a_project_digest_counts_unscoped_globals_and_a_scope_brings_a_global_note_in(
     assert!(ctx.contains(&format!("{} feedback (inferred) No AI attribution in commits (global)\n", rule.id)), "{ctx}");
     assert!(ctx.contains(&format!("Prefs (unpinned): {} Mods ship with a changelog, +1 global\n", mod_pref.id)), "{ctx}");
     assert!(ctx.contains(&format!("{} gotcha Forge mappings need a rerun after an update (global)\n", forge.id)), "{ctx}");
-    assert!(ctx.ends_with("Global: 2 more notes, breadcrumb list -p global\n"), "{ctx}");
+    assert!(ctx.ends_with("Global: 2 more notes, breadcrumb list --global\n"), "{ctx}");
     assert!(ctx.contains("Recent:\n"), "own notes and the scoped one all fit, so no count: {ctx}");
 
     let small = ops::context(&v, Some("create-laser"), 3).unwrap();

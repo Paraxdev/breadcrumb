@@ -336,8 +336,8 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         .partition(|n| !foreign(n));
     let global_more = match global_rest.len() {
         0 => String::new(),
-        1 => "Global: 1 more note, breadcrumb list -p global\n".to_string(),
-        k => format!("Global: {k} more notes, breadcrumb list -p global\n"),
+        1 => "Global: 1 more note, breadcrumb list --global\n".to_string(),
+        k => format!("Global: {k} more notes, breadcrumb list --global\n"),
     };
     // Prefs used to sit in Recent, so they still count against it and the digest does not grow.
     let want = opts.recent.saturating_sub(prefs.len().min(opts.recent / 2));
