@@ -186,3 +186,44 @@ fn retire_index_is_opt_in_backs_up_and_doctor_warns_before() {
     let baks = fs::read_dir(index.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("breadcrumb")).count();
     assert_eq!(baks, 1);
 }
+
+fn claude_with_memory_for(root: &Path, dir: &Path) -> PathBuf {
+    let c = root.join("dot-claude-held");
+    let canon = breadcrumb::util::path_str(&fs::canonicalize(dir).unwrap());
+    write(&c.join("projects").join(encode_claude_path(&canon)).join("memory").join("fact.md"), "---\nname: A fact\ntype: project\n---\nbody\n");
+    c
+}
+
+#[test]
+fn a_project_map_never_binds_a_directory_another_project_holds() {
+    let (d, v) = common::vault();
+    let dir = d.path().join("apps").join("webapp");
+    fs::create_dir_all(&dir).unwrap();
+    breadcrumb::ops::project_link(&v, "first", &dir, None).unwrap();
+    let claude = claude_with_memory_for(d.path(), &dir);
+    let dname = fs::read_dir(claude.join("projects")).unwrap().next().unwrap().unwrap().file_name().to_string_lossy().to_string();
+    let map = importer::parse_project_map(&[format!("{dname}=second")]).unwrap();
+    let rep = importer::import_claude(&v, &ClaudeOpts { claude_dir: claude.clone(), dry_run: false, project_map: map }).unwrap();
+    assert_eq!(rep.counts()["second"].created, 1);
+    assert!(v.load_project("second").unwrap().unwrap().paths.is_empty(), "the path stays with its holder");
+    assert_eq!(v.load_project("first").unwrap().unwrap().paths.len(), 1);
+    assert_eq!(rep.paths_held.len(), 1);
+    let table = rep.table();
+    assert!(table.contains("stays bound to project first, not second, `breadcrumb project link second --path ") && table.contains("--move` moves it"), "{table}");
+    assert_eq!(rep.to_json()["paths_held"][0]["held_by"], "first");
+
+    let map = importer::parse_project_map(&[format!("{dname}=all")]).unwrap();
+    let e = importer::import_claude(&v, &ClaudeOpts { claude_dir: claude, dry_run: false, project_map: map }).unwrap_err().to_string();
+    assert!(e.contains("'all' cannot be a project slug"), "{e}");
+}
+
+#[test]
+fn a_directory_named_all_imports_under_another_slug() {
+    let (d, v) = common::vault();
+    let dir = d.path().join("stuff").join("all");
+    fs::create_dir_all(&dir).unwrap();
+    let claude = claude_with_memory_for(d.path(), &dir);
+    let rep = importer::import_claude(&v, &ClaudeOpts { claude_dir: claude, dry_run: false, project_map: vec![] }).unwrap();
+    assert_eq!(rep.projects_created, vec!["stuff-all"]);
+    assert!(v.load_project("all").unwrap().is_none());
+}

@@ -726,7 +726,16 @@ fn open_browser(url: &str) {
     }
 }
 
-/// Reads the saved token or makes a new 256 bit one, stored outside the vault so git never tracks it.
+/// Where `serve --remote` keeps its token: the app data directory, or with BREADCRUMB_HOME set the vault's
+/// gitignored `.local`, so a test or second vault never reads or replaces the user's token.
+pub fn token_dir(vault_root: &Path, breadcrumb_home: Option<&str>) -> Result<std::path::PathBuf> {
+    if breadcrumb_home.is_some_and(|h| !h.trim().is_empty()) {
+        return Ok(vault_root.join(".local"));
+    }
+    Ok(dirs::data_local_dir().context("cannot find the app data directory")?.join("breadcrumb"))
+}
+
+/// Reads the saved token or makes a new 256 bit one, stored where git never tracks it.
 pub fn load_or_create_token(dir: &Path) -> Result<String> {
     let file = dir.join("serve-token");
     if let Ok(t) = std::fs::read_to_string(&file) {
@@ -753,7 +762,7 @@ pub fn run(vault_root: &Path, port: u16, open: bool, remote_hosts: Option<Vec<St
     eprintln!("breadcrumb web UI on {url} (vault {}), Ctrl+C to stop", crate::util::path_str(vault_root));
     let app = match remote_hosts {
         Some(hosts) => {
-            let dir = dirs::data_local_dir().context("cannot find the app data directory")?.join("breadcrumb");
+            let dir = token_dir(vault_root, std::env::var("BREADCRUMB_HOME").ok().as_deref())?;
             let token = load_or_create_token(&dir)?;
             eprintln!("remote mode on, token file {}", dir.join("serve-token").display());
             eprintln!("log in once per device: https://{}/login?token={token}", hosts[0]);

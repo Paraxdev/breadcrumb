@@ -130,3 +130,81 @@ fn the_project_tool_refusal_names_the_cli_move() {
     let e = srv.call_tool("project", &args).err().unwrap().to_string();
     assert!(e.contains("project first") && e.contains("breadcrumb project link second --path") && e.contains("--move"), "{e}");
 }
+
+#[test]
+fn project_add_refuses_a_path_another_project_holds_and_a_nested_one_stays_legal() {
+    let (d, v) = common::vault();
+    let dir = d.path().join("shared");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let ds = dir.to_str().unwrap().to_string();
+    ops::project_add(&v, "first", None, None, std::slice::from_ref(&ds)).unwrap();
+    let upper = if cfg!(windows) { ds.to_uppercase().replace('\\', "/") } else { ds.clone() };
+    let e = ops::project_add(&v, "second", None, None, &[upper]).unwrap_err().to_string();
+    assert!(e.contains("is already a path of project first") && e.contains("breadcrumb project link second --path") && e.contains("--move"), "{e}");
+    assert!(v.load_project("second").unwrap().is_none(), "a refusal creates nothing");
+    ops::project_add(&v, "second", None, None, &[dir.join("sub").to_str().unwrap().to_string()]).unwrap();
+    assert_eq!(v.detect_project(&dir.join("sub")).as_deref(), Some("second"));
+}
+
+#[test]
+fn a_git_remote_another_project_holds_is_refused_and_move_takes_it() {
+    let (d, v) = common::vault();
+    let repo = d.path().join("app");
+    let clone = d.path().join("app-copy");
+    for r in [&repo, &clone] {
+        std::fs::create_dir_all(r).unwrap();
+        common::git(r, &["init", "-q"]);
+        common::git(r, &["remote", "add", "origin", "git@github.com:me/app.git"]);
+    }
+    ops::project_link(&v, "first", &repo, None).unwrap();
+    let e = ops::project_link(&v, "second", &clone, None).unwrap_err().to_string();
+    assert!(e.contains("is a clone of github.com/me/app, which project first already holds") && e.contains("project link second --path") && e.contains("--move"), "{e}");
+    assert!(v.load_project("second").unwrap().is_none());
+    ops::project_link(&v, "first", &clone, None).unwrap();
+
+    let r = ops::project_link_with(&v, "second", &clone, None, true).unwrap();
+    assert_eq!(r.moved_from, vec!["first"]);
+    let first = v.load_project("first").unwrap().unwrap();
+    assert!(first.remotes.is_empty() && first.paths.len() == 1, "{first:?}");
+    assert_eq!(v.load_project("second").unwrap().unwrap().remotes, vec!["github.com/me/app"]);
+}
+
+#[test]
+fn global_and_all_cannot_be_project_slugs() {
+    let (d, v) = common::vault();
+    let dir = d.path().join("x");
+    std::fs::create_dir_all(&dir).unwrap();
+    for slug in ["global", "all"] {
+        let e = ops::project_add(&v, slug, None, None, &[]).unwrap_err().to_string();
+        assert!(e.contains(&format!("'{slug}' cannot be a project slug, it names a scope")), "{e}");
+        assert!(ops::project_link(&v, slug, &dir, None).is_err());
+        assert!(v.load_project(slug).unwrap().is_none());
+    }
+    let e = ops::add(&v, ops::AddReq { title: "t".into(), kind: Some("note".into()), project: Some("all".into()), ..Default::default() }).unwrap_err().to_string();
+    assert!(e.contains("'all' cannot be a project slug"), "{e}");
+    assert!(v.load_project("all").unwrap().is_none() && v.load_notes().is_empty());
+    let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let args = serde_json::json!({"action": "link", "slug": "all", "path": dir.to_str().unwrap()}).as_object().unwrap().clone();
+    assert!(srv.call_tool("project", &args).err().unwrap().to_string().contains("cannot be a project slug"));
+}
+
+#[test]
+fn unknown_project_and_config_keys_survive_a_write() {
+    let (d, v) = common::vault();
+    let dir = d.path().join("x");
+    std::fs::create_dir_all(&dir).unwrap();
+    ops::project_add(&v, "app", None, None, &[]).unwrap();
+    let f = v.project_dir("app").join("project.toml");
+    let text = std::fs::read_to_string(&f).unwrap();
+    std::fs::write(&f, format!("future_key = \"kept\"\n{text}\n[future_table]\nx = 1\n")).unwrap();
+    ops::project_link(&v, "app", &dir, Some("described")).unwrap();
+    let after = std::fs::read_to_string(&f).unwrap();
+    assert!(after.contains("future_key = \"kept\"") && after.contains("[future_table]") && after.contains("described"), "{after}");
+
+    let c = v.root.join("breadcrumb.toml");
+    std::fs::write(&c, format!("{}\nnewer_setting = 3\n", std::fs::read_to_string(&c).unwrap())).unwrap();
+    let mut v = breadcrumb::vault::Vault::open(&v.root).unwrap();
+    breadcrumb::config::set(&mut v, "stale_days", "40").unwrap();
+    let after = std::fs::read_to_string(&c).unwrap();
+    assert!(after.contains("newer_setting = 3") && after.contains("stale_days = 40"), "{after}");
+}

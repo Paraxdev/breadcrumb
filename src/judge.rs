@@ -92,7 +92,9 @@ pub fn current_kind(mut k: KindDef) -> KindDef {
 
 /// Rewrites a judgment kind file that predates unrated. Call while holding the lock.
 pub fn upgrade_kind_file(v: &Vault) -> Result<Option<PathBuf>> {
-    let Some(k) = v.load_kind(JUDGMENT)? else { return Ok(None) };
+    let p = v.kinds_dir().join(format!("{JUDGMENT}.toml"));
+    // Read raw, since load_kind already hands out the upgraded kind.
+    let Ok(k) = std::fs::read_to_string(&p).map_err(anyhow::Error::from).and_then(|s| KindDef::from_toml(&s)) else { return Ok(None) };
     let fresh = k.field("verdict").is_some_and(|f| f.values.iter().any(|x| x == UNRATED) && f.default.as_ref().and_then(|d| d.as_str()) == Some(UNRATED));
     if fresh {
         return Ok(None);
@@ -104,6 +106,8 @@ pub fn upgrade_kind_file(v: &Vault) -> Result<Option<PathBuf>> {
 pub struct Judged {
     pub note: Note,
     pub counted: bool,
+    /// A slug the add repaired, for the reply.
+    pub slug_note: Option<String>,
 }
 
 impl Judged {
@@ -114,13 +118,29 @@ impl Judged {
             crate::format::ack("judged", &self.note)
         }
     }
+
+    /// The note with `counted`, and the count once counted, so a JSON reader tells the two apart.
+    pub fn json(&self) -> serde_json::Value {
+        let mut j = self.note.to_json();
+        if let Some(o) = j.as_object_mut() {
+            o.insert("counted".into(), self.counted.into());
+            if self.counted {
+                o.insert(COUNT_KEY.into(), count(&self.note).into());
+            }
+        }
+        j
+    }
 }
 
 /// The line an unrated judgment's reply ends with, `mcp` names the tool's way to set it instead of the CLI's.
 pub fn unrated_hint(n: &Note, mcp: bool) -> Option<String> {
     (n.kind == JUDGMENT && verdict(n) == UNRATED).then(|| {
-        let how = if mcp { format!("update {} with fields {{\"verdict\": \"...\"}}", n.id) } else { format!("`breadcrumb update {} --field verdict=...`", n.id) };
-        format!("no verdict, saved as unrated, set one of {} with {how}", VERDICTS.join(", "))
+        if mcp {
+            let vs: Vec<String> = VERDICTS.iter().map(|x| format!("\"{x}\"")).collect();
+            format!("no verdict, saved as unrated, to rate it call update with id {} and fields {{\"verdict\": V}}, V one of {}", n.id, vs.join(", "))
+        } else {
+            format!("no verdict, saved as unrated, set one of {} with `breadcrumb update {} --field verdict=...`", VERDICTS.join(", "), n.id)
+        }
     })
 }
 
@@ -138,7 +158,8 @@ fn given(req: &AddReq, key: &str) -> Option<String> {
 }
 
 /// Every add of kind judgment comes here: the verdict is checked, a missing one saved as unrated, and a helped one
-/// whose about already has a helped judgment is counted on that note instead of filed again.
+/// whose about already has a helped judgment is counted on that note instead of filed again. The lookup and the
+/// write share one hold of the lock, so two helped judgments at once never both file a note.
 pub fn add(v: &Vault, mut req: AddReq) -> Result<Judged> {
     let verdict = match given(&req, "verdict") {
         Some(g) => check_verdict(&g)?,
@@ -150,19 +171,20 @@ pub fn add(v: &Vault, mut req: AddReq) -> Result<Judged> {
     if home(v).is_some() {
         req.require_existing_project = false;
     }
+    let _g = v.lock()?;
     if verdict == HELPED {
         let about = given(&req, "about").unwrap_or_else(|| "general".into());
         let project = home(v).or_else(|| req.project.clone());
         let text = req.body.as_deref().map(str::trim).filter(|b| !b.is_empty()).unwrap_or(&req.title).to_string();
-        if let Some(note) = count_on(v, project.as_deref(), &about, &text)? {
-            return Ok(Judged { note, counted: true });
+        if let Some(note) = count_held(v, project.as_deref(), &about, &text)? {
+            return Ok(Judged { note, counted: true, slug_note: None });
         }
     }
-    Ok(Judged { note: ops::add(v, req)?, counted: false })
+    let (note, slug_note) = ops::add_held(v, req)?;
+    Ok(Judged { note, counted: false, slug_note })
 }
 
-fn count_on(v: &Vault, project: Option<&str>, about_: &str, text: &str) -> Result<Option<Note>> {
-    let _g = v.lock()?;
+fn count_held(v: &Vault, project: Option<&str>, about_: &str, text: &str) -> Result<Option<Note>> {
     let mut same: Vec<Note> = v
         .load_notes()
         .into_iter()
@@ -347,6 +369,9 @@ fn quoted(n: &Note) -> String {
 fn file_under(v: &Vault, js: &[Note], item: &str, name: bool) -> Result<(Note, Vec<Note>)> {
     let _g = v.lock()?;
     let mut item = v.get(item)?;
+    if item.kind == JUDGMENT {
+        bail!("{} is a judgment, and judgments are filed under a work item or note, name one with --to, or `breadcrumb judge --file <id>...` makes a new item", item.handle());
+    }
     crate::merge::refuse_merged(&item)?;
     let mut touched = vec![];
     let mut linked = vec![];

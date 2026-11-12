@@ -114,11 +114,36 @@ pub(crate) fn unknown_project_error(v: &Vault, slug: &str) -> anyhow::Error {
     )
 }
 
+/// Slugs a project cannot take, `-p global` and `-p all` name scopes and would never reach it.
+pub const RESERVED_SLUGS: [&str; 2] = ["global", "all"];
+
+/// `check_slug` for a project being created or bound.
+pub(crate) fn check_new_slug(slug: &str) -> Result<String> {
+    let s = check_slug(slug)?;
+    if RESERVED_SLUGS.contains(&s.as_str()) {
+        bail!("'{s}' cannot be a project slug, it names a scope (global notes, all projects), pick another slug");
+    }
+    Ok(s)
+}
+
 pub(crate) fn ensure_project(v: &Vault, slug: &str) -> Result<Option<PathBuf>> {
     if v.load_project(slug)?.is_some() {
         return Ok(None);
     }
+    check_new_slug(slug)?;
     Ok(Some(v.write_project(&Project::new(slug, None))?))
+}
+
+/// Refuses `path` when another project holds it exactly, naming the holder and the way to take it over.
+fn path_holder(v: &Vault, slug: &str, path: &str) -> Result<()> {
+    let n = crate::project::normalize_path(path);
+    let mut names: Vec<String> = v.load_projects().into_iter().filter(|q| q.slug != slug && q.paths.iter().any(|x| crate::project::normalize_path(x) == n)).map(|q| q.slug).collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    names.sort();
+    let quoted = if path.contains(' ') { format!("\"{path}\"") } else { path.to_string() };
+    bail!("{path} is already a path of project {}, `breadcrumb project link {slug} --path {quoted} --move` takes it over", names.join(", "))
 }
 
 #[derive(Clone, Debug)]
@@ -324,12 +349,35 @@ pub fn add(v: &Vault, req: AddReq) -> Result<Note> {
 
 /// The note and what `add` changed on the way that the caller should say, a repaired slug.
 pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
+    let _g = v.lock()?;
+    add_held(v, req)
+}
+
+fn default_kind_error(v: &Vault, project: Option<&str>, name: &str) -> anyhow::Error {
+    let from = project.filter(|p| is_valid_slug(p) && crate::config::overrides(v, p).is_ok_and(|o| o.contains_key("default_kind")));
+    let (whose, flag) = match from {
+        Some(p) => (format!("project {p}'s default_kind setting"), format!(" --project {p}")),
+        None => ("the default_kind setting".to_string(), String::new()),
+    };
+    let names: Vec<String> = v.load_kinds().into_iter().map(|k| k.name).collect();
+    anyhow::anyhow!(
+        "the note has no kind and {whose} names '{name}', which is no kind, give a kind or fix the setting with `breadcrumb config set default_kind <kind>{flag}`. Kinds: {}",
+        names.join(", ")
+    )
+}
+
+/// `add_noted` for a caller that already holds the vault lock.
+pub(crate) fn add_held(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
     let title = crate::util::one_line(&req.title);
     if title.is_empty() {
         bail!("title is required");
     }
-    let kind_name = req.kind.clone().filter(|k| !k.trim().is_empty()).unwrap_or_else(|| crate::config::effective(v, req.project.as_deref()).default_kind);
-    let k = v.require_kind(kind_name.trim())?;
+    let given = req.kind.clone().filter(|k| !k.trim().is_empty());
+    let kind_name = given.clone().unwrap_or_else(|| crate::config::effective(v, req.project.as_deref()).default_kind);
+    let k = match v.require_kind(kind_name.trim()) {
+        Err(_) if given.is_none() => return Err(default_kind_error(v, req.project.as_deref(), &kind_name)),
+        r => r?,
+    };
     let mut req = req;
     if k.name == crate::judge::JUDGMENT && crate::judge::home(v).is_some() && req.project != crate::judge::home(v) {
         if let Some(p) = req.project.take().filter(|_| !req.fields.iter().any(|(f, _)| f == "seen_in")) {
@@ -337,7 +385,6 @@ pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
         }
         req.project = crate::judge::home(v);
     }
-    let k = if k.name == crate::judge::JUDGMENT { crate::judge::current_kind(k) } else { k };
     let project = match &req.project {
         Some(p) => Some(check_slug(p)?),
         None => None,
@@ -348,7 +395,11 @@ pub fn add_noted(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)> {
     {
         return Err(unknown_project_error(v, p));
     }
-    let _g = v.lock()?;
+    if let Some(p) = &project
+        && v.load_project(p)?.is_none()
+    {
+        check_new_slug(p)?;
+    }
     let mut note = Note::new(&v.fresh_id(), &title, &k.name);
     note.project = project.clone();
     for t in &req.tags {
@@ -666,6 +717,9 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         note.updated = now();
     }
     let mut touched: Vec<PathBuf> = v.ensure_kind_file(&note.kind)?.into_iter().collect();
+    if note.kind == crate::judge::JUDGMENT {
+        touched.extend(crate::judge::upgrade_kind_file(v)?);
+    }
     if !req.supersedes.is_empty() {
         touched.extend(crate::lifecycle::unpin_superseded(v, &note, v.load_notes())?);
     }
@@ -1058,7 +1112,7 @@ pub fn prefs_line(prefs: &[&Note], global: usize) -> String {
 }
 
 pub fn project_add(v: &Vault, slug: &str, name: Option<&str>, description: Option<&str>, paths: &[String]) -> Result<(Project, bool)> {
-    let slug = check_slug(slug)?;
+    let slug = check_new_slug(slug)?;
     let _g = v.lock()?;
     let (mut p, created) = match v.load_project(&slug)? {
         Some(p) => (p, false),
@@ -1071,7 +1125,9 @@ pub fn project_add(v: &Vault, slug: &str, name: Option<&str>, description: Optio
         p.description = d.to_string();
     }
     for path in paths {
-        p.add_path(&path_str(&crate::util::absolutize(Path::new(path))));
+        let ps = path_str(&crate::util::absolutize(Path::new(path)));
+        path_holder(v, &slug, &ps)?;
+        p.add_path(&ps);
     }
     let f = v.write_project(&p)?;
     v.commit(&[f], &format!("breadcrumb: project {} {}", if created { "add" } else { "update" }, slug))?;
@@ -1097,7 +1153,7 @@ pub fn project_link(v: &Vault, slug: &str, path: &Path, description: Option<&str
 /// With `take`, the directory leaves the projects that hold it and goes to this one in the same commit.
 /// Only the exact directory counts, a project bound to a parent or child keeps it, detection picks the longest path.
 pub fn project_link_with(v: &Vault, slug: &str, path: &Path, description: Option<&str>, take: bool) -> Result<LinkReport> {
-    let slug = check_slug(slug)?;
+    let slug = check_new_slug(slug)?;
     // Detection compares against the cwd as the shell reports it, so store that form. The canonical form
     // (junction or symlink target, UNC share behind a mapped drive) is recorded too when it differs.
     let abs = crate::util::absolutize(path);
@@ -1114,19 +1170,26 @@ pub fn project_link_with(v: &Vault, slug: &str, path: &Path, description: Option
     let ps = path_str(&abs);
     let dirs: Vec<String> = std::iter::once(crate::project::normalize_path(&ps)).chain(canonical.iter().map(|c| crate::project::normalize_path(c))).collect();
     let holds = |q: &Project| q.paths.iter().any(|x| dirs.contains(&crate::project::normalize_path(x)));
-    let mut others: Vec<Project> = v.load_projects().into_iter().filter(|q| q.slug != slug && holds(q)).collect();
+    let repos: Vec<String> = remotes.iter().map(|r| crate::project::normalize_remote(r).to_ascii_lowercase()).filter(|r| !r.is_empty()).collect();
+    let has_repo = |x: &String| repos.contains(&crate::project::normalize_remote(x).to_ascii_lowercase());
+    let mut others: Vec<Project> = v.load_projects().into_iter().filter(|q| q.slug != slug && (holds(q) || q.remotes.iter().any(has_repo))).collect();
     others.sort_by(|a, b| a.slug.cmp(&b.slug));
     let mine = holds(&p);
-    if !take && !mine && !others.is_empty() {
-        let names: Vec<&str> = others.iter().map(|q| q.slug.as_str()).collect();
-        let quoted = if ps.contains(' ') { format!("\"{ps}\"") } else { ps.clone() };
-        bail!("{ps} is already a path of project {}, `breadcrumb project link {slug} --path {quoted} --move` takes it over", names.join(", "));
+    let quoted = if ps.contains(' ') { format!("\"{ps}\"") } else { ps.clone() };
+    let path_others: Vec<&str> = others.iter().filter(|q| holds(q)).map(|q| q.slug.as_str()).collect();
+    if !take && !mine && !path_others.is_empty() {
+        bail!("{ps} is already a path of project {}, `breadcrumb project link {slug} --path {quoted} --move` takes it over", path_others.join(", "));
+    }
+    if !take && let Some(q) = others.iter().find(|q| q.remotes.iter().any(has_repo)) {
+        let r = q.remotes.iter().find(|x| has_repo(x)).cloned().unwrap_or_default();
+        bail!("{ps} is a clone of {r}, which project {} already holds as its remote, `breadcrumb project link {slug} --path {quoted} --move` takes the repo over", q.slug);
     }
     let mut moved: Vec<PathBuf> = vec![];
     let mut moved_from = vec![];
     if take {
         for o in &mut others {
             o.paths.retain(|x| !dirs.contains(&crate::project::normalize_path(x)));
+            o.remotes.retain(|x| !has_repo(x));
             moved.push(v.write_project(o)?);
             moved_from.push(o.slug.clone());
         }

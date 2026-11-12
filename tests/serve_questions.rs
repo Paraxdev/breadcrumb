@@ -204,3 +204,16 @@ fn token_helpers() {
     std::fs::write(dir.join("serve-token"), "short").unwrap();
     assert_ne!(load_or_create_token(&dir).unwrap(), "short");
 }
+
+#[test]
+fn with_breadcrumb_home_set_the_token_lives_in_the_vault_local_state() {
+    let (_d, v) = common::vault();
+    let dir = breadcrumb::serve::token_dir(&v.root, Some(v.root.to_str().unwrap())).unwrap();
+    assert_eq!(dir, v.root.join(".local"));
+    let t = load_or_create_token(&dir).unwrap();
+    assert_eq!(std::fs::read_to_string(v.root.join(".local/serve-token")).unwrap(), t);
+    assert!(common::git(&v.root, &["status", "--porcelain"]).trim().is_empty(), "git ignores it");
+    let default = breadcrumb::serve::token_dir(&v.root, None).unwrap();
+    assert!(default.ends_with("breadcrumb") && !default.starts_with(&v.root), "{}", default.display());
+    assert_eq!(breadcrumb::serve::token_dir(&v.root, Some(" ")).unwrap(), default, "an empty BREADCRUMB_HOME is unset");
+}

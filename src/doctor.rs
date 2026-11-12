@@ -309,7 +309,32 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
             }
         }
     }
+    out.extend(project_files(v, &projects));
     Run { problems: out, checked, scope: scope.clone() }
+}
+
+/// A project whose slug names a scope, and settings.toml overrides that do not hold.
+fn project_files(v: &Vault, projects: &[crate::project::Project]) -> Vec<Problem> {
+    let mut out = vec![];
+    for p in projects {
+        let dir = v.project_dir(&p.slug);
+        if crate::ops::RESERVED_SLUGS.contains(&p.slug.as_str()) {
+            out.push(Problem {
+                path: v.rel(&dir.join("project.toml")),
+                id: None,
+                severity: "warning",
+                message: format!(
+                    "project slug '{0}' names a scope, so -p {0} never reaches its notes, only --all does: rename projects/{0} to a new slug, set slug in its project.toml and project in each of its notes to that slug, then commit",
+                    p.slug
+                ),
+            });
+        }
+        for (key, message) in crate::config::override_problems(v, &p.slug) {
+            let severity = if key.is_empty() || key == "default_kind" { "error" } else { "warning" };
+            out.push(Problem { path: v.rel(&dir.join(crate::config::SETTINGS_FILE)), id: None, severity, message });
+        }
+    }
+    out
 }
 
 impl Run {

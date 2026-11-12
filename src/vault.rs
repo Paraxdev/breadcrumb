@@ -106,11 +106,14 @@ pub struct Config {
     /// Past this age a live handoff that is not the newest leaves the digest unless pinned.
     #[serde(default = "default_handoff_digest_days")]
     pub handoff_digest_days: u64,
+    /// Keys this binary does not know, kept so a newer binary's settings survive a write by this one.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes(), digest_sections: default_digest_sections(), digest_budget: default_digest_budget(), digest_recent: None, handoff_digest_days: default_handoff_digest_days() }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes(), digest_sections: default_digest_sections(), digest_budget: default_digest_budget(), digest_recent: None, handoff_digest_days: default_handoff_digest_days(), extra: toml::Table::new() }
     }
 }
 
@@ -323,7 +326,7 @@ impl Vault {
                     continue;
                 }
                 match read_text(&p).and_then(|s| KindDef::from_toml(&s)) {
-                    Ok(k) if kind_file_matches(&p, &k) => kinds.push(k),
+                    Ok(k) if kind_file_matches(&p, &k) => kinds.push(current(k)),
                     Ok(k) => errors.push((p.clone(), kind_name_mismatch(&p, &k))),
                     Err(err) => errors.push((p, format!("{err:#}"))),
                 }
@@ -355,7 +358,7 @@ impl Vault {
         if !kind_file_matches(&p, &k) {
             bail!("{}", kind_name_mismatch(&p, &k));
         }
-        Ok(Some(k))
+        Ok(Some(current(k)))
     }
 
     /// Returns the kind or an error that tells an agent how to define it. A built-in kind newer than the vault
@@ -637,6 +640,11 @@ impl Vault {
         note.path = Some(path.clone());
         Ok(path)
     }
+}
+
+/// The judgment kind as this binary has it, so a vault's older file never stamps its old default or refuses unrated.
+fn current(k: KindDef) -> KindDef {
+    if k.name == crate::judge::JUDGMENT { crate::judge::current_kind(k) } else { k }
 }
 
 fn kind_file_matches(p: &Path, k: &KindDef) -> bool {
