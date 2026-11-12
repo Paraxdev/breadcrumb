@@ -235,3 +235,161 @@ fn mcp_project_config_lists_reads_sets_and_drops() {
     let log = common::git(&v.root, &["log", "--format=%s"]);
     assert!(log.contains("breadcrumb: config review_by = agent in app\n") && log.contains("breadcrumb: config stale_days = 45\n"), "{log}");
 }
+
+fn age(v: &Vault, id: &str, days: i64) {
+    let mut n = v.get(id).unwrap();
+    n.created = breadcrumb::util::now() - chrono::Duration::days(days);
+    v.write_note(&mut n).unwrap();
+}
+
+/// Every digest block in project `app`: a pin, two live handoffs (the older 3 days old), a pref, a machine fact, a todo,
+/// an answered question, an item waiting for an agent review and 20 recent notes, plus one global note.
+fn rich(v: &Vault, home: &Path) {
+    let p = Some("app");
+    let rule = common::add(v, "Tabs in the app code", "decision", p, &[]);
+    ops::update(v, &rule.id, ops::UpdateReq { pinned: Some(true), ..Default::default() }).unwrap();
+    common::add(v, "User likes terse output", "feedback", p, &[]);
+    common::add(v, "Recordings dir", "env", None, &[("location", "C:/rec")]);
+    common::add(v, "Fix the flaky test", "todo", p, &[]);
+    for i in 0..20 {
+        common::add(v, &format!("Fact {i} about the app"), "note", p, &[]);
+    }
+    common::add(v, "Global fact", "note", None, &[]);
+    let older = common::add(v, "Older state", "handoff", p, &[]);
+    age(v, &older.id, 3);
+    common::add(v, "Current state", "handoff", p, &[]);
+    let item = common::add(v, "Palette", "feature", p, &[]);
+    assert!(crumb_in(v, home, &["ask", &item.id, "Which palette?", "-o", "warm", "-o", "cool"], "").0);
+    assert!(crumb_in(v, home, &["answer", &format!("{}.1", item.id), "2"], "").0);
+    config::set_in(v, "app", "review_by", "agent").unwrap();
+    let r = common::add(v, "Review me", "feature", p, &[]);
+    backlog::move_item(v, &r.id, MoveReq { state: "review".into(), steps: vec!["Run it".into()], by: Some("builder".into()), ..Default::default() }).unwrap();
+}
+
+fn recent_rows(d: &str) -> usize {
+    d.lines().skip_while(|l| !l.starts_with("Recent")).skip(1).take_while(|l| !l.starts_with("Global:")).count()
+}
+
+fn at(d: &str, s: &str) -> usize {
+    d.find(s).unwrap_or_else(|| panic!("no {s:?} in {d}"))
+}
+
+#[test]
+fn the_digest_settings_default_to_the_digest_as_it_was() {
+    let (d, mut v, _) = setup();
+    rich(&v, d.path());
+    let before = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
+    let heads = ["Pinned", "Latest handoff", "Other live handoffs:", "Prefs (unpinned)", "Machine facts", "Todos:", "Backlog:", "answer arrived on", "Review: 1 waiting", "Recent (", "Global: 1 more note"];
+    let pos: Vec<usize> = heads.iter().map(|h| at(&before, h)).collect();
+    assert!(pos.windows(2).all(|w| w[0] < w[1]), "{before}");
+    assert_eq!(recent_rows(&before), 14, "15 less one for the pref: {before}");
+    assert!(!std::fs::read_to_string(v.root.join("breadcrumb.toml")).unwrap().contains("digest_sections"), "the default order is not written");
+
+    config::set(&mut v, "digest_sections", &breadcrumb::digest::SECTIONS.join(",")).unwrap();
+    config::set(&mut v, "digest_budget", "6000").unwrap();
+    config::set(&mut v, "handoff_digest_days", "7").unwrap();
+    assert_eq!(breadcrumb::digest::context(&v, Some("app"), 15).unwrap(), before);
+    let (_, out, _) = crumb_in(&v, d.path(), &["config"], "");
+    assert!(out.contains("  digest_sections = workflows,pins,handoff,handoffs,prefs,machine,landing,todos,backlog,recent\n") && out.contains("  digest_recent = unset\n"), "{out}");
+}
+
+#[test]
+fn digest_sections_leave_blocks_out_and_reorder_them_but_calls_to_act_stay() {
+    let (d, mut v, _) = setup();
+    rich(&v, d.path());
+    let (ok, out, err) = crumb_in(&v, d.path(), &["config", "set", "digest_sections", "recent, pins"], "");
+    assert!(ok && out.starts_with("digest_sections: workflows,pins,") && out.ends_with(" -> recent,pins\n"), "{out}{err}");
+    v = Vault::open(&v.root).unwrap();
+    let dg = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
+    for gone in ["Latest handoff", "Other live handoffs", "Prefs", "Machine facts", "Todos:", "Backlog:"] {
+        assert!(!dg.contains(gone), "{gone}: {dg}");
+    }
+    assert!(dg.starts_with("breadcrumb context: app\nRecent ("), "{dg}");
+    assert!(at(&dg, "Global: 1 more note") < at(&dg, "Pinned") && at(&dg, "Pinned") < at(&dg, "answer arrived on") && at(&dg, "answer arrived on") < at(&dg, "Review: 1 waiting"), "{dg}");
+    assert_eq!(recent_rows(dg.split("Pinned").next().unwrap()), 15, "no pref block, so no row goes to it: {dg}");
+
+    config::set(&mut v, "digest_sections", "todos").unwrap();
+    let dg = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
+    assert!(dg.starts_with("breadcrumb context: app\nTodos:\n"), "{dg}");
+    assert!(at(&dg, "Todos:") < at(&dg, "answer arrived on") && dg.contains("Review: 1 waiting") && !dg.contains("Recent") && !dg.contains("Global:"), "{dg}");
+}
+
+#[test]
+fn digest_recent_and_budget_shrink_the_digest_and_the_hook() {
+    let (d, v, app) = setup();
+    rich(&v, d.path());
+    let hook = || {
+        let (ok, out, err) = crumb_in(&v, &app, &["hook", "session-start"], &json!({"cwd": app}).to_string());
+        assert!(ok, "{err}");
+        serde_json::from_str::<Value>(&out).unwrap()["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string()
+    };
+    let context = |args: &[&str]| crumb_in(&v, d.path(), &[&["context", "-p", "app"], args].concat(), "").1;
+    let full = hook();
+    assert_eq!((recent_rows(&context(&[])), recent_rows(&full)), (14, 9), "15 from context, 10 at session start, less one for the pref");
+    let (out, err) = mcp(&v, d.path(), json!({"slug": "app", "key": "digest_recent", "value": 4}));
+    assert!(!err && out == "digest_recent in app: unset -> 4\n", "{out}");
+    assert_eq!((recent_rows(&context(&[])), recent_rows(&hook())), (3, 3), "4 less one for the pref");
+    assert_eq!(recent_rows(&context(&["-n", "8"])), 7, "a count the call names wins");
+
+    config::set_in(&v, "app", "digest_budget", "1000").unwrap();
+    config::set_in(&v, "app", "digest_recent", "").unwrap();
+    let small = context(&[]);
+    assert!(small.chars().count() <= 1000 && recent_rows(&small) < 14, "{small}");
+    let small = hook();
+    assert!(small.chars().count() <= 1000 && small.chars().count() < full.chars().count(), "{small}");
+}
+
+#[test]
+fn handoff_digest_days_is_the_window_for_other_handoffs_in_that_project_only() {
+    let (d, v, _) = setup();
+    rich(&v, d.path());
+    let older = common::add(&v, "Web older state", "handoff", Some("web"), &[]);
+    age(&v, &older.id, 3);
+    common::add(&v, "Web state", "handoff", Some("web"), &[]);
+    let others = |p: &str| breadcrumb::digest::context(&v, Some(p), 15).unwrap().contains("Other live handoffs:");
+    assert!(others("app") && others("web"));
+    let (ok, out, _) = crumb_in(&v, d.path(), &["config", "set", "handoff_digest_days", "2", "-p", "app"], "");
+    assert!(ok && out == "handoff_digest_days in app: 7 -> 2\n", "{out}");
+    assert!(!others("app") && others("web"));
+    assert!(breadcrumb::digest::context(&v, Some("app"), 15).unwrap().contains(": Current state"), "the newest leads however old");
+
+    config::set_in(&v, "web", "digest_sections", "recent").unwrap();
+    assert!(!breadcrumb::digest::context(&v, Some("web"), 15).unwrap().contains("Latest handoff"));
+    assert!(breadcrumb::digest::context(&v, Some("app"), 15).unwrap().contains("Latest handoff"));
+    let (_, out, _) = crumb_in(&v, d.path(), &["config", "-p", "web"], "");
+    assert!(out.contains("  digest_sections = recent (project, default workflows,pins,"), "{out}");
+}
+
+#[test]
+fn bad_digest_values_are_refused_on_set_and_skipped_from_a_file() {
+    let (d, mut v, _) = setup();
+    let refused = |args: &[&str]| {
+        let (ok, _, err) = crumb_in(&v, d.path(), &[&["config", "set"], args].concat(), "");
+        assert!(!ok, "{args:?}");
+        err.trim().trim_start_matches("error: ").to_string()
+    };
+    let names = "sections are: workflows, pins, handoff, handoffs, prefs, machine, landing, todos, backlog, recent";
+    assert_eq!(refused(&["digest_sections", "pins,news"]), format!("unknown digest section 'news', {names}"));
+    assert_eq!(refused(&["digest_sections", "pins,recent,pins", "-p", "app"]), format!("digest section 'pins' is listed twice, {names}"));
+    assert_eq!(refused(&["digest_sections", ","]), format!("digest_sections needs at least one section, {names}"));
+    assert_eq!(refused(&["digest_budget", "999"]), "digest_budget takes a whole number of 1000 or more, got 999");
+    assert_eq!(refused(&["digest_recent", "0", "-p", "app"]), "digest_recent takes a whole number of 1 or more, got 0, leave recent out of digest_sections to hide the list");
+    assert!(refused(&["handoff_digest_days", "soon"]).starts_with("handoff_digest_days takes a whole number of 0 or more, got 'soon'"));
+    assert!(!v.root.join("projects/app/settings.toml").exists(), "refusals write nothing");
+
+    rich(&v, d.path());
+    let before = breadcrumb::digest::context(&v, Some("app"), 15).unwrap();
+    std::fs::write(v.root.join("projects/app/settings.toml"), "review_by = \"agent\"\ndigest_sections = \"pins,bogus\"\ndigest_budget = 10\ndigest_recent = 0\nhandoff_digest_days = -1\nfile_notes = 1\n").unwrap();
+    let c = config::effective(&v, Some("app"));
+    assert_eq!((c.digest_sections.as_str(), c.digest_budget, c.digest_recent, c.handoff_digest_days, c.file_notes), (v.config.digest_sections.as_str(), 6000, None, 7, 1));
+    assert_eq!(breadcrumb::digest::context(&v, Some("app"), 15).unwrap(), before);
+
+    std::fs::write(v.root.join("projects/app/settings.toml"), "review_by = \"agent\"\n").unwrap();
+    let path = v.root.join("breadcrumb.toml");
+    let mut t: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    t.insert("digest_sections".into(), "nope,pins".into());
+    t.insert("digest_budget".into(), toml::Value::Integer(5));
+    std::fs::write(&path, toml::to_string(&t).unwrap()).unwrap();
+    v = Vault::open(&v.root).unwrap();
+    assert_eq!(breadcrumb::digest::context(&v, Some("app"), 15).unwrap(), before, "a broken vault value falls back to the default");
+}

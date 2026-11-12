@@ -7,14 +7,20 @@ use crate::lifecycle::{self, HANDOFF, Lapsed, SUPERSEDES};
 use crate::note::{Note, yaml_display, yaml_scalar_string};
 use crate::ops::{Filter, Scope, SortKey, filter_notes, is_pref, prefs_line, sort_notes};
 use crate::util::{one_line, truncate_chars};
-use crate::vault::Vault;
-use anyhow::Result;
+use crate::vault::{Config, Vault};
+use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-/// Chars the whole digest may take. The SessionStart hook injects it as is.
+/// Chars the whole digest may take, the default of digest_budget. The SessionStart hook injects it as is.
 pub const DIGEST_BUDGET: usize = 6000;
+/// The least digest_budget, the header and the latest handoff's HANDOFF_MIN need about this much.
+pub const BUDGET_MIN: usize = 1000;
+/// Recent rows of `context` when neither the call nor digest_recent names a number.
+pub const CONTEXT_RECENT: usize = 15;
+/// The blocks digest_sections names, in the order the digest shows them by default.
+pub const SECTIONS: [&str; 10] = ["workflows", "pins", "handoff", "handoffs", "prefs", "machine", "landing", "todos", "backlog", "recent"];
 pub const SUMMARY_KEY: &str = "summary";
 pub const SUMMARY_MAX: usize = 120;
 /// The live handoff gets what the other sections leave, within these bounds.
@@ -34,15 +40,48 @@ const GIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
 pub struct ContextOpts {
     pub recent: usize,
     pub kinds: bool,
-    pub budget: usize,
+    /// None takes digest_budget.
+    pub budget: Option<usize>,
     /// Where the session runs, it picks the project checkout commits are counted on. None is the process's cwd.
     pub cwd: Option<PathBuf>,
 }
 
 impl Default for ContextOpts {
     fn default() -> Self {
-        ContextOpts { recent: 15, kinds: false, budget: DIGEST_BUDGET, cwd: None }
+        ContextOpts { recent: CONTEXT_RECENT, kinds: false, budget: None, cwd: None }
     }
+}
+
+/// The sections `raw` names, in its order. Unknown and repeated names and an empty list are refused.
+pub fn parse_sections(raw: &str) -> Result<Vec<&'static str>> {
+    let names = SECTIONS.join(", ");
+    let mut out: Vec<&'static str> = vec![];
+    for w in raw.split([',', ' ']).map(str::trim).filter(|w| !w.is_empty()) {
+        let Some(s) = SECTIONS.iter().find(|s| s.eq_ignore_ascii_case(w)) else { bail!("unknown digest section '{w}', sections are: {names}") };
+        if out.contains(s) {
+            bail!("digest section '{s}' is listed twice, sections are: {names}");
+        }
+        out.push(s);
+    }
+    if out.is_empty() {
+        bail!("digest_sections needs at least one section, sections are: {names}");
+    }
+    Ok(out)
+}
+
+/// digest_sections as a list, the default order when a hand-edited value is broken.
+fn sections(c: &Config) -> Vec<&'static str> {
+    parse_sections(&c.digest_sections).unwrap_or_else(|_| SECTIONS.to_vec())
+}
+
+/// digest_budget, the default when a hand-edited value is below BUDGET_MIN.
+pub fn budget_of(c: &Config) -> usize {
+    usize::try_from(c.digest_budget).ok().filter(|&b| b >= BUDGET_MIN).unwrap_or(DIGEST_BUDGET)
+}
+
+/// Recent rows when the caller names none: digest_recent where `project` gets it, else `fallback`.
+pub fn recent_rows(v: &Vault, project: Option<&str>, fallback: usize) -> usize {
+    crate::config::effective(v, project).digest_recent.and_then(|n| usize::try_from(n).ok()).filter(|&n| n > 0).unwrap_or(fallback)
 }
 
 const ABBREVIATIONS: [&str; 7] = ["e.g", "i.e", "etc", "vs", "cf", "approx", "incl"];
@@ -201,8 +240,9 @@ fn handoff_section(h: &Note, commits: &str, stale_days: u64, max: usize) -> Stri
 }
 
 /// The live handoffs beside the latest that the digest names. Old ones leave unless pinned, or legacy notes would pile up.
-fn shown_others<'a>(others: &[&'a Note]) -> Vec<&'a Note> {
-    let cutoff = crate::util::now() - chrono::Duration::days(lifecycle::HANDOFF_DIGEST_DAYS);
+fn shown_others<'a>(others: &[&'a Note], days: u64) -> Vec<&'a Note> {
+    // A huge hand-edited value would overflow the date math.
+    let cutoff = crate::util::now() - chrono::Duration::days(days.min(36_500) as i64);
     others.iter().copied().filter(|n| n.pinned || n.created >= cutoff).collect()
 }
 
@@ -246,6 +286,25 @@ fn chars(s: &str) -> usize {
     s.chars().count()
 }
 
+/// The digest from its blocks in their default order, the ones named by `order` in that order. A block with no name is
+/// always shown, behind the nearest listed section before it, else right below the header.
+fn assemble(head: String, blocks: Vec<(Option<&'static str>, String)>, order: &[&str]) -> String {
+    let (mut top, mut texts, mut tails) = (String::new(), HashMap::new(), HashMap::<&str, String>::new());
+    let mut host: Option<&str> = None;
+    for (name, text) in blocks {
+        match (name, host) {
+            (Some(n), _) if order.contains(&n) => {
+                host = Some(n);
+                texts.insert(n, text);
+            }
+            (Some(_), _) => {}
+            (None, Some(h)) => tails.entry(h).or_default().push_str(&text),
+            (None, None) => top.push_str(&text),
+        }
+    }
+    order.iter().fold(head + &top, |out, n| out + &texts.remove(n).unwrap_or_default() + &tails.remove(n).unwrap_or_default())
+}
+
 /// Compact digest agents read at session start.
 pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String> {
     context_with(v, project, ContextOpts { recent: limit, ..Default::default() })
@@ -275,11 +334,12 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
             }
         }
     }
+    let mut workflows = String::new();
     if let Some(slug) = project {
         let wfs = crate::workflow::list(v, &Scope::Project { slug: slug.to_string(), with_global: false });
         if !wfs.is_empty() {
             let names: Vec<String> = wfs.iter().map(|w| w.summary()).collect();
-            writeln!(head, "Workflows: {}", names.join(", "))?;
+            writeln!(workflows, "Workflows: {}", names.join(", "))?;
         }
     }
     let scope = match project {
@@ -290,27 +350,28 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     let lapsed = Lapsed::of(&all);
     let mut notes: Vec<Note> = filter_notes(all.clone(), &scope, &Filter::default())?.into_iter().filter(|n| !lapsed.hides(n) && !crate::recall::scope_hides(n, project)).collect();
     sort_notes(&mut notes, SortKey::Updated);
-    if notes.is_empty() {
-        writeln!(head, "No notes yet.")?;
-    }
+    let no_notes = if notes.is_empty() { "No notes yet.\n" } else { "" };
     let machine = crate::util::machine_name();
     let env = notes.iter().filter(|n| n.kind == ENV && crate::ops::on_machine(n, &machine)).count();
     notes.retain(|n| n.kind != ENV);
     let days = v.config.stale_days;
-    let pins = pins_section(&notes, project, days, opts.budget / 2);
+    let order = sections(&v.config);
+    let listed = |s: &str| order.contains(&s);
+    let budget = opts.budget.unwrap_or_else(|| budget_of(&v.config));
+    let mut review = String::new();
+    let pins = pins_section(&notes, project, days, budget / 2);
     // An unpinned global note without a scope is about no project in particular, a project digest only counts it.
     let foreign = |n: &Note| project.is_some() && n.project.is_none() && !n.pinned && crate::recall::scope_of(n).is_empty();
     let (prefs, global_prefs): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| !n.pinned && is_pref(n)).partition(|n| !foreign(n));
-    let mut prefs_text = if prefs.is_empty() && global_prefs.is_empty() { String::new() } else { format!("{}\n", prefs_line(&prefs, global_prefs.len())) };
+    let prefs_text = if prefs.is_empty() && global_prefs.is_empty() { String::new() } else { format!("{}\n", prefs_line(&prefs, global_prefs.len())) };
+    let mut machine_text = String::new();
     if env > 0 {
-        writeln!(prefs_text, "Machine facts: {env} for {machine}, `breadcrumb env` or list kind env")?;
+        writeln!(machine_text, "Machine facts: {env} for {machine}, `breadcrumb env` or list kind env")?;
     }
     if let Some(l) = crate::lease::digest_line(&v.root) {
-        writeln!(prefs_text, "{l}")?;
+        writeln!(machine_text, "{l}")?;
     }
-    if let Some(l) = crate::land::digest_lines(v, project) {
-        prefs_text.push_str(&l);
-    }
+    let landing = crate::land::digest_lines(v, project).unwrap_or_default();
     let mut todos = String::new();
     for n in notes.iter().filter(|n| !n.pinned && is_open_todo(n)) {
         if todos.is_empty() {
@@ -324,14 +385,16 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         let (users, waiting): (Vec<&Note>, Vec<&Note>) = notes.iter().filter(|n| crate::backlog::is_item(n) && crate::backlog::state(n) == "review").partition(|n| crate::backlog::only_user_steps_open(n));
         let user = if users.is_empty() { String::new() } else { format!(", {} waiting for the user", users.len()) };
         if !waiting.is_empty() {
-            writeln!(backlog, "Review: {} waiting for an agent check{user} (review_by = agent), `breadcrumb review` lists the steps, check only what you did not build", waiting.len())?;
+            writeln!(review, "Review: {} waiting for an agent check{user} (review_by = agent), `breadcrumb review` lists the steps, check only what you did not build", waiting.len())?;
         } else if !users.is_empty() {
             writeln!(backlog, "Review: 0 waiting for an agent check{user} (review_by = agent), the user passes them on the Review page of `breadcrumb serve`")?;
         }
     }
+    let mut judge = String::new();
     for l in crate::judge::digest_lines(v, project, &all) {
-        writeln!(prefs_text, "{l}")?;
+        writeln!(judge, "{l}")?;
     }
+    let answered = if listed("backlog") { String::new() } else { crate::question::answered_lines(&notes.iter().filter(|n| crate::backlog::is_item(n)).collect::<Vec<_>>()) };
 
     let (rest, global_rest): (Vec<&Note>, Vec<&Note>) = notes
         .iter()
@@ -343,7 +406,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         k => format!("Global: {k} more notes, breadcrumb list --global\n"),
     };
     // Prefs used to sit in Recent, so they still count against it and the digest does not grow.
-    let want = opts.recent.saturating_sub(prefs.len().min(opts.recent / 2));
+    let want = if !listed("recent") { 0 } else if listed("prefs") { opts.recent.saturating_sub(prefs.len().min(opts.recent / 2)) } else { opts.recent };
     let recent_rows: Vec<String> = rest.iter().take(want).map(|n| format!("{}{}\n", row(n, project, false), crate::recall::stale_mark(n, days))).collect();
 
     // A handoff a newer one covers, or whose items all landed, has nothing left to resume, so the newest other one leads.
@@ -354,15 +417,17 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         live.insert(0, lead);
     }
     let lead_marked = live.first().is_some_and(|h| marks.contains_key(&h.id));
-    let shown = shown_others(if lead_marked { &live[..] } else { live.get(1..).unwrap_or_default() });
-    let counted: Vec<&Note> = live.first().filter(|_| !lead_marked).into_iter().copied().chain(shown.iter().take(OTHER_HANDOFFS_MAX).copied()).collect();
+    let shown = if listed("handoffs") { shown_others(if lead_marked { &live[..] } else { live.get(1..).unwrap_or_default() }, v.config.handoff_digest_days) } else { vec![] };
+    let lead = live.first().copied().filter(|_| !lead_marked && listed("handoff"));
+    let counted: Vec<&Note> = lead.into_iter().chain(shown.iter().take(OTHER_HANDOFFS_MAX).copied()).collect();
     let cwd = opts.cwd.clone().or_else(|| std::env::current_dir().ok());
     let counts = if counted.is_empty() { HashMap::new() } else { commits_since(proj.as_ref().and_then(|p| checkout(p, cwd.as_deref())), &counted) };
     let commits = |n: &Note| counts.get(&n.id).map(|&k| lifecycle::commits_since_text(k)).filter(|t| !t.is_empty()).map(|t| format!(", {t}")).unwrap_or_default();
     let others = other_handoffs(&shown, &commits, &|n: &Note| marks.get(&n.id).cloned());
-    let fixed = chars(&head) + chars(&pins) + chars(&others) + chars(&prefs_text) + chars(&todos) + chars(&backlog) + chars(&global_more);
-    let mut left = opts.budget.saturating_sub(fixed);
-    let handoff = match live.first().filter(|_| !lead_marked) {
+    let parts = [("workflows", &workflows), ("pins", &pins), ("handoffs", &others), ("prefs", &prefs_text), ("machine", &machine_text), ("landing", &landing), ("todos", &todos), ("backlog", &backlog), ("recent", &global_more)];
+    let fixed = chars(&head) + chars(no_notes) + chars(&judge) + chars(&answered) + chars(&review) + parts.iter().filter(|(n, _)| listed(n)).map(|(_, s)| chars(s)).sum::<usize>();
+    let mut left = budget.saturating_sub(fixed);
+    let handoff = match lead {
         Some(h) => {
             let reserve = RECENT_RESERVE.min(recent_rows.iter().map(|r| chars(r)).sum());
             handoff_section(h, &commits(h), days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX))
@@ -386,6 +451,21 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     };
     recent.push_str(&global_more);
     let kinds = if opts.kinds { format!("Kinds:\n{}", crate::format::kinds_compact(&v.load_kinds())) } else { String::new() };
-    let sections = [("pins", pins), ("handoff", handoff), ("handoffs", others), ("prefs", prefs_text), ("todos", todos), ("backlog", backlog), ("recent", recent), ("kinds", kinds)];
-    Ok(sections.into_iter().fold(head, |out, (_, s)| out + &s))
+    let blocks = vec![
+        (Some("workflows"), workflows),
+        (None, no_notes.to_string()),
+        (Some("pins"), pins),
+        (Some("handoff"), handoff),
+        (Some("handoffs"), others),
+        (Some("prefs"), prefs_text),
+        (Some("machine"), machine_text),
+        (Some("landing"), landing),
+        (None, judge),
+        (Some("todos"), todos),
+        (Some("backlog"), backlog),
+        (None, answered),
+        (None, review),
+        (Some("recent"), recent),
+    ];
+    Ok(assemble(head, blocks, &order) + &kinds)
 }

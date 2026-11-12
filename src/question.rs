@@ -354,6 +354,15 @@ pub fn open_in(notes: &[Note]) -> Vec<(Note, Question)> {
 
 /// Digest lines: unseen answers first, then open questions, each capped at a few lines.
 pub fn digest_lines(items: &[&Note]) -> String {
+    lines(items, true)
+}
+
+/// The unseen answers alone, which the digest shows even when its backlog block is left out.
+pub fn answered_lines(items: &[&Note]) -> String {
+    lines(items, false)
+}
+
+fn lines(items: &[&Note], waiting: bool) -> String {
     let mut ans = vec![];
     let mut open = vec![];
     for n in items.iter().filter(|n| !n.is_archived()) {
@@ -364,7 +373,7 @@ pub fn digest_lines(items: &[&Note]) -> String {
                 let age = q.answer.as_ref().and_then(|a| crate::util::parse_time(&a.at)).map(|t| format!(", {} ago", crate::util::short_age(&t))).unwrap_or_default();
                 let t = truncate_chars(&format!("{} -> {}", one_line(&q.text), one_line(&q.answer_text())), 150);
                 ans.push(format!("answer arrived on {} [{}{age}]: {t} ({hint})", qid(n, &q), state(n)));
-            } else if q.open() {
+            } else if waiting && q.open() {
                 open.push(format!("waiting on user {}: {}", qid(n, &q), truncate_chars(&one_line(&q.text), 80)));
             }
         }

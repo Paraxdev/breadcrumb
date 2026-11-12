@@ -47,6 +47,19 @@ fn default_recall_notes() -> u64 {
 fn default_file_notes() -> u64 {
     crate::recall::DEFAULT_FILE_NOTES
 }
+fn default_digest_sections() -> String {
+    crate::digest::SECTIONS.join(",")
+}
+/// The default order is not written to breadcrumb.toml, so a vault that never chose one gets the sections a later version adds.
+fn is_default_sections(s: &str) -> bool {
+    s == default_digest_sections()
+}
+fn default_digest_budget() -> u64 {
+    crate::digest::DIGEST_BUDGET as u64
+}
+fn default_handoff_digest_days() -> u64 {
+    crate::lifecycle::HANDOFF_DIGEST_DAYS as u64
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -81,11 +94,23 @@ pub struct Config {
     /// How many notes the PreToolUse file hook names for a file, 0 silences it.
     #[serde(default = "default_file_notes")]
     pub file_notes: u64,
+    /// The blocks the session digest shows, comma separated, in order.
+    #[serde(default = "default_digest_sections", skip_serializing_if = "is_default_sections")]
+    pub digest_sections: String,
+    /// Chars the whole digest may take.
+    #[serde(default = "default_digest_budget")]
+    pub digest_budget: u64,
+    /// Recent notes the digest lists, unset leaves it to the caller: 10 at session start, 15 from `context`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest_recent: Option<u64>,
+    /// Past this age a live handoff that is not the newest leaves the digest unless pinned.
+    #[serde(default = "default_handoff_digest_days")]
+    pub handoff_digest_days: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes() }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes(), digest_sections: default_digest_sections(), digest_budget: default_digest_budget(), digest_recent: None, handoff_digest_days: default_handoff_digest_days() }
     }
 }
 

@@ -219,7 +219,7 @@ impl Server {
         match name {
             "context" => {
                 let p = self.target_project(&v, a)?;
-                ops::context_with(&v, p.as_deref(), ContextOpts { recent: u(a, "limit").unwrap_or(15), kinds: b(a, "kinds"), cwd: Some(self.cwd_of(a)), ..Default::default() })
+                ops::context_with(&v, p.as_deref(), ContextOpts { recent: u(a, "limit").unwrap_or_else(|| crate::digest::recent_rows(&v, p.as_deref(), crate::digest::CONTEXT_RECENT)), kinds: b(a, "kinds"), cwd: Some(self.cwd_of(a)), ..Default::default() })
             }
             "search" => {
                 let q = req_s(a, "query")?;

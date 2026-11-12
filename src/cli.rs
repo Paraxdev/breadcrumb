@@ -266,9 +266,9 @@ pub enum Cmd {
         /// Only the global digest
         #[arg(long, conflicts_with = "project")]
         global: bool,
-        /// Most recent notes to list
-        #[arg(long, short = 'n', default_value_t = 15)]
-        limit: usize,
+        /// Most recent notes to list (default: the digest_recent setting, else 15)
+        #[arg(long, short = 'n')]
+        limit: Option<usize>,
     },
     /// Note kinds (schemas), bare it lists them
     #[command(visible_alias = "kinds")]
@@ -1615,7 +1615,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Context { project, global, limit } => {
             let v = open()?;
             let p = if global { None } else { ops::target_project(&v, project.as_deref(), false, &cwd)? };
-            let text = ops::context(&v, p.as_deref(), limit)?;
+            let text = ops::context(&v, p.as_deref(), limit.unwrap_or_else(|| crate::digest::recent_rows(&v, p.as_deref(), crate::digest::CONTEXT_RECENT)))?;
             out.emit(&text, json!({"project": p, "markdown": text}));
         }
         Cmd::Kind { cmd } => kind_cmd(&out, &open()?, cmd.unwrap_or(KindCmd::List))?,

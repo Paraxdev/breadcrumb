@@ -30,6 +30,10 @@ const SETTINGS: &[Def] = &[
     Def { key: "default_kind", about: "kind of a note added without --kind", words: &[], project: true },
     Def { key: "recall_notes", about: "notes the prompt hook names for a session's first prompt, 0 silences it", words: &[], project: true },
     Def { key: "file_notes", about: "notes the file hook names for a file being read or edited, 0 silences it", words: &[], project: true },
+    Def { key: "digest_sections", about: "blocks the session digest shows, in this order, a block left out is not shown", words: &[], project: true },
+    Def { key: "digest_budget", about: "chars the session digest may take, 1000 or more", words: &[], project: true },
+    Def { key: "digest_recent", about: "recent notes the digest lists, unset is 10 at session start and 15 from context", words: &[], project: true },
+    Def { key: "handoff_digest_days", about: "other live handoffs older than this many days leave the digest unless pinned", words: &[], project: true },
     Def { key: "auto_commit", about: "commit every write to git", words: &[], project: false },
     Def { key: "lock_timeout_secs", about: "seconds a write waits for the vault lock", words: &[], project: false },
     Def { key: "remote", about: "git remote sync pushes to, empty to unset", words: &[], project: false },
@@ -47,7 +51,9 @@ pub struct Setting {
 }
 
 fn table(c: &Config) -> Result<toml::Table> {
-    Ok(toml::Table::try_from(c)?)
+    let mut t = toml::Table::try_from(c)?;
+    t.entry("digest_sections").or_insert_with(|| c.digest_sections.clone().into());
+    Ok(t)
 }
 
 fn shown(v: Option<&toml::Value>) -> String {
@@ -84,7 +90,7 @@ fn apply(base: &Config, over: &toml::Table) -> Config {
     let Ok(mut t) = table(base) else { return base.clone() };
     for (k, val) in over {
         let Some(d) = SETTINGS.iter().find(|d| d.key == k && d.project) else { continue };
-        if !d.words.is_empty() && !val.as_str().is_some_and(|s| d.words.contains(&s)) {
+        if !d.words.is_empty() && !val.as_str().is_some_and(|s| d.words.contains(&s)) || check(k, val).is_err() {
             continue;
         }
         let mut next = t.clone();
@@ -220,10 +226,47 @@ pub fn overrides_line(v: &Vault, slug: &str, mcp: bool) -> Option<String> {
     Some(format!("Project {slug} (detected here) overrides {}, {how}\n", set.join(", ")))
 }
 
+/// The least value of a number setting.
+fn floor(key: &str) -> u64 {
+    match key {
+        "digest_budget" => crate::digest::BUDGET_MIN as u64,
+        "digest_recent" => 1,
+        _ => 0,
+    }
+}
+
+/// What a value's type does not catch: a number below its floor, a digest_sections list that names a section twice or
+/// one that does not exist.
+fn check(key: &str, val: &toml::Value) -> Result<()> {
+    if key == "digest_sections" {
+        crate::digest::parse_sections(val.as_str().unwrap_or_default())?;
+    }
+    if let Some(n) = val.as_integer()
+        && n < floor(key) as i64
+    {
+        let hint = if key == "digest_recent" { ", leave recent out of digest_sections to hide the list" } else { "" };
+        bail!("{key} takes a whole number of {} or more, got {n}{hint}", floor(key));
+    }
+    Ok(())
+}
+
+/// The value `checked` stores: digest_sections as its names joined by commas, digest_recent as a number though it has no default.
+fn refine(key: &str, raw: &str, val: Option<toml::Value>) -> Result<Option<toml::Value>> {
+    let val = match key {
+        "digest_sections" => Some(toml::Value::String(crate::digest::parse_sections(raw)?.join(","))),
+        "digest_recent" => parse_like(Some(&toml::Value::Integer(0)), key, raw)?,
+        _ => val,
+    };
+    if let Some(x) = &val {
+        check(key, x)?;
+    }
+    Ok(val)
+}
+
 fn parse_like(old: Option<&toml::Value>, key: &str, raw: &str) -> Result<Option<toml::Value>> {
     let raw = raw.trim();
     Ok(Some(match old {
-        Some(toml::Value::Integer(_)) => toml::Value::Integer(raw.parse::<u64>().with_context(|| format!("{key} takes a whole number of 0 or more, got '{raw}'"))? as i64),
+        Some(toml::Value::Integer(_)) => toml::Value::Integer(raw.parse::<u64>().with_context(|| format!("{key} takes a whole number of {} or more, got '{raw}'", floor(key)))? as i64),
         Some(toml::Value::Boolean(_)) => toml::Value::Boolean(match raw.to_ascii_lowercase().as_str() {
             "true" | "yes" | "on" | "1" => true,
             "false" | "no" | "off" | "0" => false,
@@ -243,6 +286,7 @@ fn checked(base: &Config, key: &str, raw: &str) -> Result<(Config, Option<toml::
     let mut t = table(base)?;
     let dflt = table(&Config::default())?;
     let val = parse_like(t.get(d.key).or(dflt.get(d.key)), d.key, raw)?;
+    let val = refine(d.key, raw, val)?;
     match &val {
         Some(x) => {
             t.insert(d.key.to_string(), x.clone());

@@ -60,8 +60,9 @@ pub fn session_start(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Res
     let v = Vault::open(root)?;
     let cwd = input.cwd.as_deref().unwrap_or(fallback_cwd);
     let project = v.detect_project_fast(cwd);
-    let body = crate::ops::context_with(&v, project.as_deref(), crate::ops::ContextOpts { recent: RECENT, cwd: Some(cwd.to_path_buf()), ..Default::default() })?;
-    let text = cap(body.trim_end(), CONTEXT_CAP);
+    let recent = crate::digest::recent_rows(&v, project.as_deref(), RECENT);
+    let body = crate::ops::context_with(&v, project.as_deref(), crate::ops::ContextOpts { recent, cwd: Some(cwd.to_path_buf()), ..Default::default() })?;
+    let text = cap(body.trim_end(), crate::digest::budget_of(&crate::config::effective(&v, project.as_deref())));
     if let Some(sid) = &input.session_id {
         recall::prune_sessions(root);
         let mut st = recall::load_session(root, sid);
