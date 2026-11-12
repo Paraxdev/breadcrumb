@@ -788,6 +788,9 @@ pub enum ProjectCmd {
         /// Directory to bind (default: current directory)
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Take the directory from the project that holds it
+        #[arg(long = "move")]
+        r#move: bool,
     },
 }
 
@@ -1420,7 +1423,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 }
                 (false, [dup, keep]) => {
                     let m = crate::merge::merge(&v, dup, keep)?;
-                    out.emit(crate::merge::merged_text(&m), json!({"merged": m.dup.id, "into": m.keep.id}));
+                    out.emit(crate::merge::merged_text(&m), json!({"merged": m.dup.id, "into": m.keep.id, "body_skipped": m.skipped}));
                 }
                 (true, _) => bail!("merge --undo takes the merged note only, like `breadcrumb merge --undo DUP`"),
                 (false, _) => bail!("merge takes the duplicate and the note that stays, like `breadcrumb merge DUP KEEP`, or --undo DUP"),
@@ -1961,9 +1964,9 @@ fn project_cmd(out: &Out, v: &Vault, pc: ProjectCmd, cwd: &Path) -> Result<()> {
             let (p, created) = ops::project_add(v, &slug, name.as_deref(), description.as_deref(), &paths)?;
             out.emit(format!("{} project {}", if created { "created" } else { "updated" }, p.slug), format::project_json(&p));
         }
-        ProjectCmd::Link { slug, description, path } => {
+        ProjectCmd::Link { slug, description, path, r#move } => {
             let dir = path.unwrap_or_else(|| cwd.to_path_buf());
-            let r = ops::project_link(v, &slug, &dir, description.as_deref())?;
+            let r = ops::project_link_with(v, &slug, &dir, description.as_deref(), r#move)?;
             let mut text = format!("{} project {}", if r.created { "created" } else { "linked" }, r.project.slug);
             if let Some(p) = &r.added_path {
                 text.push_str(&format!("\n  added path {p}"));
@@ -1971,10 +1974,13 @@ fn project_cmd(out: &Out, v: &Vault, pc: ProjectCmd, cwd: &Path) -> Result<()> {
             for rm in &r.added_remotes {
                 text.push_str(&format!("\n  added remote {rm}"));
             }
-            if r.added_path.is_none() && r.added_remotes.is_empty() {
+            for from in &r.moved_from {
+                text.push_str(&format!("\n  moved the path from project {from}"));
+            }
+            if r.added_path.is_none() && r.added_remotes.is_empty() && r.moved_from.is_empty() {
                 text.push_str("\n  (path and remotes were already linked)");
             }
-            out.emit(text, json!({"project": format::project_json(&r.project), "created": r.created, "added_path": r.added_path, "added_remotes": r.added_remotes}));
+            out.emit(text, json!({"project": format::project_json(&r.project), "created": r.created, "added_path": r.added_path, "added_remotes": r.added_remotes, "moved_from": r.moved_from}));
         }
     }
     Ok(())

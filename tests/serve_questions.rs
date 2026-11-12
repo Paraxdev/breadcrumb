@@ -135,8 +135,13 @@ fn login_sets_a_hardened_cookie() {
     let (_d, v, _id) = setup();
     let app = remote_app(&v);
     let r = app.handle(&req("GET", &format!("/login?token={TOKEN}"), HOST, None));
-    assert_eq!(r.status, 303);
-    assert_eq!(r.header("location"), Some("/"));
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("location"), None);
+    assert_eq!(r.header("referrer-policy"), Some("no-referrer"));
+    assert_eq!(r.header("cache-control"), Some("no-store"));
+    let html = String::from_utf8_lossy(&r.body);
+    assert!(html.contains("http-equiv=refresh content=\"0;url=/\"") && html.contains("<a href=\"/\">"), "{html}");
+    assert!(!html.contains("<script") && !html.contains(TOKEN));
     let c = r.header("set-cookie").unwrap();
     assert!(c.starts_with(&format!("crumb_token={TOKEN};")));
     for part in ["HttpOnly", "Secure", "SameSite=Strict"] {

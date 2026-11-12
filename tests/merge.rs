@@ -335,3 +335,41 @@ fn the_merge_tool_merges_and_undoes() {
     assert!(text.starts_with("restored "), "{text}");
     assert!(!v.get(&dup.id).unwrap().is_archived());
 }
+
+#[test]
+fn a_body_the_kept_note_already_holds_or_an_empty_one_is_not_added_and_undo_restores_both() {
+    let (_d, v) = common::vault();
+    let keep = note(&v, "Kept fact", "gotcha", "Cargo reruns build.rs\n\nunless rerun-if-changed is set.", &["a"], &[]);
+    let same = note(&v, "Same fact", "gotcha", "Cargo reruns   build.rs unless\nrerun-if-changed is set.", &["b"], &["x/**"]);
+    let part = note(&v, "Part of it", "gotcha", "unless rerun-if-changed is set.", &[], &[]);
+    let none = note(&v, "Nothing said", "gotcha", "", &[], &[]);
+    let word = note(&v, "Cut mid word", "gotcha", "rerun-if-chang", &[], &[]);
+    let pointing = note(&v, "Points at it", "note", "p", &[], &[]);
+    link(&v, &pointing, &same, "relates");
+    let snapshot: Vec<(String, String)> = [&keep, &same, &part, &none, &word, &pointing].iter().map(|n| (n.id.clone(), file(&v, &n.id))).collect();
+    let before = v.get(&keep.id).unwrap().body;
+
+    for dup in [&same, &part, &none] {
+        let m = merge::merge(&v, &dup.id, &keep.id).unwrap();
+        assert!(m.skipped.is_some());
+        assert!(merge::merged_text(&m).contains("body not added"), "{}", merge::merged_text(&m));
+        let k = v.get(&keep.id).unwrap();
+        assert_eq!(k.body, before, "{}", k.body);
+        assert!(merge::merged_into(&v.get(&dup.id).unwrap()).is_some());
+    }
+    let k = v.get(&keep.id).unwrap();
+    assert!(k.has_tag("b") && k.path_globs() == ["x/**"], "tags and globs still move");
+    assert!(v.get(&pointing.id).unwrap().links.iter().all(|l| l.to == keep.id), "links are retargeted");
+
+    for dup in [&none, &part, &same] {
+        let u = merge::unmerge(&v, &dup.id).unwrap();
+        assert!(u.left.is_empty(), "{:?}", u.left);
+    }
+    for (id, was) in &snapshot {
+        assert_eq!(&file(&v, id), was, "{id} is back as it was");
+    }
+
+    let m = merge::merge(&v, &word.id, &keep.id).unwrap();
+    assert_eq!(m.skipped, None, "a fragment of a word is not the same text");
+    assert!(v.get(&keep.id).unwrap().body.contains("Merged from"));
+}

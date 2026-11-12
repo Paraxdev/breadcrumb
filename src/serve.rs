@@ -20,6 +20,8 @@ const INDEX_HTML: &str = include_str!("web/index.html");
 const QUESTIONS_HTML: &str = include_str!("web/questions.html");
 const REVIEW_HTML: &str = include_str!("web/review.html");
 const LOGIN_HTML: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>breadcrumb</title><body style=\"font:16px system-ui;margin:2em auto;max-width:30em;padding:0 16px\"><h1>breadcrumb</h1><p>Sign in with the login link that <code>breadcrumb serve --remote</code> printed when it started.</p>";
+// Answering the login link with a 303 keeps a cross-site click cross-site through the redirect, so the Strict cookie is not sent. The refresh starts from our own document.
+const LOGGED_IN_HTML: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><meta http-equiv=refresh content=\"0;url=/\"><title>breadcrumb</title><body style=\"font:16px system-ui;margin:2em auto;max-width:30em;padding:0 16px\"><h1>breadcrumb</h1><p>Signed in. <a href=\"/\">Continue</a></p>";
 pub const COOKIE: &str = "crumb_token";
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const MAX_HEADERS: usize = 100;
@@ -273,8 +275,9 @@ impl App {
             if !req.param("token").is_some_and(|t| token_eq(t, &r.token)) {
                 return Some(Response::html(401, LOGIN_HTML));
             }
-            let mut resp = Response::html(303, "");
-            resp.headers.push(("Location", "/".into()));
+            let mut resp = Response::html(200, LOGGED_IN_HTML);
+            resp.headers.push(("Referrer-Policy", "no-referrer".into()));
+            resp.headers.push(("Cache-Control", "no-store".into()));
             resp.headers.push(("Set-Cookie", format!("{COOKIE}={}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Strict", r.token)));
             return Some(resp);
         }

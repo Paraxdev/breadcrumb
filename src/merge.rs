@@ -80,6 +80,8 @@ struct Undo {
 pub struct Merged {
     pub dup: Note,
     pub keep: Note,
+    /// Why the duplicate's text was not added to the kept note, when it was not.
+    pub skipped: Option<&'static str>,
 }
 
 fn check(dup: &Note, keep: &Note) -> Result<()> {
@@ -115,6 +117,21 @@ fn carried_body(dup: &Note) -> String {
     dup.body.lines().map(|l| if l.trim().eq_ignore_ascii_case("## history") { "### History" } else { l }).collect::<Vec<_>>().join("\n").trim().to_string()
 }
 
+fn squashed(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn skip_reason(carried: &str, keep_body: &str) -> Option<&'static str> {
+    let c = squashed(carried);
+    if c.is_empty() {
+        Some("empty")
+    } else if format!(" {} ", squashed(keep_body)).contains(&format!(" {c} ")) {
+        Some("already there")
+    } else {
+        None
+    }
+}
+
 fn to_value<T: Serialize>(t: &T) -> Result<Value> {
     Ok(serde_yaml::to_value(t)?)
 }
@@ -130,19 +147,19 @@ pub fn merge(v: &Vault, dup_ref: &str, keep_ref: &str) -> Result<Merged> {
     let mut undo = Undo { was_archived: dup.is_archived(), keep_updated: fmt_time(&keep.updated), ..Default::default() };
 
     let what = if is_item(&dup) { format!("{} {}, ", dup.kind, state(&dup)) } else { String::new() };
-    let mut text = format!("{}\nMerged from {} \"{}\" ({what}created {})", crate::session::append_head(), dup.id, one_line(&dup.title), fmt_date(&dup.created));
     let carried = carried_body(&dup);
-    if !carried.is_empty() {
-        text.push_str(&format!("\n\n{carried}"));
+    let skipped = skip_reason(&carried, &keep.body);
+    if skipped.is_none() {
+        let text = format!("{}\nMerged from {} \"{}\" ({what}created {})\n\n{carried}", crate::session::append_head(), dup.id, one_line(&dup.title), fmt_date(&dup.created));
+        keep.body = if is_item(&keep) {
+            crate::backlog::insert_before_history(&keep.body, &text)
+        } else if keep.body.trim().is_empty() {
+            text.clone()
+        } else {
+            format!("{}\n\n{text}", keep.body.trim_end())
+        };
+        undo.text = text;
     }
-    keep.body = if is_item(&keep) {
-        crate::backlog::insert_before_history(&keep.body, &text)
-    } else if keep.body.trim().is_empty() {
-        text.clone()
-    } else {
-        format!("{}\n\n{text}", keep.body.trim_end())
-    };
-    undo.text = text;
 
     for t in &dup.tags {
         if !keep.has_tag(t) {
@@ -213,7 +230,7 @@ pub fn merge(v: &Vault, dup_ref: &str, keep_ref: &str) -> Result<Merged> {
     touched.push(v.write_note(&mut keep)?);
     touched.push(v.write_note(&mut dup)?);
     v.commit(&touched, &format!("breadcrumb: merge {} into {} {}", dup.id, keep.id, one_line(&dup.title)))?;
-    Ok(Merged { dup, keep })
+    Ok(Merged { dup, keep, skipped })
 }
 
 /// The recorded text where it ends at a line break or the end, so a line someone kept writing on is not cut in two.
@@ -266,6 +283,7 @@ pub fn unmerge(v: &Vault, dup_ref: &str) -> Result<Unmerged> {
     }
     if let Some(k) = keep.as_mut() {
         match find_whole(&k.body, &undo.text) {
+            _ if undo.text.is_empty() => {}
             Some(i) => {
                 let (before, after) = (k.body[..i].trim_end(), k.body[i + undo.text.len()..].trim_start());
                 k.body = [before, after].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n");
@@ -317,7 +335,8 @@ fn label(n: &Note) -> String {
 }
 
 pub fn merged_text(m: &Merged) -> String {
-    format!("merged {} into {}, `breadcrumb merge --undo {}` restores it", label(&m.dup), label(&m.keep), m.dup.id)
+    let body = m.skipped.map(|why| format!(", body not added ({why})")).unwrap_or_default();
+    format!("merged {} into {}{body}, `breadcrumb merge --undo {}` restores it", label(&m.dup), label(&m.keep), m.dup.id)
 }
 
 pub fn unmerged_text(u: &Unmerged) -> String {

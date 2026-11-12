@@ -1026,10 +1026,19 @@ pub struct LinkReport {
     pub created: bool,
     pub added_path: Option<String>,
     pub added_remotes: Vec<String>,
+    /// Projects the directory was taken from by a move.
+    pub moved_from: Vec<String>,
 }
 
 /// Binds a directory (and its git remotes) to a project, creating the project if needed.
+/// A directory another project holds is refused.
 pub fn project_link(v: &Vault, slug: &str, path: &Path, description: Option<&str>) -> Result<LinkReport> {
+    project_link_with(v, slug, path, description, false)
+}
+
+/// With `take`, the directory leaves the projects that hold it and goes to this one in the same commit.
+/// Only the exact directory counts, a project bound to a parent or child keeps it, detection picks the longest path.
+pub fn project_link_with(v: &Vault, slug: &str, path: &Path, description: Option<&str>, take: bool) -> Result<LinkReport> {
     let slug = check_slug(slug)?;
     // Detection compares against the cwd as the shell reports it, so store that form. The canonical form
     // (junction or symlink target, UNC share behind a mapped drive) is recorded too when it differs.
@@ -1045,6 +1054,25 @@ pub fn project_link(v: &Vault, slug: &str, path: &Path, description: Option<&str
         p.description = d.to_string();
     }
     let ps = path_str(&abs);
+    let dirs: Vec<String> = std::iter::once(crate::project::normalize_path(&ps)).chain(canonical.iter().map(|c| crate::project::normalize_path(c))).collect();
+    let holds = |q: &Project| q.paths.iter().any(|x| dirs.contains(&crate::project::normalize_path(x)));
+    let mut others: Vec<Project> = v.load_projects().into_iter().filter(|q| q.slug != slug && holds(q)).collect();
+    others.sort_by(|a, b| a.slug.cmp(&b.slug));
+    let mine = holds(&p);
+    if !take && !mine && !others.is_empty() {
+        let names: Vec<&str> = others.iter().map(|q| q.slug.as_str()).collect();
+        let quoted = if ps.contains(' ') { format!("\"{ps}\"") } else { ps.clone() };
+        bail!("{ps} is already a path of project {}, `breadcrumb project link {slug} --path {quoted} --move` takes it over", names.join(", "));
+    }
+    let mut moved: Vec<PathBuf> = vec![];
+    let mut moved_from = vec![];
+    if take {
+        for o in &mut others {
+            o.paths.retain(|x| !dirs.contains(&crate::project::normalize_path(x)));
+            moved.push(v.write_project(o)?);
+            moved_from.push(o.slug.clone());
+        }
+    }
     let added_path = if p.add_path(&ps) { Some(ps) } else { None };
     if let Some(c) = canonical {
         p.add_path(&c);
@@ -1055,9 +1083,9 @@ pub fn project_link(v: &Vault, slug: &str, path: &Path, description: Option<&str
             added_remotes.push(crate::project::normalize_remote(&r));
         }
     }
-    let f = v.write_project(&p)?;
-    v.commit(&[f], &format!("breadcrumb: project link {slug}"))?;
-    Ok(LinkReport { project: p, created, added_path, added_remotes })
+    moved.push(v.write_project(&p)?);
+    v.commit(&moved, &format!("breadcrumb: project link {slug}"))?;
+    Ok(LinkReport { project: p, created, added_path, added_remotes, moved_from })
 }
 
 /// Creates or updates a kind. With `replace` false, fields merge by name into the existing definition.
