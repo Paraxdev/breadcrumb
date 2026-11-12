@@ -173,7 +173,7 @@ impl Server {
             }
             "answer" => {
                 let tokens: Vec<String> = match a.get("choices") {
-                    Some(Value::Array(xs)) => xs.iter().map(|x| s_of(x)).collect(),
+                    Some(Value::Array(xs)) => xs.iter().map(s_of).collect(),
                     Some(x) => vec![s_of(x)],
                     None => vec![],
                 };

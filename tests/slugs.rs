@@ -63,7 +63,7 @@ fn backfill_replaces_an_invalid_stored_slug_once() {
     v.write_note(&mut n).unwrap();
     let opts = slug::Backfill { write: true, ..Default::default() };
     let first = slug::backfill(&v, &opts).unwrap();
-    assert_eq!(first.iter().map(|n| n.id.clone()).collect::<Vec<_>>(), [id.clone()]);
+    assert_eq!(first.iter().map(|n| n.id.clone()).collect::<Vec<_>>(), std::slice::from_ref(&id));
     assert!(slug::is_valid(&v.get(&id).unwrap().slug().unwrap()));
     assert!(slug::backfill(&v, &opts).unwrap().is_empty());
 }
