@@ -247,7 +247,8 @@ impl Server {
                 }
                 let shown = u(a, "tail").map(|t| format::tailed(&n, t));
                 let note = format::note_compact(shown.as_ref().unwrap_or(&n), b(a, "full"));
-                Ok(format!("{lead}{note}{}{}", format::inbound_text(&n, &all), question::notice(&n)))
+                let drift = crate::drift::get_line(&v, &n, &self.cwd_of(a)).map(|d| format!("\n{d}\n")).unwrap_or_default();
+                Ok(format!("{lead}{note}{}{}{drift}", format::inbound_text(&n, &all), question::notice(&n)))
             }
             "add" => {
                 let project = self.target_project(&v, a)?;
@@ -539,7 +540,7 @@ impl Server {
                 let p = s(a, "project");
                 let is = |x: &str| p.as_deref() == Some(x);
                 let sc = crate::doctor::scope_of(&v, p.as_deref().filter(|p| *p != "all" && *p != "global"), is("global"), is("all"), &self.cwd_of(a))?;
-                let run = crate::doctor::run(&v, &sc, crate::importer::default_claude_dir().as_deref());
+                let run = crate::doctor::run_at(&v, &sc, crate::importer::default_claude_dir().as_deref(), &self.cwd_of(a));
                 Ok(run.text(min, "`project: all`"))
             }
             other => bail!("unknown tool '{other}'"),

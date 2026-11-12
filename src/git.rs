@@ -217,3 +217,20 @@ pub fn commit_times(dir: &Path, since: chrono::DateTime<chrono::Utc>, paths: &[S
     let out = run_within(dir, &args, limit)?;
     Some(String::from_utf8_lossy(&out).lines().filter_map(|l| l.trim().parse().ok()).collect())
 }
+
+/// Like `commit_times` with each commit's short sha and subject, `(time, sha, subject)` newest first. `paths` are
+/// pathspecs relative to `dir`.
+pub fn commit_subjects(dir: &Path, since: chrono::DateTime<chrono::Utc>, paths: &[String], limit: std::time::Duration) -> Option<Vec<(i64, String, String)>> {
+    let since = format!("--since={}", since.format("%Y-%m-%d %H:%M:%S +0000"));
+    let mut args = vec!["log", "--format=%ct %h %s", since.as_str(), "HEAD"];
+    if !paths.is_empty() {
+        args.push("--");
+        args.extend(paths.iter().map(String::as_str));
+    }
+    let out = run_within(dir, &args, limit)?;
+    let parse = |l: &str| {
+        let mut it = l.splitn(3, ' ');
+        Some((it.next()?.trim().parse().ok()?, it.next()?.to_string(), it.next().unwrap_or("").trim().to_string()))
+    };
+    Some(String::from_utf8_lossy(&out).lines().filter_map(parse).collect())
+}

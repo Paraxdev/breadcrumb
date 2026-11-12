@@ -1,7 +1,7 @@
 //! Merging a duplicate note into the one that stays, and taking it back.
 
 use crate::backlog::{is_item, state};
-use crate::note::{Link, Note, yaml_scalar_string};
+use crate::note::{Link, Note, VERIFIED_AT_KEY, VERIFIED_KEY, yaml_scalar_string};
 use crate::ops::{commit_msg, push_tag, set_paths};
 use crate::util::{fmt_date, fmt_time, now, one_line, parse_time, truncate_chars};
 use crate::vault::Vault;
@@ -75,6 +75,18 @@ struct Undo {
     /// `updated` of the kept note right after the merge, an undo restores `keep_updated` only while it still reads this.
     #[serde(default)]
     merge_updated: String,
+    /// The kept note's `verified` and `verified_at` before the merge, restored along with `keep_updated`. Records from
+    /// older binaries lack it and leave both as the merge set them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keep_verified: Option<WasVerified>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct WasVerified {
+    #[serde(default)]
+    day: Option<Value>,
+    #[serde(default)]
+    at: Option<Value>,
 }
 
 pub struct Merged {
@@ -144,7 +156,8 @@ pub fn merge(v: &Vault, dup_ref: &str, keep_ref: &str) -> Result<Merged> {
     let mut keep = v.get(keep_ref)?;
     check(&dup, &keep)?;
     let all = v.load_notes();
-    let mut undo = Undo { was_archived: dup.is_archived(), keep_updated: fmt_time(&keep.updated), ..Default::default() };
+    let keep_verified = Some(WasVerified { day: keep.field(VERIFIED_KEY).cloned(), at: keep.field(VERIFIED_AT_KEY).cloned() });
+    let mut undo = Undo { was_archived: dup.is_archived(), keep_updated: fmt_time(&keep.updated), keep_verified, ..Default::default() };
 
     let what = if is_item(&dup) { format!("{} {}, ", dup.kind, state(&dup)) } else { String::new() };
     let carried = carried_body(&dup);
@@ -299,10 +312,20 @@ pub fn unmerge(v: &Vault, dup_ref: &str) -> Result<Unmerged> {
             k.pinned = false;
             k.clear_kept("pinned");
         }
-        if fmt_time(&k.updated) == undo.merge_updated
-            && let Some(t) = parse_time(&undo.keep_updated)
-        {
-            k.updated = t;
+        if fmt_time(&k.updated) == undo.merge_updated {
+            if let Some(t) = parse_time(&undo.keep_updated) {
+                k.updated = t;
+            }
+            if let Some(was) = &undo.keep_verified {
+                for (key, value) in [(VERIFIED_KEY, &was.day), (VERIFIED_AT_KEY, &was.at)] {
+                    match value {
+                        Some(x) => k.set_field(key, x.clone()),
+                        None => {
+                            k.unset_field(key);
+                        }
+                    }
+                }
+            }
         }
     } else {
         left.push(format!("{keep_id} is gone, only {} was restored", dup.id));

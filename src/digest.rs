@@ -34,7 +34,7 @@ const OTHER_HANDOFFS_MAX: usize = 3;
 const PINS_HEAD: &str = "Pinned (get an id for its body):\n";
 
 /// How long the digest waits for git to count commits since a handoff, a slower answer shows no count.
-const GIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+pub const GIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Clone, Debug)]
 pub struct ContextOpts {
@@ -267,7 +267,7 @@ fn other_handoffs(shown: &[&Note], commits: &dyn Fn(&Note) -> String, mark: &dyn
 }
 
 /// The project's checkout on this machine: its path holding `cwd`, else the first path inside a git checkout.
-fn checkout(p: &crate::project::Project, cwd: Option<&Path>) -> Option<PathBuf> {
+pub fn checkout(p: &crate::project::Project, cwd: Option<&Path>) -> Option<PathBuf> {
     use crate::project::{normalize_path, path_has_prefix};
     let in_git = |x: &&String| Path::new(x.as_str()).is_dir() && Path::new(x.as_str()).ancestors().any(|d| d.join(".git").exists());
     let here = cwd.map(|c| normalize_path(&c.to_string_lossy()));
