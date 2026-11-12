@@ -414,7 +414,7 @@ impl Server {
                 }
                 "review" => {
                     let sc = self.scope(&v, a)?;
-                    Ok(backlog::review_text(&backlog::review_items(&v, &sc)?, &sc.label(), crate::config::agent_review(&v)))
+                    Ok(backlog::review_text(&backlog::review_items(&v, &sc)?, &sc.label(), crate::config::agent_review(&v, sc.project())))
                 }
                 "tree" => backlog::tree(&v, &req_s(a, "id")?),
                 "deps" => {
@@ -446,7 +446,11 @@ impl Server {
                     let r = ops::project_link(&v, &req_s(a, "slug")?, &path, s(a, "description").as_deref())?;
                     Ok(format!("{} project {}, paths: {}", if r.created { "created" } else { "linked" }, r.project.slug, r.project.paths.join(", ")))
                 }
-                other => bail!("action must be list or link, got '{other}'"),
+                "config" => {
+                    let value = a.get("value").filter(|x| !x.is_null()).map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string()));
+                    crate::config::mcp(&v, s(a, "slug").as_deref(), s(a, "key").as_deref(), value.as_deref(), v.detect_project(&self.cwd_of(a)).as_deref())
+                }
+                other => bail!("action must be list, link or config, got '{other}'"),
             },
             "kinds" => match a.get("define") {
                 Some(Value::Object(d)) => {
@@ -776,11 +780,13 @@ pub fn tool_defs() -> Vec<Value> {
             "id": st(),
             "include_closed": bl(),
         })), &[])),
-        tool("project", "List projects or bind a directory to one.", obj(json!({
-            "action": {"type": "string", "enum": ["list", "link"]},
+        tool("project", "List or link projects, or config: settings, slug for one project.", obj(json!({
+            "action": {"type": "string", "enum": ["list", "link", "config"]},
             "slug": st(),
             "path": st(),
             "description": st(),
+            "key": st(),
+            "value": st(),
         }), &[])),
         tool("kinds", "List kinds, or define one.", obj(json!({"define": obj(json!({
             "name": st(),

@@ -225,6 +225,7 @@ pub fn context(v: &Vault, project: Option<&str>, limit: usize) -> Result<String>
 }
 
 pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Result<String> {
+    let v = &crate::config::scoped(v, project);
     let mut head = String::new();
     let proj = match project {
         Some(slug) => v.load_project(slug)?,
@@ -290,7 +291,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         writeln!(todos, "{} {}{prio}{}", n.handle(), crate::format::fit_title(&n.title, n.slug().as_deref()), scope_suffix(n, project))?;
     }
     let mut backlog = crate::backlog::context_section(&notes, &all);
-    if crate::config::agent_review(v) {
+    if crate::config::agent_review(v, project) {
         let waiting = notes.iter().filter(|n| crate::backlog::is_item(n) && crate::backlog::state(n) == "review").count();
         if waiting > 0 {
             writeln!(backlog, "Review: {waiting} waiting for an agent check (review_by = agent), `breadcrumb review` lists the steps, check only what you did not build")?;

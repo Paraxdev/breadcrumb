@@ -1145,7 +1145,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
         bail!("{} is {from}, not in review", n.id);
     }
     let evidence = req.evidence.as_deref().map(str::trim).filter(|e| !e.is_empty()).map(crate::util::normalize_newlines);
-    if req.verdict.is_some() && !req.by_user && crate::config::agent_review(v) {
+    if req.verdict.is_some() && !req.by_user && crate::config::agent_review(v, n.project.as_deref()) {
         check_reviewer(&n, req.by.as_deref())?;
         if req.verdict == Some(Verdict::Pass) && evidence.is_none() {
             bail!("agents review here (review_by = agent), a pass needs --evidence \"what you ran and what you saw\" (MCP evidence)");
