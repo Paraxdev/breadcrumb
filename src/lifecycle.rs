@@ -257,20 +257,8 @@ pub fn settled(h: &Note, all: &[Note]) -> Option<usize> {
     (!named.is_empty() && named.iter().all(landed)).then_some(named.len())
 }
 
-/// The newest live handoff created after `h` that names it by id or slug, so the work `h` handed on moved there.
-pub fn covered_by<'a>(h: &Note, live: &[&'a Note]) -> Option<&'a Note> {
-    let slug = h.slug();
-    live.iter().copied().filter(|n| (&n.created, &n.id) > (&h.created, &h.id)).find(|n| {
-        name_words(n).iter().any(|w| *w == h.id || (w.contains('-') && slug.as_deref() == Some(w.as_str())))
-    })
-}
-
-/// Why a live handoff no longer leads, covered by a newer one or settled. Covered wins, it names where to look.
-pub fn handoff_mark(h: &Note, live: &[&Note], all: &[Note]) -> Option<String> {
-    mark_text(h, covered_by(h, live), all)
-}
-
-/// `handoff_mark` of every live handoff by id, each handoff's words split once.
+/// Why each live handoff that no longer leads does not, by id: covered by the newest live handoff created after it that
+/// names it by id or slug, or settled. Covered wins, it names where to look. `live` is newest first.
 pub fn handoff_marks(live: &[&Note], all: &[Note]) -> HashMap<String, String> {
     let words: Vec<HashSet<String>> = live.iter().map(|n| name_words(n).into_iter().collect()).collect();
     live.iter()
@@ -298,15 +286,20 @@ pub fn commits_since_text(k: usize) -> String {
     }
 }
 
-/// `slug id who track age: title`, the one line form of a handoff.
+/// `slug id who track age: title`, the one line form of a handoff, its age since it was last written.
 pub fn handoff_line(n: &Note) -> String {
     handoff_line_with(n, "")
 }
 
-/// `handoff_line` with `after_age` beside the age, like `, 14 commits since`.
+/// `handoff_line` with `after_age` beside the age, like `, 14 commits since`, counted from the same last write.
 pub fn handoff_line_with(n: &Note, after_age: &str) -> String {
     let who = writer(n).map(|w| format!(" {w}")).unwrap_or_default();
-    format!("{}{who}{} {}{after_age}: {}", n.handle(), holding(n), crate::util::short_age(&n.created), crate::format::fit_title(&n.title, n.slug().as_deref()))
+    format!("{}{who}{} {}{after_age}: {}", n.handle(), holding(n), crate::util::short_age(&n.updated), crate::format::fit_title(&n.title, n.slug().as_deref()))
+}
+
+/// Live handoffs with no settled or covered mark first, each group by last write newest first, the age their lines show.
+pub fn unmarked_first(hs: &mut [&Note], marks: &HashMap<String, String>) {
+    hs.sort_by_key(|n| (marks.contains_key(&n.id), std::cmp::Reverse(n.updated)));
 }
 
 /// The head line's who part: `, neocad-91 (now neocad-50), track main-worker held by neocad-cb`.
@@ -411,7 +404,9 @@ pub fn handoff_report(v: &Vault, h: &Note, mcp: bool) -> String {
     let replaced: Vec<String> = h.links.iter().filter(|l| l.rel == SUPERSEDES).map(|l| by_id.get(l.to.as_str()).map_or_else(|| l.to.clone(), |n| handoff_line(n))).collect();
     let lapsed = Lapsed::of(&all);
     let live = live_handoffs(&all, h.project.as_deref(), &lapsed);
-    let others: Vec<&&Note> = live.iter().filter(|n| n.id != h.id).collect();
+    let marks = handoff_marks(&live, &all);
+    let mut others: Vec<&Note> = live.iter().copied().filter(|n| n.id != h.id).collect();
+    unmarked_first(&mut others, &marks);
     let mut s = replaced.iter().map(|r| format!("superseded {r}")).collect::<Vec<_>>().join("\n");
     match (s.is_empty(), others.is_empty()) {
         (true, true) => return "superseded nothing, no other live handoff".into(),
@@ -420,13 +415,12 @@ pub fn handoff_report(v: &Vault, h: &Note, mcp: bool) -> String {
         (false, false) => s.push('\n'),
     }
     s.push_str("other live handoffs, each with the command that retires it if this handoff replaces it:");
-    let marks = handoff_marks(&live, &all);
     for n in others.iter().take(REPORT_MAX) {
         let mark = marks.get(&n.id).map(|m| format!(" [{m}]")).unwrap_or_default();
         let retire = if mcp { format!("update {{\"id\": \"{}\", \"supersedes\": [\"{}\"]}}", h.id, n.id) } else { format!("breadcrumb update {} --supersedes {}", h.id, n.id) };
         let _ = write!(s, "\n  {}{mark}\n    {retire}", handoff_line(n));
     }
-    let rest: Vec<&Note> = others.iter().skip(REPORT_MAX).map(|n| **n).collect();
+    let rest: Vec<&Note> = others.iter().skip(REPORT_MAX).copied().collect();
     if !rest.is_empty() {
         let retire = if mcp {
             format!("update {{\"id\": \"{}\", \"supersedes\": [{}]}}", h.id, rest.iter().map(|n| format!("\"{}\"", n.id)).collect::<Vec<_>>().join(", "))

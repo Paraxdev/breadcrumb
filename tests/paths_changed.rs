@@ -201,7 +201,7 @@ fn nothing_shows_without_a_checkout_commits_or_a_project() {
 fn globs_mean_the_same_to_git_as_to_the_file_hook() {
     let e = setup();
     commit(&e.work, "README.md", "base", days_ago(20));
-    let cases: [(&str, &str, bool); 9] = [
+    let cases: [(&str, &str, bool); 11] = [
         ("src/**/mod.rs", "src/ui/deep/mod.rs", true),
         ("src/**/mod.rs", "src/mod.rs", true),
         ("Cargo.toml", "sub/Cargo.toml", true),
@@ -211,6 +211,8 @@ fn globs_mean_the_same_to_git_as_to_the_file_hook() {
         ("src/*.rs", "src/engine/a.rs", false),
         ("*.hxx", "include/deep/a.hxx", true),
         ("src/engine", "src/engineer.rs", false),
+        ("pages/[id].tsx", "pages/i.tsx", false),
+        ("pages/[id].tsx", "pages/[id].tsx", true),
     ];
     let notes: Vec<Note> = cases.iter().enumerate().map(|(i, (g, _, _))| note(&e.v, Some("app"), &format!("glob case {i}"), &[g], 10)).collect();
     // Written by hand, `add` would turn the backslashes into slashes.

@@ -327,3 +327,117 @@ fn the_digest_counts_commits_on_the_checkout_since_each_handoff() {
     std::fs::rename(wt.join(".git"), wt.join("git-off")).unwrap();
     assert!(!digest(&e).contains("since"), "no checkout, no count");
 }
+
+fn others_block(d: &str) -> Vec<String> {
+    d.lines().skip_while(|l| *l != "Other live handoffs:").skip(1).take_while(|l| !l.starts_with(char::is_uppercase)).map(str::to_string).collect()
+}
+
+/// A handoff of project app, created and last written so many hours ago.
+fn aged_handoff(v: &Vault, title: &str, body: &str, created_h: i64, written_h: i64) -> breadcrumb::note::Note {
+    let n = breadcrumb::ops::add(v, breadcrumb::ops::AddReq { title: title.into(), kind: Some("handoff".into()), project: Some("app".into()), body: Some(body.into()), ..Default::default() }).unwrap();
+    let mut n = v.get(&n.id).unwrap();
+    n.created = breadcrumb::util::now() - chrono::Duration::hours(created_h);
+    n.updated = breadcrumb::util::now() - chrono::Duration::hours(written_h);
+    v.write_note(&mut n).unwrap();
+    v.get(&n.id).unwrap()
+}
+
+#[test]
+fn other_handoffs_show_the_age_of_their_last_write_and_open_ones_come_first() {
+    let e = setup(&[]);
+    let item = common::add(&e.v, "Engine rewrite", "feature", Some("app"), &[]);
+    let open = aged_handoff(&e.v, "Open state", "Still half done.", 72, 2);
+    let later = aged_handoff(&e.v, "Docs pass", "Halfway through.", 4, 4);
+    for (i, t) in ["Settled one", "Settled two", "Settled three"].iter().enumerate() {
+        aged_handoff(&e.v, t, &format!("Continue {}.", item.id), 5 - i as i64, 5 - i as i64);
+    }
+    let lead = aged_handoff(&e.v, "Current state", "Where we are.", 1, 1);
+    mv(&e.v, &item.id, "review");
+    let d = digest(&e);
+    assert!(d.contains(&format!("Latest handoff {} (", lead.handle())), "{d}");
+    let others = others_block(&d);
+    assert_eq!(others.len(), 4, "{d}");
+    assert_eq!(others[0], format!("{} 2h: Open state", open.handle()), "the open ones lead the list, by last write, the age shown: {d}");
+    assert_eq!(others[1], format!("{} 4h: Docs pass", later.handle()), "{d}");
+    assert!(others[2].ends_with(": Settled three [settled, the 1 items it names landed]"), "the marked ones after them: {d}");
+    assert_eq!(others[3], "+2 more");
+
+    let report = breadcrumb::lifecycle::handoff_report(&e.v, &lead, false);
+    let listed: Vec<&str> = report.lines().filter(|l| l.starts_with("  ") && !l.starts_with("    ")).collect();
+    assert!(listed[0].ends_with(": Open state") && listed[1].ends_with(": Docs pass") && listed[2].contains(": Settled three [settled"), "add lists open ones first too: {report}");
+    assert!(listed[3].starts_with("  +2 more: "), "{report}");
+}
+
+#[test]
+fn a_project_in_a_subdirectory_counts_only_commits_under_it() {
+    let e = setup(&[]);
+    let outer = e.work.join("outer");
+    let app = outer.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    common::git(&outer, &["init", "-q"]);
+    let commit = |file: &std::path::Path, m: &str| {
+        std::fs::write(file, m).unwrap();
+        common::git(&outer, &["add", "-A"]);
+        common::git(&outer, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", m]);
+    };
+    commit(&outer.join("base.txt"), "base");
+    breadcrumb::ops::project_link(&e.v, "sub", &app, None).unwrap();
+    common::add(&e.v, "Sub state", "handoff", Some("sub"), &[]);
+    tick();
+    commit(&outer.join("elsewhere.txt"), "elsewhere");
+    commit(&app.join("x.txt"), "inside");
+    commit(&outer.join("elsewhere.txt"), "elsewhere again");
+    let d = breadcrumb::ops::context_with(&e.v, Some("sub"), breadcrumb::ops::ContextOpts { cwd: Some(app.clone()), ..Default::default() }).unwrap();
+    assert!(d.contains(", 1 commit since): Sub state\n"), "{d}");
+}
+
+/// A git.exe that answers every call from the real git but `log`, where it starts a grandchild and sleeps, like a
+/// launcher style git that hangs. Windows only, that is where a grandchild keeps the hook's stdout open.
+#[cfg(windows)]
+#[test]
+fn a_slow_git_and_what_it_started_are_ended_so_the_digest_returns() {
+    let e = setup(&[]);
+    common::git(&e.work, &["init", "-q"]);
+    common::git(&e.work, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "base"]);
+    common::add(&e.v, "Engine state", "handoff", Some("app"), &[]);
+    let path = std::env::var_os("PATH").unwrap();
+    let real = std::env::split_paths(&path).map(|d| d.join("git.exe")).find(|p| p.is_file()).expect("git on PATH");
+    let fake = e.work.parent().unwrap().join("fakegit");
+    std::fs::create_dir_all(&fake).unwrap();
+    let src = fake.join("git.rs");
+    std::fs::write(
+        &src,
+        r#"use std::process::{Command, Stdio};
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.iter().any(|a| a == "log") {
+        let s = Command::new(std::env::var("REAL_GIT").unwrap()).args(&args).status().unwrap();
+        std::process::exit(s.code().unwrap_or(1));
+    }
+    Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+}
+"#,
+    )
+    .unwrap();
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let built = Command::new(rustc).arg(&src).arg("-o").arg(fake.join("git.exe")).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let mut paths = vec![fake.clone()];
+    paths.extend(std::env::split_paths(&path));
+    let start = std::time::Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_crumb"))
+        .args(["context", "-p", "app"])
+        .current_dir(&e.work)
+        .env("BREADCRUMB_HOME", &e.v.root)
+        .env("BREADCRUMB_CLAUDE_DIR", &e.claude)
+        .env("REAL_GIT", &real)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let took = start.elapsed();
+    let d = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && d.contains("Latest handoff") && !d.contains("since"), "{d}");
+    assert!(took < std::time::Duration::from_secs(30), "the grandchild kept stdout open for {took:?}");
+}

@@ -46,11 +46,11 @@ pub fn since(n: &Note) -> (DateTime<Utc>, String) {
 
 /// Note globs as git pathspecs with the same meaning as `recall::glob_match`: relative to the checkout, a glob without a
 /// slash matches the file name at any depth, a path without `*` or `?` also matches everything below it, ASCII case is
-/// ignored and backslashes are slashes.
+/// ignored, backslashes are slashes and `[` is a plain character, written `[[]` since git would open a class with it.
 pub fn pathspecs(globs: &[String]) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for g in globs {
-        let p = g.trim().replace('\\', "/");
+        let p = g.trim().replace('\\', "/").replace('[', "[[]");
         let p = p.trim_start_matches("./").trim_start_matches('/');
         let mut segs: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
         if segs.is_empty() {
