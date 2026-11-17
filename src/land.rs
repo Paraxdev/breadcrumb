@@ -296,10 +296,16 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                 bail!("{sha:?} is not a commit sha, give 7 to 40 hex characters");
             }
             let mut ids: Vec<String> = vec![];
+            let mut stays = String::new();
             for item in items.iter().flat_map(|s| s.split(',')).map(str::trim).filter(|s| !s.is_empty()) {
-                let id = backlog::get_item(v, item)?.id;
-                if !ids.contains(&id) {
-                    ids.push(id);
+                let n = backlog::get_item(v, item)?;
+                if !ids.contains(&n.id) {
+                    if !goes_to_review(&n) {
+                        let st = backlog::state(&n);
+                        let claim = if st == "backlog" { format!(" and unclaimed, a green read leaves it there, `crumb claim {}` when its builder holds it", n.id) } else { ", a green read leaves it there".to_string() };
+                        stays.push_str(&format!("\n  {} is {st}{claim}", n.handle()));
+                    }
+                    ids.push(n.id);
                 }
             }
             let e = mutate(v, &slug, |entries| {
@@ -322,8 +328,8 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                 entries.push(e.clone());
                 Ok((format!("land add {}", &sha[..7]), e))
             })?;
-            let hint = if e.items.is_empty() { "\n  no items given, none move to review when it is read green" } else { "" };
-            Ok(state_out(&e, hint))
+            let hint = if e.items.is_empty() { "\n  no items given, none move to review when it is read green".to_string() } else { stays };
+            Ok(state_out(&e, &hint))
         }
         Op::Approve { sha, note, to } => {
             let note = note.map(|n| truncate_chars(&one_line(&n), NOTE_MAX)).filter(|n| !n.is_empty());
@@ -396,7 +402,7 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
         }
         Op::Read { shas, green, to } => {
             let word = if green { "green" } else { "red" };
-            let (es, retried, others) = mutate(v, &slug, |entries| {
+            let (es, retried, others, all) = mutate(v, &slug, |entries| {
                 let idx = find_all(entries, &shas)?;
                 let again = |e: &Entry| green && e.state == "green";
                 if let Some(e) = idx.iter().map(|&i| &entries[i]).find(|e| !force && e.state != "pushed" && !again(e)) {
@@ -422,15 +428,16 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                     }
                 }
                 let msg = if changed.is_empty() { String::new() } else { format!("land read {} {word}", changed.join(" ")) };
-                Ok((msg, (idx.iter().map(|&i| entries[i].clone()).collect::<Vec<Entry>>(), retried, others)))
+                Ok((msg, (idx.iter().map(|&i| entries[i].clone()).collect::<Vec<Entry>>(), retried, others, entries.clone())))
             })?;
             let multi = es.len() > 1;
             let mut blocks = vec![];
             let mut moved_all = vec![];
+            let mut done = vec![];
             for e in &es {
                 let mut out = state_out(e, "");
                 if green {
-                    let (text, moved) = land_items(v, e, req.by.clone());
+                    let (text, moved) = land_items(v, e, &all, req.by.clone(), &mut done);
                     out.text.push_str(&text);
                     if retried.contains(&e.sha) {
                         out.text.push_str(&format!("\n  {} green already, moved what was left", if multi { format!("{} was", e.short()) } else { "it was".to_string() }));
@@ -482,23 +489,64 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
 
 const REVIEWABLE: [&str; 3] = ["queued", "in-progress", "review"];
 
-/// Moves the items of a green entry to review with the merge as a ref, through the code `crumb move` runs.
-fn land_items(v: &Vault, e: &Entry, by: Option<String>) -> (String, Vec<Value>) {
+/// Whether a green read moves the item: queued, in progress or in review, or still in backlog with a claim, since a
+/// claim leaves the state alone.
+fn goes_to_review(n: &crate::note::Note) -> bool {
+    let st = backlog::state(n);
+    REVIEWABLE.contains(&st.as_str()) || st == "backlog" && backlog::assignee(n).is_some()
+}
+
+/// The session id in a step's `name id`, the whole text when it has none, empty for the user.
+fn session_of(by: &str) -> String {
+    let by = by.trim();
+    let last = by.rsplit(' ').next().unwrap_or(by);
+    let id = if last.len() == 8 && last.chars().all(|c| c.is_ascii_hexdigit()) { last } else { by };
+    if id.eq_ignore_ascii_case(backlog::DEFAULT_ACTOR) { String::new() } else { id.to_string() }
+}
+
+/// Moves the items of a green entry to review through the code `crumb move` runs. An item another open or red entry
+/// carries waits for the last of them, which moves it with every green carrier's commit as a ref. `built_by` is the
+/// item's claim holder, else the session that added the entry, never the reader.
+fn land_items(v: &Vault, e: &Entry, all: &[Entry], by: Option<String>, done: &mut Vec<String>) -> (String, Vec<Value>) {
     let mut text = String::new();
-    let mut ids = vec![];
+    let mut reqs = vec![];
     for id in &e.items {
-        match v.get(id) {
-            Ok(n) if REVIEWABLE.contains(&backlog::state(&n).as_str()) => ids.push(id.clone()),
-            Ok(n) => text.push_str(&format!("\n  left {} where it is, it is {} and only queued, in-progress or review items go to review", n.handle(), backlog::state(&n))),
-            Err(_) => text.push_str(&format!("\n  {id} is not in the vault any more, left alone")),
+        if done.contains(id) {
+            continue;
         }
+        let n = match v.get(id) {
+            Ok(n) => n,
+            Err(_) => {
+                text.push_str(&format!("
+  {id} is not in the vault any more, left alone"));
+                continue;
+            }
+        };
+        if !goes_to_review(&n) {
+            text.push_str(&format!("
+  left {} where it is, it is {} and only queued, in-progress, review or claimed backlog items go to review", n.handle(), backlog::state(&n)));
+            continue;
+        }
+        let open: Vec<String> = all.iter().filter(|x| x.sha != e.sha && x.items.contains(id) && (x.is_open() || x.state == "red")).map(|x| format!("{} {}", x.short(), x.state)).collect();
+        if !open.is_empty() {
+            let verb = if open.len() > 1 { "carry" } else { "carries" };
+            text.push_str(&format!("
+  left {} where it is, {} still {verb} it, the last of them read green moves it", n.handle(), open.join(", ")));
+            continue;
+        }
+        done.push(id.clone());
+        let mut refs = vec![format!("commit:{}", e.sha)];
+        for x in all.iter().filter(|x| x.sha != e.sha && x.state == "green" && x.items.contains(id)) {
+            refs.push(format!("commit:{}", x.sha));
+        }
+        let built_by = backlog::assignee(&n).or_else(|| e.by("built").map(session_of)).unwrap_or_default();
+        reqs.push((id.clone(), MoveReq { state: "review".into(), refs, by: by.clone(), built_by: Some(built_by), ..Default::default() }));
     }
     let mut moved = vec![];
-    if ids.is_empty() {
+    if reqs.is_empty() {
         return (text, moved);
     }
-    let req = MoveReq { state: "review".into(), refs: vec![format!("commit:{}", e.sha)], by, ..Default::default() };
-    match backlog::move_items(v, &ids, &req) {
+    match backlog::move_each(v, &reqs) {
         Ok(results) => {
             for (id, r) in results {
                 match r {
@@ -507,11 +555,13 @@ fn land_items(v: &Vault, e: &Entry, by: Option<String>) -> (String, Vec<Value>) 
                         text.push_str(backlog::move_text(&r).trim_end());
                         moved.push(json!({"id": r.note.id, "from": r.from, "to": r.to, "warnings": r.warnings}));
                     }
-                    Err(err) => text.push_str(&format!("\n  failed {id}: {}", one_line(&format!("{err:#}")))),
+                    Err(err) => text.push_str(&format!("
+  failed {id}: {}", one_line(&format!("{err:#}")))),
                 }
             }
         }
-        Err(err) => text.push_str(&format!("\n  moving the items failed: {}", one_line(&format!("{err:#}")))),
+        Err(err) => text.push_str(&format!("
+  moving the items failed: {}", one_line(&format!("{err:#}")))),
     }
     (text, moved)
 }

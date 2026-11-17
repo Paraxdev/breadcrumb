@@ -329,3 +329,54 @@ fn a_note_on_add_shows_in_the_list_and_digest_and_no_step_clears_it() {
     assert_eq!(entries(&e)[2].memo.as_deref(), Some("from mcp"));
     assert!(std::fs::read_to_string(queue_file(&e)).unwrap().lines().all(|l| l.contains("\"memo\"") || l.contains("\"green\"")));
 }
+
+fn built_by(e: &Env, id: &str) -> Option<String> {
+    e.v.get(id).unwrap().field(breadcrumb::backlog::BUILT_BY_KEY).and_then(|v| v.as_str().map(str::to_string))
+}
+
+#[test]
+fn a_green_read_waits_for_every_entry_carrying_an_item_and_keeps_the_builder() {
+    let e = setup();
+    let shared = item(&e, "Shared by two pieces", "in-progress");
+    let claimed = item(&e, "Claimed only", "backlog");
+    let bare = item(&e, "Never claimed", "backlog");
+    ok(&e, "builder", &["claim", &claimed]);
+    let out = ok(&e, "w", &["land", "-p", "fx", "add", S1, "--items", &format!("{shared},{claimed},{bare}")]);
+    assert!(out.contains(&format!("is backlog and unclaimed, a green read leaves it there, `crumb claim {bare}`")) && !out.contains(&format!("claim {claimed}`")), "{out}");
+    ok(&e, "w", &["land", "-p", "fx", "add", S2, "--items", &shared]);
+    approved_only(&e, &[S1, S2]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S1, "--run", "1"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S1, "green"]);
+    assert!(out.contains("2222222 approved still carries it, the last of them read green moves it"), "{out}");
+    assert_eq!(breadcrumb::backlog::state(&e.v.get(&shared).unwrap()), "in-progress");
+    assert_eq!(breadcrumb::backlog::state(&e.v.get(&claimed).unwrap()), "review", "a claim counts as work started: {out}");
+    assert_eq!(built_by(&e, &claimed).as_deref(), Some("builder"), "the claim holder built it, not the reader");
+    assert_eq!(breadcrumb::backlog::state(&e.v.get(&bare).unwrap()), "backlog");
+
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S2, "--run", "2"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S2, "green"]);
+    let n = e.v.get(&shared).unwrap();
+    assert_eq!(breadcrumb::backlog::state(&n), "review", "{out}");
+    assert!(n.refs().contains(&format!("commit:{S1}")) && n.refs().contains(&format!("commit:{S2}")), "every green piece is a ref: {:?}", n.refs());
+    assert_eq!(built_by(&e, &shared).as_deref(), Some("w"), "unclaimed, the session that queued the merge built it");
+}
+
+#[test]
+fn one_read_of_two_entries_with_the_same_item_moves_it_once() {
+    let e = setup();
+    let shared = item(&e, "Shared", "in-progress");
+    ok(&e, "w", &["land", "-p", "fx", "add", S1, "--items", &shared]);
+    ok(&e, "w", &["land", "-p", "fx", "add", S2, "--items", &shared]);
+    approved_only(&e, &[S1, S2]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S1, S2, "--run", "1"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S1, S2, "green"]);
+    assert_eq!(out.matches("-> review").count(), 1, "{out}");
+    let n = e.v.get(&shared).unwrap();
+    assert!(n.refs().contains(&format!("commit:{S1}")) && n.refs().contains(&format!("commit:{S2}")), "{:?}", n.refs());
+}
+
+fn approved_only(e: &Env, shas: &[&str]) {
+    for s in shas {
+        ok(e, "r", &["land", "-p", "fx", "approve", s]);
+    }
+}

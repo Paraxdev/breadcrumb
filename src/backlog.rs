@@ -880,6 +880,9 @@ pub struct MoveReq {
     /// do not apply: a check may tick `user:` steps and a plain move may close an item in review.
     pub by_user: bool,
     pub release_note: Option<String>,
+    /// Who built the item, stamped as `built_by` on a move to review in place of the mover, empty leaves it unset.
+    /// A green land read moves items for their builder.
+    pub built_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1413,7 +1416,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
         _ => {}
     }
     if to == "review" && from != "review" {
-        match session_name(req.by.as_deref()) {
+        match req.built_by.clone().or_else(|| session_name(req.by.as_deref())).filter(|b| !b.trim().is_empty()) {
             Some(b) => {
                 n.set_field(BUILT_BY_KEY, Value::String(b));
             }
@@ -1457,10 +1460,16 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
 
 /// Moves each item on its own, a failure does not stop the rest, and commits what moved as one vault commit.
 pub fn move_items(v: &Vault, ids: &[String], req: &MoveReq) -> Result<Vec<(String, Result<MoveResult>)>> {
-    let to = check_state(&req.state)?;
+    move_each(v, &ids.iter().map(|id| (id.clone(), req.clone())).collect::<Vec<_>>())
+}
+
+/// Like `move_items` with a request per item, all to one state, in one vault commit.
+pub fn move_each(v: &Vault, reqs: &[(String, MoveReq)]) -> Result<Vec<(String, Result<MoveResult>)>> {
+    let Some((_, first)) = reqs.first() else { return Ok(vec![]) };
+    let to = check_state(&first.state)?;
     let mut quiet = v.clone();
     quiet.config.auto_commit = false;
-    let out: Vec<(String, Result<MoveResult>)> = ids.iter().map(|id| (id.clone(), move_item(&quiet, id, req.clone()))).collect();
+    let out: Vec<(String, Result<MoveResult>)> = reqs.iter().map(|(id, req)| (id.clone(), move_item(&quiet, id, req.clone()))).collect();
     let touched: Vec<PathBuf> = out.iter().filter_map(|(_, r)| r.as_ref().ok()).flat_map(|r| r.touched.clone()).collect();
     let moved = out.iter().filter(|(_, r)| r.as_ref().is_ok_and(|r| r.changed)).count();
     if moved > 0 {
