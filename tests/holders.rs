@@ -34,6 +34,14 @@ fn claim_then_die(e: &Env, id: &str, machine: &str) {
     std::fs::write(&file, format!(r#"{{"pid":{},"sessionId":"{DEAD}","name":"neocad-dead"}}"#, proc.pid())).unwrap();
     assert!(crumb(e, DEAD, machine, &["claim", id]).0);
     std::fs::remove_file(file).unwrap();
+    still_queued(e, id);
+}
+
+/// A claim starts its item now, a claimed item still queued is what an older binary leaves, and what `next` weighs.
+fn still_queued(e: &Env, id: &str) {
+    let mut n = e.v.get(id).unwrap();
+    n.set_field("state", serde_yaml::Value::String("queued".into()));
+    e.v.write_note(&mut n).unwrap();
 }
 
 fn crumb(e: &Env, session: &str, machine: &str, args: &[&str]) -> (bool, String) {
@@ -269,6 +277,7 @@ fn the_holder_of_a_being_built_item_still_gets_it_from_next() {
     let e = setup();
     let lane = queued(&e, "Lane item");
     crumb(&e, LIVE, "pc-a", &["claim", &lane]);
+    still_queued(&e, &lane);
     crumb(&e, LIVE, "pc-a", &["update", &lane, "--ref", "branch:x"]);
     assert!(crumb(&e, LIVE, "pc-a", &["next", "--project", "app"]).1.contains(&lane));
     assert!(next_id(&e).contains("no unblocked"), "{}", next_id(&e));

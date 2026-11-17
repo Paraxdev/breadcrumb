@@ -101,7 +101,20 @@ fn state_order(s: &str) -> usize {
 }
 
 pub fn release_note(n: &Note) -> Option<String> {
+    stored_release_note(n).filter(|s| !is_no_release_note(s))
+}
+
+fn stored_release_note(n: &Note) -> Option<String> {
     n.field(backlog::RELEASE_NOTE_KEY).and_then(yaml_scalar_string).map(|s| crate::util::one_line(&s)).filter(|s| !s.trim().is_empty())
+}
+
+/// `none` says a maker sees no change, a test or CI only fix: no release note line and no hint asking for one.
+pub fn is_no_release_note(s: &str) -> bool {
+    s.trim().eq_ignore_ascii_case("none")
+}
+
+pub fn release_note_waived(n: &Note) -> bool {
+    stored_release_note(n).is_some_and(|s| is_no_release_note(&s))
 }
 
 /// The state, with what is left for the user when the item never passed its check.
@@ -128,7 +141,7 @@ fn section(s: &mut String, head: &str, lines: Vec<String>) {
 
 pub fn text(r: &Report, range: &str, repo: &Path) -> String {
     let mut s = format!("{range} in {}: {} commits, {} merges, {} items landed, {} matched but not landed\n", repo.display(), r.commits, r.merges, r.open.len(), r.not_landed.len());
-    let (noted, plain): (Vec<&Note>, Vec<&Note>) = r.open.iter().partition(|n| release_note(n).is_some());
+    let (noted, plain): (Vec<&Note>, Vec<&Note>) = r.open.iter().filter(|n| !release_note_waived(n)).partition(|n| release_note(n).is_some());
     section(&mut s, "Release notes", noted.iter().map(|n| format!("- {} [{}, {}]", release_note(n).unwrap_or_default(), n.id, state_label(n))).collect());
     section(&mut s, "No release note", plain.iter().map(|n| item_line(n)).collect());
     section(&mut s, "Matched but not landed, not moved", r.not_landed.iter().map(|(n, why)| format!("{}: {why}", item_line(n))).collect());
@@ -155,7 +168,7 @@ pub fn unrecorded_text(r: &Report) -> String {
 }
 
 pub fn json(r: &Report, range: &str, repo: &Path) -> Json {
-    let item = |n: &Note| json!({"id": n.id, "slug": n.slug(), "title": n.title, "state": backlog::state(n), "release_note": release_note(n), "unchecked_steps": backlog::review_steps(n)});
+    let item = |n: &Note| json!({"id": n.id, "slug": n.slug(), "title": n.title, "state": backlog::state(n), "release_note": release_note(n), "no_release_note": release_note_waived(n), "unchecked_steps": backlog::review_steps(n)});
     json!({
         "range": range,
         "repo": repo.display().to_string(),

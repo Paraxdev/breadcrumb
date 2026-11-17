@@ -816,21 +816,26 @@ pub enum ConfigCmd {
 pub enum ReviewCmd {
     /// It works: move to done and mark its steps met. When agents review, an agent's pass leaves open user: steps for the user
     Pass {
-        /// Item id or slug
-        id: String,
-        /// Who did it, for the history (default: this session), a reviewer subagent names itself here, user is the user's own pass
+        /// Item ids or slugs, several pass in one vault commit with the same evidence
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<String>,
+        /// Who did it, for the history (default: this session), a reviewer subagent of this session passes reviewer (stored as <session>/reviewer), user is the user's own pass
         #[arg(long)]
         by: Option<String>,
         /// What you ran and what you saw, added to the body, required when review_by is agent
         #[arg(long, allow_hyphen_values = true)]
         evidence: Option<String>,
+        /// Only these steps, by the numbers `review` shows like 1,2, for a check split between reviewers: the item stays in review until every agent step is ticked
+        #[arg(long, alias = "step", alias = "check", value_name = "WHICH")]
+        steps: Option<String>,
         #[command(flatten)]
         _p: IgnoredProject,
     },
     /// It does not: back to queued with the reason, keeping its priority
     Fail {
-        /// Item id or slug
-        id: String,
+        /// Item ids or slugs, several fail in one vault commit with the same reason
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<String>,
         /// What did not work, added to the body
         #[arg(long)]
         reason: String,
@@ -1999,27 +2004,9 @@ pub fn run(cli: Cli) -> Result<i32> {
                 out.emit(backlog::move_text(&r), moved_json(&r));
                 return Ok(0);
             }
-            let results = backlog::move_items(&open()?, &ids, &req)?;
-            let mut text = String::new();
-            let mut data = vec![];
-            let mut failed = 0;
-            for (id, r) in &results {
-                match r {
-                    Ok(r) => {
-                        text.push_str(&backlog::move_text(r));
-                        data.push(moved_json(r));
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        text.push_str(&format!("failed {id}: {}\n", crate::util::one_line(&format!("{e:#}"))));
-                        data.push(json!({"id": id, "error": format!("{e:#}")}));
-                    }
-                }
-            }
-            out.emit(text, Json::Array(data));
-            if failed > 0 {
-                eprintln!("error: {failed} of {} moves failed, the others are done", results.len());
-                return Ok(1);
+            let code = emit_moves(&out, &backlog::move_items(&open()?, &ids, &req)?, moved_json);
+            if code != 0 {
+                return Ok(code);
             }
         }
         Cmd::Pin { ids, .. } => pin_cmd(&out, &open()?, &ids, true)?,
@@ -2143,7 +2130,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Review { scope, verdict } => {
             let v = open()?;
-            let r = match verdict {
+            let (ids, req) = match verdict {
                 None => {
                     let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
                     let items = backlog::review_items(&v, &sc)?;
@@ -2151,10 +2138,19 @@ pub fn run(cli: Cli) -> Result<i32> {
                     out.emit(backlog::review_text(&items, &sc.label(), |p| crate::config::agent_review(&v, sc.project().or(p))), json!({"scope": sc.label(), "review_by": review_by, "items": items}));
                     return Ok(0);
                 }
-                Some(ReviewCmd::Pass { id, by, evidence, .. }) => backlog::review_pass(&v, &id, backlog::ReviewBy { by_user: backlog::typed_by_user(by.as_deref()), by, evidence })?,
-                Some(ReviewCmd::Fail { id, reason, by, evidence, .. }) => backlog::review_fail(&v, &id, &reason, backlog::ReviewBy { by_user: backlog::typed_by_user(by.as_deref()), by, evidence })?,
+                Some(ReviewCmd::Pass { ids, by, evidence, steps, .. }) => {
+                    let check = steps.as_deref().map(backlog::Check::parse).transpose()?;
+                    (ids, backlog::verdict_req(backlog::Verdict::Pass, backlog::ReviewBy { by_user: backlog::typed_by_user(by.as_deref()), by, evidence }, check))
+                }
+                Some(ReviewCmd::Fail { ids, reason, by, evidence, .. }) => (ids, backlog::verdict_req(backlog::Verdict::Fail(reason), backlog::ReviewBy { by_user: backlog::typed_by_user(by.as_deref()), by, evidence }, None)),
             };
-            out.emit(backlog::move_text(&r), json!({"from": r.from, "to": r.to, "waiting_for_user": waiting_json(&r), "note": r.note.to_json()}));
+            let review_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "waiting_for_user": waiting_json(r), "warnings": r.warnings, "note": r.note.to_json()});
+            if let [id] = ids.as_slice() {
+                let r = backlog::move_item(&v, id, req)?;
+                out.emit(backlog::move_text(&r), review_json(&r));
+                return Ok(0);
+            }
+            return Ok(emit_moves(&out, &backlog::move_items(&v, &ids, &req)?, review_json));
         }
         Cmd::Check { id, which, .. } => {
             let backlog::Checked { note: n, ticked, kept_for_user: kept } = backlog::check_as(&open()?, &id, &backlog::Check::parse(which.as_deref().unwrap_or("all"))?, !backlog::in_session())?;
@@ -2211,6 +2207,32 @@ running MCP and serve processes keep the old version until their client restarts
         }
     }
     Ok(0)
+}
+
+/// Prints each move of a batch, a failure names its id. Exit 1 when any failed, the others are done.
+fn emit_moves(out: &Out, results: &[(String, Result<backlog::MoveResult>)], js: impl Fn(&backlog::MoveResult) -> Json) -> i32 {
+    let mut text = String::new();
+    let mut data = vec![];
+    let mut failed = 0;
+    for (id, r) in results {
+        match r {
+            Ok(r) => {
+                text.push_str(&backlog::move_text(r));
+                data.push(js(r));
+            }
+            Err(e) => {
+                failed += 1;
+                text.push_str(&format!("failed {id}: {}\n", crate::util::one_line(&format!("{e:#}"))));
+                data.push(json!({"id": id, "error": format!("{e:#}")}));
+            }
+        }
+    }
+    out.emit(text, Json::Array(data));
+    if failed == 0 {
+        return 0;
+    }
+    eprintln!("error: {failed} of {} moves failed, the others are done", results.len());
+    1
 }
 
 fn waiting_json(r: &backlog::MoveResult) -> Json {
