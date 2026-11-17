@@ -351,6 +351,11 @@ pub fn claim(v: &Vault, id: &str, by: &str, force: bool) -> Result<Note> {
     };
     set_claim(&mut n, &by);
     n.body = append_history(&n.body, &event_line(&what, &by));
+    let from = state(&n);
+    if matches!(from.as_str(), "backlog" | "queued") {
+        n.set_field("state", Value::String("in-progress".into()));
+        record_state_change(&mut n, &from, "in-progress", Some(&by));
+    }
     crate::question::ack_in(&mut n, &by);
     save(v, &mut n, "claim")?;
     Ok(n)

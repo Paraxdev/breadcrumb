@@ -25,7 +25,7 @@ fn claim_and_release_guard_fresh_claims_of_other_sessions() {
     let n = backlog::claim(&v, &t.id, "neocad-fc", false).unwrap();
     assert_eq!(backlog::assignee(&n).as_deref(), Some("neocad-fc"));
     assert!(backlog::claimed_at(&n).is_some() && n.body.contains("claimed (by neocad-fc)"), "{}", n.body);
-    assert_eq!(backlog::state(&n), "backlog", "a claim leaves the state alone");
+    assert_eq!(backlog::state(&n), "in-progress", "a claim starts a backlog item");
 
     let e = err(backlog::claim(&v, &t.id, "neocad-49", false));
     assert!(e.contains("claimed by neocad-fc") && e.contains("force"), "{e}");
@@ -56,6 +56,8 @@ fn next_skips_items_other_sessions_hold_and_the_board_shows_holders() {
         backlog::queue(&v, &n.id, QueuePos::End, None).unwrap();
     }
     backlog::claim(&v, &first.id, "s1", false).unwrap();
+    // A claim starts the item, a queued item with a claim is what an older binary leaves.
+    backlog::move_item(&v, &first.id, backlog::MoveReq { state: "queued".into(), ..Default::default() }).unwrap();
     let scope = Scope::Project { slug: "app".into(), with_global: false };
     let next = |me: Option<&str>| backlog::next_as(&v, &scope, None, None, me).unwrap().map(|n| n.id);
     assert_eq!(next(Some("s1")), Some(first.id.clone()), "the holder still gets it");
