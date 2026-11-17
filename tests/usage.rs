@@ -289,3 +289,13 @@ fn in_process_tests_never_see_the_shell_session() {
     let n = common::add(&v, "Written in a test", "note", None, &[]);
     assert!(n.field("session").is_none(), "{:?}", n.field("session"));
 }
+
+#[test]
+fn a_mistyped_state_is_logged_as_a_bad_value_with_the_state_it_means() {
+    let (_d, v) = common::vault();
+    let id = common::add(&v, "Item", "task", Some("app"), &[]).id;
+    crumb(&v, None, &["move", &id, "donee"]);
+    let l = lines(&v);
+    let last = l.last().unwrap();
+    assert_eq!((last["cmd"].as_str(), last["outcome"].as_str(), last["miss"].as_str(), last["hint"].as_str()), (Some("move"), Some("bad_value"), Some("donee"), Some("done")), "{l:#?}");
+}

@@ -43,13 +43,14 @@ pub fn priority_word(fd: &FieldDef, input: &crate::ops::FieldInput) -> Option<(S
 }
 
 /// Why a word is no state, with the state it most likely means.
-fn unknown_state(s: &str) -> String {
+fn unknown_state(s: &str) -> (String, Option<&'static str>) {
     let all = STATES.join(", ");
     let meant = match s {
         "land" | "landed" | "landing" | "merged" => {
-            return format!(
+            let why = format!(
                 "unknown state '{s}', landed work waits in review for its check, `breadcrumb move <id> review` (MCP move with state review), and the landing queue is `breadcrumb land add <sha> --items <id>`, whose green read moves its items to review. States: {all}"
             );
+            return (why, Some("review"));
         }
         "todo" | "open" | "ready" | "pending" | "next" => "queued",
         "doing" | "started" | "active" | "working" | "progress" => "in-progress",
@@ -57,13 +58,13 @@ fn unknown_state(s: &str) -> String {
         "released" | "deployed" | "live" => "shipped",
         "cancelled" | "canceled" | "wontfix" | "dropped" | "declined" | "abandoned" | "duplicate" => "rejected",
         "testing" | "test" | "verify" | "check" | "checking" => "review",
-        "archived" | "archive" => return format!("unknown state '{s}', archiving is the status: `breadcrumb archive <id>` (MCP update with status archived). States: {all}"),
+        "archived" | "archive" => return (format!("unknown state '{s}', archiving is the status: `breadcrumb archive <id>` (MCP update with status archived). States: {all}"), None),
         _ => match crate::util::nearest(s, STATES) {
             Some(n) => n,
-            None => return format!("unknown state '{s}', expected one of: {all}"),
+            None => return (format!("unknown state '{s}', expected one of: {all}"), None),
         },
     };
-    format!("unknown state '{s}', did you mean {meant}? `breadcrumb move <id> {meant}` (MCP move with state {meant}). States: {all}")
+    (format!("unknown state '{s}', did you mean {meant}? `breadcrumb move <id> {meant}` (MCP move with state {meant}). States: {all}"), Some(meant))
 }
 
 pub fn seed_kinds() -> Vec<KindDef> {
@@ -389,7 +390,11 @@ pub fn key(n: &Note) -> String {
 pub fn check_state(s: &str) -> Result<String> {
     let s = s.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     let s = if s == "inprogress" || s == "wip" { "in-progress".to_string() } else { s };
-    if STATES.contains(&s.as_str()) { Ok(s) } else { bail!("{}", unknown_state(&s)) }
+    if STATES.contains(&s.as_str()) {
+        return Ok(s);
+    }
+    let (why, meant) = unknown_state(&s);
+    Err(crate::usage::BadValue::error(&s, meant, why))
 }
 
 fn actor(by: Option<&str>) -> String {
