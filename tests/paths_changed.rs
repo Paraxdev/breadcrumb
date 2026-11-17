@@ -294,3 +294,18 @@ fn a_note_created_after_its_verified_day_counts_from_created_and_says_so() {
     let line = format!("paths changed: 1 commit since created {}, newest {after} \"after it was written\"\n", breadcrumb::util::fmt_date(&days_ago(4)));
     assert!(get(&e, &n.id).ends_with(&line), "{}", get(&e, &n.id));
 }
+
+#[test]
+fn a_commit_in_the_verify_second_counts() {
+    away_from_midnight();
+    let e = setup();
+    let at = DateTime::from_timestamp(days_ago(3).timestamp(), 0).unwrap();
+    commit(&e.work, "src/a.rs", "base", days_ago(20));
+    commit(&e.work, "src/a.rs", "a second before", at - Duration::seconds(1));
+    let same = commit(&e.work, "src/a.rs", "in the same second", at);
+    let mut n = note(&e.v, Some("app"), "Lexer drops tabs", &["src/*.rs"], 3);
+    n.set_field("verified_at", serde_yaml::Value::String(at.to_rfc3339()));
+    e.v.write_note(&mut n).unwrap();
+    let line = format!("paths changed: 1 commit since verified {}, newest {same} \"in the same second\"\n", date(3));
+    assert!(get(&e, &n.id).ends_with(&line), "{}", get(&e, &n.id));
+}

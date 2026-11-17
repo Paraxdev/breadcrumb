@@ -322,3 +322,24 @@ fn only_landed_items_move_and_the_rest_say_why() {
     assert!(out.contains("Moved 1 items"), "an epic moves once its children closed: {out}");
     assert_eq!(state_of(&v, &epic), "shipped");
 }
+
+#[test]
+fn a_session_ship_lists_items_held_for_review_under_their_own_heading() {
+    let (_d, v) = common::vault();
+    let r = repo();
+    crumb(&v, &["config", "set", "review_by", "agent"]);
+    let held = item(&v, "Waits for a check", "review", &commit_ref(&r.merge, 9), None);
+    let repo = r.root.to_str().unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_crumb"))
+        .args(["ship", "base..main", "--repo", repo, "--project", "app", "--yes"])
+        .env("BREADCRUMB_HOME", &v.root)
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env("BREADCRUMB_SESSION", "agent-a")
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    let head = out.find("Held for review, not moved (1)").unwrap_or_else(|| panic!("{out}"));
+    assert!(out[head..].lines().any(|l| l.contains(&held) && l.contains("waits for a check (review_by = agent)")), "{out}");
+    assert!(out.contains("Matched but not landed, not moved (0)"), "{out}");
+    assert_eq!(state_of(&v, &held), "review");
+}

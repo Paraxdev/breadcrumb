@@ -62,7 +62,9 @@ pub fn session_start(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Res
     let project = v.detect_project_fast(cwd);
     let recent = crate::digest::recent_rows(&v, project.as_deref(), RECENT);
     let body = crate::ops::context_with(&v, project.as_deref(), crate::ops::ContextOpts { recent, cwd: Some(cwd.to_path_buf()), ..Default::default() })?;
-    let text = cap(body.trim_end(), crate::digest::budget_of(&crate::config::effective(&v, project.as_deref())));
+    let budget = crate::digest::budget_of(&crate::config::effective(&v, project.as_deref()));
+    let text = cap(body.trim_end(), budget);
+    crate::usage::digest_built(text.chars().count(), budget, text.chars().count() < body.trim_end().chars().count());
     if let Some(sid) = &input.session_id {
         recall::prune_sessions(root);
         let mut st = recall::load_session(root, sid);

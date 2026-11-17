@@ -203,4 +203,12 @@ fn doctor_reports_a_gitignore_that_lets_the_local_directory_through() {
     std::fs::write(v.root.join(".git/info/exclude"), ".local/\n").unwrap();
     let ps = found(&v);
     assert!(ps.len() == 1 && ps[0].starts_with("warning: `.local/` is ignored only by .git/info/exclude, which another clone"), "{ps:?}");
+    std::fs::write(v.root.join(".git/info/exclude"), "").unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let global = elsewhere.path().join("global-ignore");
+    std::fs::write(&global, ".local/\n").unwrap();
+    common::git(&v.root, &["config", "core.excludesFile", &breadcrumb::util::path_str(&global)]);
+    let ps = found(&v);
+    let named = format!("warning: `.local/` is ignored only by {}, which another clone", breadcrumb::util::path_str(&global));
+    assert!(ps.len() == 1 && ps[0].starts_with(&named), "a path with a drive is named whole: {ps:?}");
 }

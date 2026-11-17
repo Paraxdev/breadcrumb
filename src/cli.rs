@@ -394,6 +394,15 @@ pub enum Cmd {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// Calls per command, error rates, the commonest misses, commands never used and the digest size, from this machine's usage log
+    Usage {
+        /// Days back to read
+        #[arg(long, default_value_t = crate::usage::DEFAULT_DAYS)]
+        days: u64,
+        /// Only calls in this project
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+    },
     /// Capture an idea quickly
     Idea {
         /// One line title
@@ -1330,9 +1339,12 @@ struct Out {
 impl Out {
     fn emit(&self, text: impl AsRef<str>, data: Json) {
         if self.json {
-            println!("{}", serde_json::to_string_pretty(&data).unwrap_or_default());
+            let t = serde_json::to_string_pretty(&data).unwrap_or_default();
+            crate::usage::printed(&t);
+            println!("{t}");
         } else {
             let t = text.as_ref();
+            crate::usage::printed(t);
             if t.ends_with('\n') {
                 print!("{t}");
             } else {
@@ -1342,38 +1354,103 @@ impl Out {
     }
 }
 
+/// A parsed command line with its command path, like `land.read`, and the project it names, for the usage log.
+struct Parsed {
+    cli: Cli,
+    path: String,
+    project: Option<String>,
+}
+
+fn parse_from(args: impl IntoIterator<Item = String>) -> std::result::Result<Parsed, clap::Error> {
+    use clap::{CommandFactory, FromArgMatches};
+    let mut m = Cli::command().try_get_matches_from(std::iter::once("breadcrumb".to_string()).chain(args))?;
+    let mut path = vec![];
+    let mut project = None;
+    let mut at = Some(&m);
+    while let Some((name, sub)) = at.and_then(|x| x.subcommand()) {
+        path.push(name.to_string());
+        if let Ok(Some(p)) = sub.try_get_one::<String>("project") {
+            project = Some(p.clone());
+        }
+        at = Some(sub);
+    }
+    let cli = Cli::from_arg_matches_mut(&mut m)?;
+    Ok(Parsed { cli, path: path.join("."), project })
+}
+
+fn raw_args() -> Vec<String> {
+    std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect()
+}
+
+/// The vault a command line names with --vault, else the one it would use.
+fn vault_of(args: &[String]) -> Option<PathBuf> {
+    let i = args.iter().take_while(|a| *a != "--").position(|a| a == "--vault" || a.starts_with("--vault="))?;
+    let given = match args[i].split_once('=') {
+        Some((_, v)) => Some(v.to_string()),
+        None => args.get(i + 1).cloned(),
+    };
+    resolve_vault_path(given.as_deref().map(Path::new)).ok()
+}
+
 pub fn main_entry() -> i32 {
     use clap::CommandFactory;
     crate::upgrade::cleanup_old_exes();
-    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    let args = raw_args();
     let eager = crate::forgive::eager(&Cli::command(), &args);
     if let Some(r) = &eager {
         eprintln!("note: read as `{}`", crate::forgive::line(r));
     }
-    let parsed = match eager {
-        Some(r) => Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r)),
-        None => Cli::try_parse(),
-    };
-    let cli = match parsed {
-        Ok(c) => c,
-        Err(e) => match forgiven(&e) {
-            Ok(c) => c,
-            Err(code) => return code,
+    let parsed = parse_from(eager.clone().unwrap_or_else(|| args.clone()));
+    let (p, miss) = match parsed {
+        Ok(p) => {
+            let miss = eager.as_ref().map(|_| ("question".to_string(), format!("read as {}", p.path.replace('.', " "))));
+            (p, miss)
+        }
+        Err(e) => match forgiven(&e, &args) {
+            Ok(x) => x,
+            Err((code, line)) => {
+                if let Some(root) = vault_of(&args).or_else(|| resolve_vault_path(None).ok()) {
+                    crate::usage::record(&root, (*line).clone(), Some(&cwd()));
+                    crate::usage::adapt(&root, &line);
+                }
+                return code;
+            }
         },
     };
-    if let Cmd::Hook(h) = &cli.cmd {
-        run_hook(cli.vault.as_deref(), h);
+    let root = resolve_vault_path(p.cli.vault.as_deref()).ok();
+    let log = |outcome: &str, refused: Option<(String, Option<String>)>| {
+        if let Some(root) = &root {
+            let mut line = crate::usage::Line::new(p.path.clone(), outcome).with_project(p.project.as_deref());
+            if let Some((w, h)) = &refused {
+                line = line.missed(w, h.as_deref());
+            } else if let Some((w, h)) = &miss {
+                line = line.missed(w, Some(h));
+            }
+            crate::usage::record(root, line.clone(), Some(&cwd()));
+            crate::usage::adapt(root, &line);
+        }
+    };
+    if let Cmd::Hook(h) = &p.cli.cmd {
+        run_hook(p.cli.vault.as_deref(), h);
+        log("ok", None);
         return 0;
     }
-    let json = cli.json;
-    match run(cli) {
-        Ok(code) => code,
+    let json = p.cli.json;
+    match run(p.cli) {
+        Ok(code) => {
+            log(&if code == 0 { "ok".to_string() } else { format!("exit{code}") }, None);
+            code
+        }
         Err(e) => {
+            let msg = format!("{e:#}");
             if json {
-                println!("{}", json!({ "error": format!("{e:#}") }));
+                println!("{}", json!({ "error": msg }));
             } else {
-                eprintln!("error: {e:#}");
+                eprintln!("error: {msg}");
             }
+            crate::usage::printed(&msg);
+            let refused = crate::usage::value_miss(&e);
+            log(if refused.is_some() { "bad_value" } else { crate::usage::kind_of(&msg) }, refused);
             if e.downcast_ref::<UsageError>().is_some() { 2 } else { 1 }
         }
     }
@@ -1389,6 +1466,7 @@ fn run_hook(vault: Option<&Path>, h: &HookCmd) {
     };
     let print = |r: Result<Option<String>>| {
         if let Ok(Some(out)) = r {
+            crate::usage::printed(&out);
             println!("{out}");
         }
     };
@@ -1848,6 +1926,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(run.text(min, "`--all`"), json!({"notes": run.checked, "scope": sc.label(), "errors": errors, "problems": run.shown(min)}));
             return Ok(if errors > 0 { 1 } else { 0 });
         }
+        Cmd::Usage { days, project } => {
+            let v = open()?;
+            let r = crate::usage::report(&v.root, days, project.as_deref());
+            out.emit(r.text(), serde_json::to_value(&r)?);
+        }
         Cmd::Stats { prompt, file } => {
             let st = crate::stats::collect(&open()?.root, &cwd, prompt.as_deref(), file.as_deref())?;
             out.emit(crate::stats::text(&st), crate::stats::json(&st));
@@ -2306,9 +2389,20 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// A command line clap refused, read the way an agent meant it (a note on stderr says how), or the error with the
-/// nearest valid line.
-fn forgiven(e: &clap::Error) -> std::result::Result<Cli, i32> {
+/// A parsed command line and, when it was read another way, the refused word and the command it was read as.
+type Reading = (Parsed, Option<(String, String)>);
+
+/// The word clap refused, for the usage log.
+fn refused_word(b: &crate::forgive::Bad) -> String {
+    match b {
+        crate::forgive::Bad::Subcommand(w) | crate::forgive::Bad::Value(w, _) => w.clone(),
+        crate::forgive::Bad::Flag(f) => f.split('=').next().unwrap_or(f).to_string(),
+    }
+}
+
+/// A command line clap refused, read the way an agent meant it (a note on stderr says how) with the refused word and
+/// the command it was read as, or the error with the nearest valid line and the usage line for the miss.
+fn forgiven(e: &clap::Error, args: &[String]) -> std::result::Result<Reading, (i32, Box<crate::usage::Line>)> {
     use clap::CommandFactory;
     use clap::error::ErrorKind;
     use crate::forgive;
@@ -2316,31 +2410,42 @@ fn forgiven(e: &clap::Error) -> std::result::Result<Cli, i32> {
         e.exit()
     }
     let root = Cli::command();
-    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
-    let rewritten = forgive::rewrite(&root, &args);
+    let rewritten = forgive::rewrite(&root, args);
     if let Some(r) = &rewritten
-        && let Ok(c) = Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r.iter().cloned()))
+        && let Ok(p) = parse_from(r.iter().cloned())
     {
         eprintln!("note: read as `{}`", forgive::line(r));
-        return Ok(c);
+        let miss = forgive::Bad::from_error(e).map(|b| (refused_word(&b), format!("read as {}", p.path.replace('.', " "))));
+        return Ok((p, miss));
     }
     let retried = rewritten.and_then(|r| Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r.iter().cloned())).err().map(|e2| (r, e2)));
-    let hint = |bad: Option<forgive::Bad>, r: &[String]| bad.and_then(|b| forgive::suggest(&root, r, &b));
+    let hint = |bad: Option<forgive::Bad>, r: &[String]| bad.and_then(|b| forgive::suggestion(&root, r, &b).map(|s| (s, refused_word(&b))));
+    let line = |kind: &str, s: Option<&((String, String), String)>| {
+        let l = crate::usage::Line::new(forgive::path(&root, args), kind);
+        let word = s.map(|(_, w)| w.clone()).or_else(|| forgive::Bad::from_error(e).map(|b| refused_word(&b)));
+        match word {
+            Some(w) => l.missed(&w, s.map(|((_, fix), _)| fix.as_str())),
+            None => l,
+        }
+    };
     if e.kind() == ErrorKind::UnknownArgument
         && let Some((m, flag)) = mistyped_flag()
     {
         eprintln!("error: {m}");
-        let s = retried.as_ref().and_then(|(r, _)| hint(Some(forgive::Bad::Flag(flag.clone())), r)).or_else(|| hint(Some(forgive::Bad::Flag(flag)), &args));
-        if let Some(s) = s {
+        let s = retried.as_ref().and_then(|(r, _)| hint(Some(forgive::Bad::Flag(flag.clone())), r)).or_else(|| hint(Some(forgive::Bad::Flag(flag.clone())), args));
+        if let Some(((s, _), _)) = &s {
             eprintln!("did you mean: {s}");
         }
-        return Err(2);
+        let l = line("unknown_flag", s.as_ref());
+        return Err((2, Box::new(if s.is_none() { l.missed(&refused_word(&forgive::Bad::Flag(flag)), None) } else { l })));
     }
+    crate::usage::printed(&e.to_string());
     let _ = e.print();
-    if let Some(s) = retried.as_ref().and_then(|(r, e2)| hint(forgive::Bad::from_error(e2), r)).or_else(|| hint(forgive::Bad::from_error(e), &args)) {
+    let s = retried.as_ref().and_then(|(r, e2)| hint(forgive::Bad::from_error(e2), r)).or_else(|| hint(forgive::Bad::from_error(e), args));
+    if let Some(((s, _), _)) = &s {
         eprintln!("did you mean: {s}");
     }
-    Err(e.exit_code())
+    Err((e.exit_code(), Box::new(line(crate::usage::clap_kind(e.kind()), s.as_ref()))))
 }
 
 /// add and idea take a title with a leading hyphen, so clap reads a mistyped flag before it as the title and blames

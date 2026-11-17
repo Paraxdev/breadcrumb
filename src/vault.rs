@@ -61,6 +61,10 @@ fn default_handoff_digest_days() -> u64 {
     crate::lifecycle::HANDOFF_DIGEST_DAYS as u64
 }
 
+fn default_adapt_threshold() -> u64 {
+    crate::usage::DEFAULT_THRESHOLD
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_version")]
@@ -106,6 +110,9 @@ pub struct Config {
     /// Past this age a live handoff that is not the newest leaves the digest unless pinned.
     #[serde(default = "default_handoff_digest_days")]
     pub handoff_digest_days: u64,
+    /// Hits from 2 or more sessions after which a refused word is filed as a judgment, 0 never files one.
+    #[serde(default = "default_adapt_threshold")]
+    pub adapt_threshold: u64,
     /// Keys this binary does not know, kept so a newer binary's settings survive a write by this one.
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -113,7 +120,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes(), digest_sections: default_digest_sections(), digest_budget: default_digest_budget(), digest_recent: None, handoff_digest_days: default_handoff_digest_days(), extra: toml::Table::new() }
+        Config { version: 1, auto_commit: true, default_kind: default_kind(), lock_timeout_secs: 10, remote: None, stale_days: default_stale_days(), pin_review_days: default_pin_review_days(), review_by: default_review_by(), judge_nudge: default_judge_nudge(), judge_project: default_judge_project(), recall_notes: default_recall_notes(), file_notes: default_file_notes(), digest_sections: default_digest_sections(), digest_budget: default_digest_budget(), digest_recent: None, handoff_digest_days: default_handoff_digest_days(), adapt_threshold: default_adapt_threshold(), extra: toml::Table::new() }
     }
 }
 

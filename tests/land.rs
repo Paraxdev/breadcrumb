@@ -394,7 +394,7 @@ fn a_replace_takes_the_old_entry_place_items_note_and_approval() {
     assert!(out.contains("4444444 verified") && out.contains("replaces 1111111, its approval by r carries over as verified, `git diff 1111111 4444444` shows what changed"), "{out}");
     let es = entries(&e);
     assert_eq!(es.iter().map(|x| x.short()).collect::<Vec<_>>(), ["4444444", "2222222"], "it takes the old place");
-    assert_eq!(es[0].items, [a.clone()]);
+    assert_eq!(es[0].items, std::slice::from_ref(&a));
     assert_eq!(es[0].memo.as_deref(), Some("lane x in wt/x"));
     assert_eq!(es[0].replaces.as_deref(), Some(S1));
     assert_eq!(es[0].earlier_notes[0].note, "pending the harness", "the verified condition stays readable");

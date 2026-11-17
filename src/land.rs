@@ -240,9 +240,11 @@ fn read_parked(v: &Vault, slug: &str) -> Result<ParkedFile> {
 }
 
 /// Lines of the queue and parked files that do not parse, as (file, line number, problem) for `doctor`.
+type LineCheck = (PathBuf, fn(&str) -> bool, &'static str);
+
 pub fn bad_lines(v: &Vault, slug: &str) -> Vec<(PathBuf, usize, &'static str)> {
     let mut out = vec![];
-    let files: [(PathBuf, fn(&str) -> bool, &'static str); 2] = [
+    let files: [LineCheck; 2] = [
         (path(v, slug), |l| serde_json::from_str::<Entry>(l).is_ok(), "is not a queue entry, every land step fails until it is fixed, a merge conflict may have left markers in it"),
         (parked_path(v, slug), |l| serde_json::from_str::<Parked>(l).is_ok(), "is not a parked approval, land steps skip it and keep it in the file"),
     ];
@@ -379,9 +381,10 @@ fn indented(s: &str, pad: &str) -> String {
     s.replace('\n', &format!("\n{pad}"))
 }
 
-/// A note as given, line breaks kept and the ends trimmed.
+/// A note as given, line breaks kept and the ends of it and of each line trimmed.
 fn whole(n: String) -> Option<String> {
-    Some(crate::util::normalize_newlines(&n).trim().to_string()).filter(|n| !n.is_empty())
+    let n = crate::util::normalize_newlines(&n);
+    Some(n.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_string()).filter(|n| !n.is_empty())
 }
 
 fn head(entries: &[Entry], e: &Entry) -> String {
@@ -1165,7 +1168,7 @@ struct ReadInfo {
 fn read_entries(v: &Vault, slug: &str, by: &str, req_by: Option<String>, force: bool, shas: &[String], green: bool, to: Option<String>, info: ReadInfo) -> Result<Outcome> {
     let word = if green { "green" } else { "red" };
     let ((es, retried, others, all), settled) = mutate(v, slug, |entries, _| {
-        let idx = find_all(entries, &shas)?;
+        let idx = find_all(entries, shas)?;
         let again = |e: &Entry| green && e.state == "green";
         // A red entry reads again for a rerun of its run, a newer attempt than the one read red.
         let rerun = |e: &Entry| e.state == "red" && (info.rerun || info.attempt.is_some_and(|a| a > e.last_read().and_then(|r| r.0).unwrap_or(1)));

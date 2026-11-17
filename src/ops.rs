@@ -989,7 +989,11 @@ impl StatusFilter {
             "active" => StatusFilter::Active,
             "archived" => StatusFilter::Archived,
             "all" | "any" => StatusFilter::All,
-            other => bail!("status filter must be active, archived or all, got '{other}', backlog items filter by --state (MCP list state)"),
+            other => {
+                let hint = crate::util::nearest(other, ["active", "archived", "all"]);
+                let msg = format!("status filter must be active, archived or all, got '{other}', backlog items filter by --state (MCP list state)");
+                return Err(crate::usage::BadValue::error(other, hint, msg));
+            }
         })
     }
 }

@@ -37,6 +37,7 @@ pub mod ship;
 pub mod slug;
 pub mod stats;
 pub mod upgrade;
+pub mod usage;
 pub mod util;
 pub mod vault;
 pub mod workflow;

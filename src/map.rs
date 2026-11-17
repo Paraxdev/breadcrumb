@@ -107,7 +107,7 @@ impl MapLine {
         Some((MapLine { file, line: line.map(str::to_string), symbol, text, dir }, !sym.is_empty()))
     }
 
-    fn as_dir(mut self) -> MapLine {
+    fn into_dir(mut self) -> MapLine {
         self.text = format!("{}/{}", self.file, &self.text[self.file.len()..]);
         self.dir = true;
         self
@@ -499,7 +499,7 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
                 let at = repo.join(&l.file);
                 let l = if !l.dir && at.is_dir() {
                     taken.push(format!("taken as a directory: {t}"));
-                    l.as_dir()
+                    l.into_dir()
                 } else {
                     l
                 };

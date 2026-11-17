@@ -324,7 +324,20 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
     out.extend(project_files(v, &projects));
     out.extend(crate::config::vault_problems(v).into_iter().map(|message| Problem { path: crate::vault::CONFIG_FILE.into(), id: None, severity: "warning", message }));
     out.extend(local_dir_problem(v));
+    out.extend(crate::usage::doctor_problems(v));
     Run { problems: out, checked, scope: scope.clone() }
+}
+
+/// The file in a `git check-ignore -v` line, `<source>:<line>:<pattern>\t<path>`. A Windows source starts with a drive
+/// colon, so it ends at the first colon followed by digits and a colon (git refuses -z without --stdin).
+fn ignore_source(out: &str) -> String {
+    let left = out.split('\t').next().unwrap_or_default();
+    let b = left.as_bytes();
+    let end = (0..b.len()).find(|&i| {
+        let digits = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+        b[i] == b':' && digits > 0 && b.get(i + 1 + digits) == Some(&b':')
+    });
+    left[..end.unwrap_or(left.len())].to_string()
 }
 
 /// `.local` holds machine state, the serve token among it, and every write commits with `git add -A`.
@@ -332,7 +345,7 @@ fn local_dir_problem(v: &Vault) -> Option<Problem> {
     // git knows every spelling and a later `!.local/`, exit 1 is not ignored and -v names the file that ignores it.
     // Only the vault's .gitignore travels to another clone, .git/info/exclude and a global excludes file stay behind.
     let by_git = crate::git::available().then(|| crate::git::run(&v.root, &["check-ignore", "-v", ".local/probe"]).ok()).flatten().and_then(|o| match o.status.code()? {
-        0 => Some(Some(String::from_utf8_lossy(&o.stdout).split(':').next().unwrap_or_default().to_string())),
+        0 => Some(Some(ignore_source(&String::from_utf8_lossy(&o.stdout)))),
         1 => Some(None),
         _ => None,
     });

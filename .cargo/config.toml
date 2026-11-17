@@ -2,3 +2,6 @@
 [env]
 CLAUDE_CODE_SESSION_ID = { value = "", force = true }
 BREADCRUMB_SESSION = { value = "", force = true }
+# Note: building the clap command in a debug build takes more than the 2 MB of a test thread, main.rs gives the
+# binary 8 MB the same way.
+RUST_MIN_STACK = { value = "8388608", force = true }

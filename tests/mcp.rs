@@ -284,6 +284,17 @@ fn add_repairs_the_slug_shows_backlog_values_and_explains_a_state_kind() {
 }
 
 #[test]
+fn mcp_scope_words_are_case_blind() {
+    let (d, v) = common::vault();
+    let srv = Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    common::add(&v, "Global fact", "gotcha", None, &[]);
+    common::add(&v, "App fact", "gotcha", Some("app"), &[]);
+    let out = run(&srv, &[call(1, "list", json!({"project": "ALL"})), call(2, "list", json!({"project": "Global"}))], &[]);
+    assert!(text(&out[0]).contains("Global fact") && text(&out[0]).contains("App fact"), "{}", text(&out[0]));
+    assert!(text(&out[1]).contains("Global fact") && !text(&out[1]).contains("App fact"), "{}", text(&out[1]));
+}
+
+#[test]
 fn mcp_move_names_user_steps_left_after_an_agent_pass_and_replaced_steps() {
     let (d, mut v) = common::vault();
     breadcrumb::config::set(&mut v, "review_by", "agent").unwrap();
