@@ -172,6 +172,12 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
     for (p, e) in project_errors {
         err(v.rel(&p), None, "error", format!("invalid project file: {e}"));
     }
+    for p in &projects {
+        for (path, line, what) in crate::land::bad_lines(v, &p.slug) {
+            let severity = if path.ends_with(crate::land::FILE) { "error" } else { "warning" };
+            err(v.rel(&path), None, severity, format!("line {line} {what}"));
+        }
+    }
     let slugs: HashSet<String> = projects.iter().map(|p| p.slug.clone()).collect();
     let roots: HashMap<String, Vec<std::path::PathBuf>> = projects
         .iter()

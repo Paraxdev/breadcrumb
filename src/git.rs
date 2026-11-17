@@ -296,6 +296,13 @@ fn run_within(dir: &Path, args: &[&str], limit: std::time::Duration) -> Option<V
     }
 }
 
+/// The full sha of the commit `rev` names in the checkout at `dir`, None when it names none or git takes longer than `limit`.
+pub fn resolve_commit(dir: &Path, rev: &str, limit: std::time::Duration) -> Option<String> {
+    let spec = format!("{rev}^{{commit}}");
+    let out = run_within(dir, &["rev-parse", "--verify", "--quiet", &spec], limit)?;
+    Some(String::from_utf8_lossy(&out).trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Commit times (unix seconds) on HEAD of the checkout at `dir` since `since`, newest first, limited to `paths` when
 /// given. None when git is missing, `dir` is no checkout, git fails or takes longer than `limit`.
 pub fn commit_times(dir: &Path, since: chrono::DateTime<chrono::Utc>, paths: &[String], limit: std::time::Duration) -> Option<Vec<i64>> {

@@ -422,7 +422,7 @@ impl Server {
                 let n = backlog::claim(&v, &id, &by, b(a, "force"))?;
                 Ok(format!("{} for {by}\n{notice}", format::ack("claimed", &n)).trim_end().to_string())
             }
-            "land" => crate::land::mcp(&v, self.target_project(&v, a)?.as_deref(), a),
+            "land" => crate::land::mcp(&v, self.target_project(&v, a)?.as_deref(), a, &self.cwd_of(a)),
             "question" => self.question(&v, a),
             "backlog" => match s(a, "view").as_deref().unwrap_or("board") {
                 "board" => {
@@ -832,11 +832,12 @@ pub fn tool_defs() -> Vec<Value> {
             "budget": int(),
         })), &[])),
         tool("land", "Landing queue of merges pushed in order, CI read green or red.", obj(with(json!({"project": st()}), json!({
-            "action": {"type": "string", "enum": ["list", "show", "add", "approve", "verify", "pushed", "green", "red", "read", "drop", "move"]},
+            "action": {"type": "string", "enum": ["list", "show", "add", "replace", "approve", "verify", "pushed", "green", "red", "read", "drop", "move"]},
             "sha": {"type": "string", "description": "several: pushed, green, red"},
             "result": {"type": "string", "enum": ["green", "red"]},
             "replaces": st(),
             "clear_approval": bl(),
+            "all": bl(),
             "items": arr(),
             "note": st(),
             "run": st(),
