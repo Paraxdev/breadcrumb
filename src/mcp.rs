@@ -232,10 +232,14 @@ impl Server {
                 let mut f = filter(a)?;
                 f.limit = Some(f.limit.unwrap_or(LIST_LIMIT));
                 let (notes, total) = ops::list_counted(&v, &sc, &f)?;
+                let note = match s(a, "status").filter(|x| StatusFilter::parse(x).is_err()) {
+                    Some(x) => format!("note: status is active, archived or all, {x} is a backlog state, read as state {x}\n"),
+                    None => String::new(),
+                };
                 if f.since.is_some() || f.others {
-                    return Ok(format::recent_rows(&notes, total, self.current(&v, a).as_deref(), f.since.as_ref(), crate::session::current().as_deref()));
+                    return Ok(format!("{note}{}", format::recent_rows(&notes, total, self.current(&v, a).as_deref(), f.since.as_ref(), crate::session::current().as_deref())));
                 }
-                Ok(format::rows(&notes, total, self.current(&v, a).as_deref()))
+                Ok(format!("{note}{}", format::rows(&notes, total, self.current(&v, a).as_deref())))
             }
             "get" => {
                 let n = v.get(&req_s(a, "id")?)?;
@@ -315,7 +319,7 @@ impl Server {
                 let mut tags: Vec<String> = strs(a, "tags").into_iter().map(|t| if t.starts_with('-') { t } else { format!("+{t}") }).collect();
                 tags.extend(strs(a, "add_tags").into_iter().map(|t| format!("+{t}")));
                 tags.extend(strs(a, "remove_tags").into_iter().map(|t| format!("-{t}")));
-                let n = ops::update(
+                let (n, notes) = ops::update_noted(
                     &v,
                     &req_s(a, "id")?,
                     UpdateReq {
@@ -337,7 +341,8 @@ impl Server {
                     },
                 )?;
                 let gone = crate::lifecycle::superseded_text(&v, &strs(a, "supersedes"));
-                Ok(format!("{}{gone}", format::ack(if n.is_archived() && s(a, "status").is_some() { "archived" } else { "updated" }, &n)))
+                let notes: String = notes.iter().map(|m| format!("\n{m}")).collect();
+                Ok(format!("{}{notes}{gone}", format::ack(if n.is_archived() && s(a, "status").is_some() { "archived" } else { "updated" }, &n)))
             }
             "append" => Ok(format::ack("appended", &ops::append(&v, &req_s(a, "id")?, &req_s(a, "text")?)?)),
             "link" => {
@@ -629,18 +634,23 @@ fn links(a: &Map<String, Value>) -> Result<Vec<Link>> {
     Ok(out)
 }
 
+/// `state` and `track` are taken though the schema leaves them out to stay small, see `ACCEPTED`.
 fn filter(a: &Map<String, Value>) -> Result<Filter> {
     let mut wheres = strs(a, "where");
     if let Some(Value::Object(m)) = a.get("where") {
         wheres = m.iter().map(|(k, v)| format!("{k}={}", v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect();
     }
+    wheres.extend(s(a, "track").map(|t| format!("{}={}", crate::lifecycle::TRACK_KEY, t.trim().to_lowercase())));
+    let (status, mut states) = match s(a, "status") {
+        Some(x) => ops::status_or_state(&x)?,
+        None => (StatusFilter::Active, vec![]),
+    };
+    states.extend(ops::check_states(&strs(a, "state"))?);
     Ok(Filter {
         kind: s(a, "kind"),
         tags: strs(a, "tags"),
-        status: match s(a, "status") {
-            Some(x) => StatusFilter::parse(&x)?,
-            None => StatusFilter::Active,
-        },
+        status,
+        states,
         wheres,
         pinned: b(a, "pinned"),
         limit: u(a, "limit"),

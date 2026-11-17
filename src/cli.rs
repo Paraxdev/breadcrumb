@@ -5,7 +5,7 @@ use crate::importer;
 use crate::note::Note;
 use crate::question;
 use crate::kind::{self, KindDef};
-use crate::ops::{self, AddReq, Filter, Scope, ScopeSel, SortKey, StatusFilter, UpdateReq};
+use crate::ops::{self, AddReq, Filter, Scope, ScopeSel, SortKey, UpdateReq};
 use crate::util::{path_str, read_body_arg};
 use crate::vault::{Vault, resolve_vault_path};
 use crate::workflow;
@@ -89,20 +89,38 @@ pub struct FilterArgs {
     /// Hide notes this session wrote last
     #[arg(long)]
     pub others: bool,
+    /// Only backlog items stored in this state, like queued or review,in-progress (repeatable)
+    #[arg(long = "state", value_name = "STATE")]
+    pub states: Vec<String>,
+    /// Only handoffs of this track
+    #[arg(long, value_name = "WORD")]
+    pub track: Option<String>,
 }
 
 impl FilterArgs {
     fn filter(&self) -> Result<Filter> {
+        let (status, mut states) = ops::status_or_state(&self.status)?;
+        if let Some(s) = states.first() {
+            eprintln!("note: --status is active, archived or all, {s} is a backlog state, read as --state {s}");
+        }
+        states.extend(ops::check_states(&self.states)?);
         Ok(Filter {
             kind: self.kind.clone(),
             tags: self.tags.clone(),
-            status: StatusFilter::parse(&self.status)?,
-            wheres: self.wheres.iter().cloned().chain(self.refs.iter().map(|r| format!("ref={r}"))).collect(),
+            status,
+            wheres: self
+                .wheres
+                .iter()
+                .cloned()
+                .chain(self.refs.iter().map(|r| format!("ref={r}")))
+                .chain(self.track.iter().map(|t| format!("{}={}", crate::lifecycle::TRACK_KEY, t.trim().to_lowercase())))
+                .collect(),
             pinned: self.pinned,
             limit: self.limit,
             sort: SortKey::parse(&self.sort)?,
             since: self.since.as_deref().map(ops::parse_since).transpose()?,
             others: self.others,
+            states,
         })
     }
 }
@@ -139,14 +157,18 @@ pub enum Cmd {
         _p: IgnoredProject,
     },
     /// Change a note
+    #[command(alias = "edit")]
     Update(UpdateArgs),
     /// Append a paragraph to a note body ("-" reads stdin), the date and session line is added for you
     Append {
         /// Note id or slug
         id: String,
         /// The paragraph, "-" reads stdin
-        #[arg(allow_hyphen_values = true)]
-        text: String,
+        #[arg(allow_hyphen_values = true, required_unless_present = "body")]
+        text: Option<String>,
+        /// The paragraph, the same as the positional one
+        #[arg(long, alias = "text", hide = true, allow_hyphen_values = true, conflicts_with = "text")]
+        body: Option<String>,
         #[command(flatten)]
         _p: IgnoredProject,
     },
@@ -1245,6 +1267,12 @@ pub struct UpdateArgs {
     /// Id or slug this note replaces (repeatable), a handoff also unpins it and the digest stops showing it
     #[arg(long, value_name = "ID")]
     pub supersedes: Vec<String>,
+    /// The same as --field priority=P
+    #[arg(long, hide = true)]
+    pub priority: Option<String>,
+    /// The same as --field state=S
+    #[arg(long, hide = true)]
+    pub state: Option<String>,
     #[command(flatten)]
     pub _p: IgnoredProject,
 }
@@ -1527,14 +1555,14 @@ pub fn run(cli: Cli) -> Result<i32> {
             {
                 bail!("{src} was empty, the body stays as it is, --body \"\" empties it");
             }
-            let n = ops::update(
+            let (n, notes) = ops::update_noted(
                 &v,
                 &u.id,
                 UpdateReq {
                     title: u.title,
                     kind: u.kind,
                     tags: u.tags,
-                    fields: ops::with_field(ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires), u.said, u.said_on), backlog::RELEASE_NOTE_KEY, u.release_note),
+                    fields: ops::with_field(ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires), u.said, u.said_on), backlog::RELEASE_NOTE_KEY, u.release_note).into_iter().chain(ops::with_field(ops::with_field(vec![], "priority", u.priority), "state", u.state)).collect(),
                     unset: u.unset,
                     body,
                     replace: u.replace.first().cloned().zip(u.replace.get(1).cloned()),
@@ -1552,9 +1580,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             )?;
             let home = n.project.as_deref().unwrap_or("global");
             let ignored = u._p.ignored_project.filter(|p| !p.eq_ignore_ascii_case(home)).map(|p| format!("\n-p {p} was ignored, the note stays in {home}, no command moves a note to another project")).unwrap_or_default();
-            out.emit(format!("updated {}  {}{}{ignored}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
+            let notes: String = notes.iter().map(|m| format!("\n{m}")).collect();
+            out.emit(format!("updated {}  {}{notes}{}{ignored}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
         }
-        Cmd::Append { id, text, .. } => {
+        Cmd::Append { id, text, body, .. } => {
+            let text = text.or(body).unwrap_or_default();
             not_a_flag(&text, &format!("append {id}"))?;
             let text = read_body_arg(Some(text), None)?.unwrap_or_default();
             let n = ops::append(&open()?, &id, &text)?;

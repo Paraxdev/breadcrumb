@@ -154,6 +154,39 @@ pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Edits between two words by chars, ignoring case, where swapping two neighbouring letters counts as one edit.
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.to_lowercase().chars().collect();
+    let b: Vec<char> = b.to_lowercase().chars().collect();
+    let mut d: Vec<Vec<usize>> = (0..=a.len()).map(|i| (0..=b.len()).map(|j| if i == 0 { j } else if j == 0 { i } else { 0 }).collect()).collect();
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            d[i][j] = (d[i - 1][j - 1] + usize::from(a[i - 1] != b[j - 1])).min(d[i - 1][j] + 1).min(d[i][j - 1] + 1);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    d[a.len()][b.len()]
+}
+
+/// The option closest to a mistyped word: within a third of its length in edits (at least one), or the only option
+/// the word starts, or that starts with the word when it has three letters or more. Ties go to the first option.
+pub fn nearest<'a>(word: &str, options: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let w = word.trim().to_lowercase();
+    if w.is_empty() {
+        return None;
+    }
+    let options: Vec<&str> = options.into_iter().collect();
+    let room = (w.chars().count() / 3).max(1);
+    let best = options.iter().map(|o| (edit_distance(&w, o), *o)).filter(|(d, _)| *d <= room).min_by_key(|(d, _)| *d);
+    if let Some((_, o)) = best {
+        return Some(o);
+    }
+    let lead: Vec<&str> = options.iter().copied().filter(|o| w.chars().count() >= 3 && (o.to_lowercase().starts_with(&w) || w.starts_with(&o.to_lowercase()))).collect();
+    (lead.len() == 1).then(|| lead[0])
+}
+
 pub fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()

@@ -37,7 +37,8 @@ fn defaults_types_and_undeclared_fields() {
     let n = common::add(&v, "Done thing", "todo", None, &[("done", "true"), ("priority", "p1")]);
     assert_eq!(n.field("done"), Some(&Value::Bool(true)));
 
-    assert!(try_add(&v, "todo", &[("priority", "urgent")]).unwrap_err().to_string().contains("must be one of"));
+    assert_eq!(try_add(&v, "todo", &[("priority", "urgent")]).unwrap().field("priority"), Some(&Value::String("p0".into())));
+    assert!(try_add(&v, "todo", &[("priority", "whenever")]).unwrap_err().to_string().contains("must be one of"));
     assert!(try_add(&v, "todo", &[("done", "maybe")]).unwrap_err().to_string().contains("bool"));
     assert!(try_add(&v, "reference", &[("url", "not a url")]).is_err());
     assert!(try_add(&v, "reference", &[("url", "https://example.com/x")]).is_ok());

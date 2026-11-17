@@ -103,7 +103,7 @@ fn a_given_name_wins_and_update_refuses_bad_ones() {
     assert_eq!(add_as("Long title about meshing", "Thin-Walls").unwrap().slug().as_deref(), Some("thin-walls"));
     assert_eq!(add_as("Another", "thin-walls").unwrap().slug().as_deref(), Some("thin-walls-2"));
     let n = add(&v, "Field slug", "note");
-    for bad in ["oneword", "with space", "-leading", "trailing-", "a--b", "one-two-three-four-five", "12-34", "app-k3m9x2qa"] {
+    for bad in ["oneword", "with space", "-leading", "trailing-", "a--b", "12-34", "app-k3m9x2qa"] {
         let e = ops::update(&v, &n.id, UpdateReq { slug: Some(bad.into()), ..Default::default() }).unwrap_err().to_string();
         assert!(e.contains("slug"), "{bad}: {e}");
     }
@@ -113,6 +113,9 @@ fn a_given_name_wins_and_update_refuses_bad_ones() {
     assert_eq!(v.resolve_id("field-renamed").unwrap(), n.id);
     let r = ops::update(&v, &n.id, UpdateReq { unset: vec!["slug".into()], ..Default::default() });
     assert!(r.is_err(), "a slug cannot be unset");
+    let (n, notes) = ops::update_noted(&v, &n.id, UpdateReq { slug: Some("one-two-three-four-five".into()), ..Default::default() }).unwrap();
+    assert_eq!(n.slug().as_deref(), Some("one-two-three-four"));
+    assert_eq!(notes, vec!["slug shortened to one-two-three-four".to_string()]);
 }
 
 #[test]
