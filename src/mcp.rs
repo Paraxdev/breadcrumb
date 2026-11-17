@@ -1074,6 +1074,7 @@ pub fn tool_defs() -> Vec<Value> {
             "clear_approval": bl(),
             "all": bl(),
             "items": arr(),
+            "piece": st(),
             "note": st(),
             "run": st(),
             "to": {"type": "string", "description": "session next"},
