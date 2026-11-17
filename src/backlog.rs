@@ -998,7 +998,10 @@ fn is_met(c: &str) -> bool {
 /// leaves the `user:` steps open and naming an open one is refused.
 fn apply_check(n: &mut Note, which: &Check, keep_user: bool) -> Result<usize> {
     let Some(Value::Sequence(items)) = n.field("acceptance").cloned() else {
-        bail!("{} has no acceptance criteria", n.id);
+        if *which == Check::All {
+            return Ok(0);
+        }
+        bail!("{} has no acceptance criteria, there is no step to tick by number, `all` passes with nothing to tick", n.id);
     };
     if let Check::Some(ix) = which
         && let Some(bad) = ix.iter().find(|i| **i > items.len())
@@ -1179,9 +1182,103 @@ fn replace_open_steps(n: &mut Note, steps: &[String], keep_user: bool) -> (usize
     (dropped, add_steps(n, steps))
 }
 
-/// A step only the user can do, like installing software on their machine: its text starts with `user:`.
+const USER_STEP_PREFIXES: [&str; 3] = ["user:", "[user]", "(user)"];
+
+/// A step only the user can do, like installing software on their machine: its text starts with `user:`, `[user]`
+/// or `(user)`.
 pub fn is_user_step(c: &str) -> bool {
-    criterion_text(c).get(..5).is_some_and(|p| p.eq_ignore_ascii_case("user:"))
+    user_step_rest(c).is_some()
+}
+
+/// A user step's text after its prefix.
+pub fn user_step_rest(c: &str) -> Option<&str> {
+    let t = criterion_text(c);
+    USER_STEP_PREFIXES.iter().find_map(|p| t.get(..p.len()).filter(|h| h.eq_ignore_ascii_case(p)).map(|_| t[p.len()..].trim_start_matches([':', ' ']).trim()))
+}
+
+/// Steps written `[user] x` or `(user) x` are stored as `user: x`, the prefix older binaries read, with a note each.
+fn user_step_forms(steps: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut notes = vec![];
+    let out = steps
+        .iter()
+        .map(|s| {
+            let t = criterion_text(s);
+            match user_step_rest(t) {
+                Some(rest) if !t.get(..5).is_some_and(|h| h.eq_ignore_ascii_case("user:")) => {
+                    let as_user = format!("user: {rest}");
+                    notes.push(format!("step '{}' is the user's, stored as '{as_user}', agents never tick it", crate::util::one_line(t)));
+                    as_user
+                }
+                _ => s.clone(),
+            }
+        })
+        .collect();
+    (out, notes)
+}
+
+/// Who ticked each step on a pass, kept as `{step, by, on}` rows so `review` can name them.
+const CHECKED_BY_KEY: &str = "checked_by";
+
+fn record_checks(n: &mut Note, open_before: &[(usize, String)], by: &str) {
+    let still: Vec<usize> = unmet_numbered(n).into_iter().map(|(i, _)| i).collect();
+    let ticked: Vec<String> = open_before.iter().filter(|(i, _)| !still.contains(i)).map(|(_, c)| criterion_text(c).to_string()).collect();
+    if ticked.is_empty() {
+        return;
+    }
+    let mut rows: Vec<Value> = match n.field(CHECKED_BY_KEY) {
+        Some(Value::Sequence(s)) => s.iter().filter(|r| !checked_row_step(r).is_some_and(|s| ticked.iter().any(|t| t.eq_ignore_ascii_case(&s)))).cloned().collect(),
+        _ => vec![],
+    };
+    let on = crate::util::fmt_date(&now());
+    for t in ticked {
+        let mut m = serde_yaml::Mapping::new();
+        m.insert("step".into(), Value::String(t));
+        m.insert("by".into(), Value::String(by.to_string()));
+        m.insert("on".into(), Value::String(on.clone()));
+        rows.push(Value::Mapping(m));
+    }
+    n.set_field(CHECKED_BY_KEY, Value::Sequence(rows));
+}
+
+fn checked_row_step(r: &Value) -> Option<String> {
+    r.get("step").and_then(yaml_scalar_string)
+}
+
+/// The ticked steps a pass recorded, with their position and who ticked them, in acceptance order.
+pub fn checked_steps(n: &Note) -> Vec<CheckedStep> {
+    let Some(Value::Sequence(rows)) = n.field(CHECKED_BY_KEY) else { return vec![] };
+    let Some(Value::Sequence(items)) = n.field("acceptance") else { return vec![] };
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            let c = yaml_scalar_string(v)?;
+            if !is_met(&c) {
+                return None;
+            }
+            let step = criterion_text(&c).to_string();
+            let row = rows.iter().rev().find(|r| checked_row_step(r).is_some_and(|s| s.eq_ignore_ascii_case(&step)))?;
+            Some(CheckedStep { position: i + 1, step, by: row.get("by").and_then(yaml_scalar_string).unwrap_or_default() })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckedStep {
+    pub position: usize,
+    pub step: String,
+    pub by: String,
+}
+
+pub const REVIEWER_ROLE: &str = "reviewer";
+
+/// `--by reviewer` names a reviewer subagent of this session, `<session>/reviewer`.
+fn reviewer_role(by: &str) -> String {
+    let by = by.trim();
+    match session_name(None) {
+        Some(me) if by.eq_ignore_ascii_case(REVIEWER_ROLE) => format!("{me}/{REVIEWER_ROLE}"),
+        _ => by.to_string(),
+    }
 }
 
 pub fn only_user_steps_open(n: &Note) -> bool {
@@ -1206,19 +1303,21 @@ fn check_reviewer(n: &Note, by: Option<&str>) -> Result<()> {
     let builder = str_field(n, BUILT_BY_KEY).or_else(|| assignee(n));
     if builder.is_some_and(|b| crate::session::same_holder(&b, &me)) {
         bail!(
-            "{} was built by {me}, and agents review here (review_by = agent), so another session checks it, or a reviewer subagent that passes --by <its own name> (MCP by)",
+            "{} was built by {me}, and agents review here (review_by = agent), so another session checks it, or a reviewer subagent of this session with `breadcrumb review pass {} --by {me}/reviewer --evidence \"what you ran and saw\"` (MCP by \"reviewer\" and evidence)",
+            n.id,
             n.id
         );
     }
     Ok(())
 }
 
-fn move_warnings(n: &Note, from: &str, to: &str) -> Vec<String> {
+/// `hint` says whether to name what review still lacks: on the way in, and later only when a call added some of it.
+fn move_warnings(n: &Note, from: &str, to: &str, hint: bool) -> Vec<String> {
     let mut w = vec![];
     if from == "queued" && to == "review" && assignee(n).is_none() {
         w.push(format!("{} went from queued to review and was never claimed, `breadcrumb claim {}` when work starts so nobody else picks it up", n.id, n.id));
     }
-    if to != "review" {
+    if to != "review" || !hint {
         return w;
     }
     let mut missing = vec![];
@@ -1228,8 +1327,8 @@ fn move_warnings(n: &Note, from: &str, to: &str) -> Vec<String> {
     if !crate::ship::has_commit_pointer(n) {
         missing.push(("a commit: ref or shipped_in for `breadcrumb ship` (--ref commit:<merge sha>)", "refs"));
     }
-    if crate::ship::release_note(n).is_none() {
-        missing.push(("a release note (--release-note \"one line\")", "release_note"));
+    if crate::ship::release_note(n).is_none() && !crate::ship::release_note_waived(n) {
+        missing.push(("a release note (--release-note \"one line\", or none when a maker sees no change)", "release_note"));
     }
     if !missing.is_empty() {
         let what: Vec<&str> = missing.iter().map(|m| m.0).collect();
@@ -1260,6 +1359,8 @@ pub struct ReviewItem {
     pub steps: Vec<String>,
     /// Each step's position in the acceptance list, the number `check` takes.
     pub step_positions: Vec<usize>,
+    /// Steps a pass ticked, and who.
+    pub checked: Vec<CheckedStep>,
 }
 
 /// Items waiting for the user's check, priority first, then oldest.
@@ -1281,6 +1382,7 @@ pub fn review_items(v: &Vault, scope: &Scope) -> Result<Vec<ReviewItem>> {
             created: crate::util::fmt_time(&n.created),
             steps: review_steps(n),
             step_positions: unmet_numbered(n).into_iter().map(|(i, _)| i).collect(),
+            checked: checked_steps(n),
         })
         .collect())
 }
@@ -1321,10 +1423,14 @@ pub fn review_text(items: &[ReviewItem], scope_label: &str, agents: impl Fn(Opti
         }
         for (i, step) in it.steps.iter().enumerate() {
             let at = it.step_positions.get(i).copied().unwrap_or(i + 1);
-            let _ = match step.get(5..).filter(|_| *agent && is_user_step(step)) {
-                Some(rest) => writeln!(s, "  {at}. [user] {}", rest.trim_start()),
+            let _ = match user_step_rest(step).filter(|_| *agent) {
+                Some(rest) => writeln!(s, "  {at}. [user] {rest}"),
                 None => writeln!(s, "  {at}. {step}"),
             };
+        }
+        if !it.checked.is_empty() {
+            let done: Vec<String> = it.checked.iter().map(|c| format!("{}. {} (by {})", c.position, c.step, c.by)).collect();
+            let _ = writeln!(s, "  checked: {}", done.join("; "));
         }
     }
     s
@@ -1339,18 +1445,25 @@ pub struct ReviewBy {
 
 /// The check passed: on to done, with the criteria marked met and the evidence in the body.
 pub fn review_pass(v: &Vault, id: &str, r: ReviewBy) -> Result<MoveResult> {
-    move_item(v, id, MoveReq { state: "done".into(), by: r.by, evidence: r.evidence, by_user: r.by_user, verdict: Some(Verdict::Pass), ..Default::default() })
+    move_item(v, id, verdict_req(Verdict::Pass, r, None))
 }
 
 /// The check failed: back to queued, with the reason in the body and the claim gone so the queue can hand it out.
 pub fn review_fail(v: &Vault, id: &str, reason: &str, r: ReviewBy) -> Result<MoveResult> {
-    move_item(v, id, MoveReq { state: "queued".into(), by: r.by, evidence: r.evidence, by_user: r.by_user, verdict: Some(Verdict::Fail(reason.to_string())), ..Default::default() })
+    move_item(v, id, verdict_req(Verdict::Fail(reason.to_string()), r, None))
+}
+
+/// The move a verdict makes. A pass with `check` naming steps passes only those.
+pub fn verdict_req(verdict: Verdict, r: ReviewBy, check: Option<Check>) -> MoveReq {
+    let state = if verdict == Verdict::Pass { "done" } else { "queued" };
+    MoveReq { state: state.into(), by: r.by, evidence: r.evidence, by_user: r.by_user, verdict: Some(verdict), check, ..Default::default() }
 }
 
 /// Steps by their acceptance position, as `review` numbers them.
 pub fn check_text(n: &Note, ticked: &[usize]) -> String {
     let unmet = unmet_numbered(n);
     let mut s = match ticked {
+        [] if n.field("acceptance").is_none() => return format!("{}: has no acceptance criteria, nothing to tick", n.id),
         [] => format!("{}: nothing to tick", n.id),
         [one] => format!("{}: ticked step {one}", n.id),
         _ => format!("{}: ticked steps {}", n.id, ticked.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")),
@@ -1374,7 +1487,12 @@ pub fn unmet_acceptance(n: &Note) -> Vec<String> {
     }
 }
 
-pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
+pub fn move_item(v: &Vault, id: &str, mut req: MoveReq) -> Result<MoveResult> {
+    if req.verdict.is_some() {
+        req.by = req.by.map(|b| reviewer_role(&b));
+    }
+    let (steps, mut notes) = user_step_forms(&req.steps);
+    req.steps = steps;
     let to = check_state(&req.state)?;
     if !req.steps.is_empty() && to != "review" {
         bail!("steps are for moving to review, not {to}");
@@ -1406,7 +1524,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     if agent_check {
         check_reviewer(&n, req.by.as_deref())?;
         if req.verdict == Some(Verdict::Pass) && evidence.is_none() {
-            bail!("agents review here (review_by = agent), a pass needs --evidence \"what you ran and what you saw\" (MCP evidence)");
+            bail!("agents review here (review_by = agent), a pass needs evidence: `breadcrumb review pass {} --by <name> --evidence \"what you ran and what you saw\"` (MCP move with verdict pass, by and evidence)", n.id);
         }
     }
     if to == "rejected" && resolution.is_none() && (from != "rejected" || str_field(&n, "resolution").is_none()) {
@@ -1415,8 +1533,17 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let unchanged = |key: &str, want: &Option<String>| want.as_ref().is_none_or(|w| str_field(&n, key).as_deref() == Some(w.as_str()));
     let shipped_in = req.shipped_in.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let release_note = req.release_note.as_deref().map(crate::util::one_line).filter(|s| !s.trim().is_empty());
-    let waiting_for_user = if agent_check && req.verdict == Some(Verdict::Pass) { open_user_steps(&n) } else { vec![] };
-    let to = if waiting_for_user.is_empty() { to } else { "review".to_string() };
+    let release_note_given = release_note.is_some();
+    let partial_left: Vec<usize> = match (&req.verdict, &req.check) {
+        (Some(Verdict::Pass), Some(Check::Some(ix))) => unmet_numbered(&n).into_iter().filter(|(i, c)| !ix.contains(i) && !(keep_user && is_user_step(c))).map(|(i, _)| i).collect(),
+        _ => vec![],
+    };
+    let waiting_for_user = if agent_check && req.verdict == Some(Verdict::Pass) && partial_left.is_empty() { open_user_steps(&n) } else { vec![] };
+    let to = if waiting_for_user.is_empty() && partial_left.is_empty() { to } else { "review".to_string() };
+    if req.check == Some(Check::All) && !matches!(n.field("acceptance"), Some(Value::Sequence(s)) if !s.is_empty()) {
+        notes.push(format!("{} has no acceptance criteria, check all passed with nothing to tick", n.id));
+    }
+    let open_before = unmet_numbered(&n);
     let note = req.note.as_deref().map(|t| crate::session::strip_own_stamp(&crate::util::normalize_newlines(t))).filter(|t| !t.trim().is_empty());
     let same = from == to && note.is_none() && req.verdict.is_none() && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) && unchanged(RELEASE_NOTE_KEY, &release_note);
     let ticked = match &req.check {
@@ -1424,7 +1551,7 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
         None => 0,
     };
     let mut kept_for_user = if keep_user && waiting_for_user.is_empty() && req.check == Some(Check::All) { open_user_steps(&n) } else { vec![] };
-    let rereview = from == "review" && to == "review" && !req.steps.is_empty();
+    let rereview = from == "review" && to == "review" && !req.steps.is_empty() && req.verdict.is_none();
     let (replaced, added) = if rereview { replace_open_steps(&mut n, &req.steps, keep_user) } else { (0, add_steps(&mut n, &req.steps)) };
     if rereview && keep_user && kept_for_user.is_empty() {
         let named: Vec<String> = req.steps.iter().map(|s| criterion_text(&crate::util::one_line(s)).to_ascii_lowercase()).collect();
@@ -1438,10 +1565,20 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     crate::ops::edit_refs(&mut n, &ref_edits)?;
     if same && ticked == 0 && added == 0 && replaced == 0 && n.refs() == refs_before {
         let unmet = if to == "done" || to == "shipped" { unmet_acceptance(&n) } else { vec![] };
-        let warnings = move_warnings(&n, &from, &to);
+        let mut warnings = notes;
+        warnings.extend(move_warnings(&n, &from, &to, false));
         return Ok(MoveResult { note: n, from, to, unmet, changed: false, warnings, replaced, waiting_for_user, kept_for_user, touched: vec![] });
     }
     match &req.verdict {
+        Some(Verdict::Pass) if !partial_left.is_empty() => {
+            let still: Vec<usize> = unmet_numbered(&n).into_iter().map(|(i, _)| i).collect();
+            let at: Vec<String> = open_before.iter().map(|(i, _)| *i).filter(|i| !still.contains(i)).map(|i| i.to_string()).collect();
+            let who = crate::session::attribute(req.by.as_deref());
+            let date = crate::util::fmt_date(&now());
+            let said = evidence.as_deref().map(|e| format!(": {e}")).unwrap_or_default();
+            n.body = insert_before_history(&n.body, &format!("{date} {who}:\nreview passed steps {}{said}", at.join(", ")));
+            n.body = append_history(&n.body, &event_line(&format!("steps {} passed, the others wait", at.join(", ")), &actor(req.by.as_deref())));
+        }
         Some(Verdict::Pass) if !waiting_for_user.is_empty() => {
             let agent_steps: Vec<usize> = unmet_numbered(&n).into_iter().filter(|(_, c)| !is_user_step(c)).map(|(i, _)| i).collect();
             if !agent_steps.is_empty() {
@@ -1470,6 +1607,10 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
             clear_claim(&mut n);
         }
         _ => {}
+    }
+    if req.verdict == Some(Verdict::Pass) {
+        let by = if req.by_user && req.by.is_none() { DEFAULT_ACTOR.to_string() } else { session_name(req.by.as_deref()).unwrap_or_else(|| DEFAULT_ACTOR.to_string()) };
+        record_checks(&mut n, &open_before, &by);
     }
     if let Some(t) = &note {
         n.body = insert_before_history(&n.body, &format!("{}\n{t}", crate::session::append_head()));
@@ -1513,7 +1654,11 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let mut touched: Vec<PathBuf> = waiting.iter().filter_map(|w| w.path.clone()).collect();
     save_with(v, &mut n, "move", waiting)?;
     touched.extend(n.path.clone());
-    let warnings = if waiting_for_user.is_empty() { move_warnings(&n, &from, &to) } else { vec![] };
+    let hint = from != "review" || added > 0 || replaced > 0 || n.refs() != refs_before || release_note_given;
+    let mut warnings = notes;
+    if waiting_for_user.is_empty() {
+        warnings.extend(move_warnings(&n, &from, &to, hint));
+    }
     Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings, replaced, waiting_for_user, kept_for_user, touched })
 }
 
@@ -1533,7 +1678,8 @@ pub fn move_each(v: &Vault, reqs: &[(String, MoveReq)]) -> Result<Vec<(String, R
     let moved = out.iter().filter(|(_, r)| r.as_ref().is_ok_and(|r| r.changed)).count();
     if moved > 0 {
         let _g = v.lock()?;
-        v.commit(&touched, &format!("breadcrumb: move {moved} items to {to}"))?;
+        let msg = if reqs.iter().all(|(_, r)| r.state == first.state) { format!("breadcrumb: move {moved} items to {to}") } else { format!("breadcrumb: move {moved} items") };
+        v.commit(&touched, &msg)?;
     }
     Ok(out)
 }

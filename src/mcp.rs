@@ -420,6 +420,7 @@ impl Server {
                 }
                 Ok(format::ack("deleted", &ops::delete(&v, &req_s(a, "id")?)?))
             }
+            "move" if matches!(a.get("id"), Some(Value::Array(_))) => move_many(&v, a),
             "move" => {
                 let id = req_s(a, "id")?;
                 let state = req_s(a, "state")?;
@@ -427,34 +428,7 @@ impl Server {
                     let n = backlog::queue(&v, &id, pos, s(a, "by").as_deref())?;
                     return Ok(format::ack("queued", &n));
                 }
-                let check = s(a, "check").map(|c| backlog::Check::parse(&c)).transpose()?;
-                let evidence = s(a, "evidence");
-                let (state, verdict) = match s(a, "verdict").as_deref() {
-                    None => (state, None),
-                    Some("pass") => ("done".to_string(), Some(backlog::Verdict::Pass)),
-                    Some("fail") => ("queued".to_string(), Some(backlog::Verdict::Fail(evidence.clone().unwrap_or_default()))),
-                    Some(other) => bail!("verdict is pass or fail, got '{other}'"),
-                };
-                let req = MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note"), built_by: None, note: s(a, "note") };
-                let r = backlog::move_item(&v, &id, req)?;
-                if let Some(w) = backlog::user_wait_text(&r) {
-                    return Ok(w.trim_end().to_string());
-                }
-                let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.handle(), r.to) };
-                if !r.unmet.is_empty() {
-                    let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
-                    out.push_str(&format!("\nwarning, acceptance criteria not marked [x], tick with move check \"all\" or \"2,3\": {}", unmet.join("; ")));
-                }
-                if r.replaced > 0 {
-                    out.push_str(&format!("\nreplaced {} open steps with the ones given, ticked ones stay", r.replaced));
-                }
-                if !r.kept_for_user.is_empty() {
-                    out.push_str(&format!("\n{}", backlog::kept_for_user_text(&r.note.id, &r.kept_for_user).trim_end()));
-                }
-                for w in &r.warnings {
-                    out.push_str(&format!("\nwarning: {w}"));
-                }
-                Ok(out)
+                Ok(move_reply(&backlog::move_item(&v, &id, move_req(a)?)?))
             }
             "next" => {
                 let sc = self.scope(&v, a)?;
@@ -624,6 +598,73 @@ fn s_of(v: &Value) -> String {
         Value::String(x) => x.clone(),
         other => other.to_string(),
     }
+}
+
+fn move_req(a: &Map<String, Value>) -> Result<MoveReq> {
+    let check = s(a, "check").map(|c| backlog::Check::parse(&c)).transpose()?;
+    let evidence = s(a, "evidence");
+    let (state, verdict) = match s(a, "verdict").as_deref() {
+        None => (req_s(a, "state")?, None),
+        Some("pass") => ("done".to_string(), Some(backlog::Verdict::Pass)),
+        Some("fail") => ("queued".to_string(), Some(backlog::Verdict::Fail(evidence.clone().unwrap_or_default()))),
+        Some(other) => bail!("verdict is pass or fail, got '{other}'"),
+    };
+    Ok(MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note"), built_by: None, note: s(a, "note") })
+}
+
+fn move_reply(r: &backlog::MoveResult) -> String {
+    if let Some(w) = backlog::user_wait_text(r) {
+        return w.trim_end().to_string();
+    }
+    let mut out = if r.changed { format!("{} {} -> {}", format::ack("moved", &r.note), r.from, r.to) } else { format!("{} already in {}", r.note.handle(), r.to) };
+    if !r.unmet.is_empty() {
+        let unmet: Vec<String> = backlog::unmet_numbered(&r.note).into_iter().map(|(i, c)| format!("{i}. {c}")).collect();
+        out.push_str(&format!("\nwarning, acceptance criteria not marked [x], tick with move check \"all\" or \"2,3\": {}", unmet.join("; ")));
+    }
+    if r.replaced > 0 {
+        out.push_str(&format!("\nreplaced {} open steps with the ones given, ticked ones stay", r.replaced));
+    }
+    if !r.kept_for_user.is_empty() {
+        out.push_str(&format!("\n{}", backlog::kept_for_user_text(&r.note.id, &r.kept_for_user).trim_end()));
+    }
+    for w in &r.warnings {
+        out.push_str(&format!("\nwarning: {w}"));
+    }
+    out
+}
+
+/// `id` as a list moves several items in one vault commit: each entry an id sharing the call's other arguments, or an
+/// object with its own, like one verdict and its evidence per item.
+fn move_many(v: &Vault, a: &Map<String, Value>) -> Result<String> {
+    let Some(Value::Array(list)) = a.get("id") else { bail!("id is not a list") };
+    if s(a, "position").or_else(|| s(a, "after")).is_some() {
+        bail!("position takes one id, it would put each of them in the same place");
+    }
+    let mut reqs = vec![];
+    for x in list {
+        let mut item = a.clone();
+        match x {
+            Value::String(_) => {
+                item.insert("id".into(), x.clone());
+            }
+            Value::Object(o) => item.extend(o.clone()),
+            _ => bail!(r#"id takes an id or a list of ids or objects, like {{"id": ["abc12345", {{"id": "def67890", "verdict": "pass", "evidence": "ran the tests, 12 pass", "check": "1,2"}}], "state": "done", "by": "reviewer"}}"#),
+        }
+        reqs.push((req_s(&item, "id")?, move_req(&item)?));
+    }
+    let results = backlog::move_each(v, &reqs)?;
+    let failed = results.iter().filter(|(_, r)| r.is_err()).count();
+    let mut out: Vec<String> = results
+        .iter()
+        .map(|(id, r)| match r {
+            Ok(r) => move_reply(r),
+            Err(e) => format!("failed {id}: {}", crate::util::one_line(&format!("{e:#}"))),
+        })
+        .collect();
+    if failed > 0 {
+        out.push(format!("{failed} of {} moves failed, the others are done", results.len()));
+    }
+    Ok(out.join("\n"))
 }
 
 fn req_s(a: &Map<String, Value>, k: &str) -> Result<String> {
@@ -962,7 +1003,7 @@ pub fn tool_defs() -> Vec<Value> {
         }), &["from", "to"])),
         tool("merge", "Merge a duplicate note into another, undo restores it.", obj(with(id(), json!({"into": st(), "undo": bl()})), &["id"])),
         tool("delete", "Delete a note, prefer archiving.", obj(with(id(), json!({"confirm": bl()})), &["id", "confirm"])),
-        tool("move", "Change a backlog item's state.", obj(with(id(), json!({
+        tool("move", "Change a backlog item's state.", obj(with(json!({"id": {"type": ["string", "array"]}}), json!({
             "state": {"type": "string", "enum": backlog::STATES},
             "position": {"type": "string", "description": "queued: top or id"},
             "resolution": {"type": "string", "description": "for rejected"},
