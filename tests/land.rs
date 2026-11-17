@@ -243,8 +243,6 @@ fn one_push_carries_several_entries_and_one_read_closes_them() {
     assert_eq!(log.matches("land pushed").count(), 1, "{log}");
     assert!(log.contains("breadcrumb: land pushed 1111111 2222222"), "{log}");
 
-    let out = fails(&e, "w", &["land", "-p", "fx", "pushed", S3, "--run", "11"]);
-    assert!(out.contains("1111111 is ahead in the queue and still pushed on run 10"), "{out}");
     let list = ok(&e, "w", &["land", "-p", "fx"]);
     assert!(list.contains("1. 1111111 pushed, run 10 (with 2222222)"), "{list}");
     assert!(digest(&e, "r").contains("1111111 pushed, run 10 (with 2222222)"));
@@ -322,7 +320,7 @@ fn a_note_on_add_shows_in_the_list_and_digest_and_no_step_clears_it() {
     let long = "x".repeat(200);
     ok(&e, "w", &["land", "-p", "fx", "add", S2, "--note", &long]);
     assert!(digest(&e, "r").contains(&format!("note: \"{}...\"", "x".repeat(57))));
-    assert_eq!(entries(&e)[1].memo.as_ref().unwrap().chars().count(), 120);
+    assert_eq!(entries(&e)[1].memo.as_ref().unwrap().chars().count(), 200, "the note is kept whole up to 2000 chars, the list and digest cut it");
 
     let srv = breadcrumb::mcp::Server { vault_root: e.v.root.clone(), cwd: e.v.root.clone() };
     srv.call_tool("land", json!({"action": "add", "project": "fx", "sha": S3, "note": "from mcp"}).as_object().unwrap()).unwrap();
@@ -379,4 +377,143 @@ fn approved_only(e: &Env, shas: &[&str]) {
     for s in shas {
         ok(e, "r", &["land", "-p", "fx", "approve", s]);
     }
+}
+
+const S4: &str = "4444444444444444444444444444444444444444";
+const S5: &str = "5555555555555555555555555555555555555555";
+
+#[test]
+fn a_replace_takes_the_old_entry_place_items_note_and_approval() {
+    let e = setup();
+    let a = item(&e, "Item", "in-progress");
+    ok(&e, "w", &["land", "-p", "fx", "add", S1, "--items", &a, "--note", "lane x in wt/x"]);
+    ok(&e, "w", &["land", "-p", "fx", "add", S2]);
+    ok(&e, "r", &["land", "-p", "fx", "approve", S1, "--note", "pending the harness"]);
+    ok(&e, "w", &["land", "-p", "fx", "verify", S1]);
+    let out = ok(&e, "w", &["land", "-p", "fx", "replace", &S1[..8], S4]);
+    assert!(out.contains("4444444 verified") && out.contains("replaces 1111111, its approval by r carries over as verified, `git diff 1111111 4444444` shows what changed"), "{out}");
+    let es = entries(&e);
+    assert_eq!(es.iter().map(|x| x.short()).collect::<Vec<_>>(), ["4444444", "2222222"], "it takes the old place");
+    assert_eq!(es[0].items, [a.clone()]);
+    assert_eq!(es[0].memo.as_deref(), Some("lane x in wt/x"));
+    assert_eq!(es[0].replaces.as_deref(), Some(S1));
+    assert_eq!(es[0].earlier_notes[0].note, "pending the harness", "the verified condition stays readable");
+    let out = ok(&e, "w", &["land", "-p", "fx", "pushed", S4, "--run", "1"]);
+    assert!(out.contains("read the run: r"), "the approver reads the run: {out}");
+    assert!(fails(&e, "w", &["land", "-p", "fx", "replace", S4, S5]).contains("4444444 is pushed, it is on the branch already"));
+
+    ok(&e, "r", &["land", "-p", "fx", "approve", S2]);
+    let out = ok(&e, "w", &["land", "-p", "fx", "add", S5, "--replaces", S2, "--clear-approval", "--note", "new base"]);
+    assert!(out.contains("5555555 built") && out.contains("replaces 2222222, starts built since its approval was cleared") && out.contains("approve: r"), "{out}");
+    assert!(fails(&e, "w", &["land", "-p", "fx", "add", S3, "--replaces", "abcdef1"]).contains("it is the entry this one replaces"));
+    let log = common::git(&e.v.root, &["log", "--format=%s"]);
+    assert!(log.contains("breadcrumb: land replace 1111111 4444444") && log.contains("breadcrumb: land replace 2222222 5555555"), "{log}");
+}
+
+#[test]
+fn an_approval_before_the_entry_is_queued_parks_and_attaches_on_add() {
+    let e = setup();
+    item(&e, "x", "queued");
+    let out = ok(&e, "r", &["land", "-p", "fx", "approve", &S1[..10], "--note", "merge check only"]);
+    assert!(out.contains("parked: 1111111 approved by r") && out.contains("attaches when `crumb land add 1111111111` queues it"), "{out}");
+    assert!(!queue_file(&e).exists(), "the queue file old binaries read stays as it was");
+    let list = ok(&e, "w", &["land", "-p", "fx"]);
+    assert!(list.contains("the landing queue is empty\nparked approvals") && list.contains("1111111 approved by r") && list.contains("(merge check only)"), "{list}");
+    let out = ok(&e, "w", &["land", "-p", "fx", "add", S1]);
+    assert!(out.contains("1111111 approved (merge check only)") && out.contains("approved by r") && out.contains("before it was queued") && out.contains("verify or push: w"), "{out}");
+    assert!(!ok(&e, "w", &["land", "-p", "fx"]).contains("parked"), "it attached");
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S1, "--run", "3"]);
+
+    assert!(fails(&e, "r", &["land", "-p", "fx", "approve", "abcd"]).contains("no queue entry"), "a short sha does not park");
+    ok(&e, "r", &["land", "-p", "fx", "approve", S2]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "drop", &S2[..7]]);
+    assert!(out.contains("dropped the parked approval 2222222"), "{out}");
+}
+
+#[test]
+fn a_re_approve_keeps_the_earlier_note_and_show_prints_one_entry_whole() {
+    let e = setup();
+    let a = item(&e, "Item", "in-progress");
+    let long = format!("lane x {}", "word ".repeat(40)).trim().to_string();
+    ok(&e, "w", &["land", "-p", "fx", "add", S1, "--items", &a, "--note", &long]);
+    ok(&e, "r", &["land", "-p", "fx", "approve", S1, "--note", "tests pass on linux"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "approve", S1, "--note", "tests pass on linux and windows"]);
+    assert!(out.contains("the earlier note \"tests pass on linux\" by r stays with the entry, `crumb land show 1111111` lists it"), "{out}");
+    let out = ok(&e, "r", &["land", "-p", "fx", "approve", S1]);
+    assert!(out.contains("approved (tests pass on linux and windows)") && out.contains("keeps the note"), "{out}");
+
+    let list = ok(&e, "w", &["land", "-p", "fx", "list"]);
+    assert!(list.contains("...") && !list.contains(&long), "the list cuts the note: {list}");
+    let show = ok(&e, "w", &["land", "-p", "fx", "show", &S1[..6]]);
+    assert!(show.starts_with(&format!("{S1} approved")) && show.contains(&format!("  note: {long}\n")), "{show}");
+    assert!(show.contains("  approval note: tests pass on linux and windows (by r)") && show.contains("  earlier approval notes:\n") && show.contains(" r: tests pass on linux\n"), "{show}");
+    assert!(show.contains(&format!("    {a}")) || show.contains("[in-progress] Item"), "{show}");
+    assert!(show.contains("  steps:\n    built ") && show.contains(" by w\n    approved "), "{show}");
+    ok(&e, "w", &["land", "-p", "fx", "verify", S1]);
+    let show = ok(&e, "w", &["land", "-p", "fx", "show", S1]);
+    assert!(!show.contains("approval note:") && show.contains(" r: tests pass on linux and windows"), "verify keeps the condition readable: {show}");
+}
+
+#[test]
+fn a_push_after_an_earlier_push_whose_run_is_unread_needs_no_force() {
+    let e = setup();
+    item(&e, "x", "queued");
+    approved(&e, &[S1, S2, S3]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S1, "--run", "1"]);
+    let out = ok(&e, "w", &["land", "-p", "fx", "pushed", S2, "--run", "2"]);
+    assert!(out.contains("2222222 pushed, run 2"), "{out}");
+    ok(&e, "w", &["land", "-p", "fx", "add", S4]);
+    ok(&e, "w", &["land", "-p", "fx", "add", S5]);
+    ok(&e, "r", &["land", "-p", "fx", "approve", S5]);
+    let out = fails(&e, "w", &["land", "-p", "fx", "pushed", S5, "--run", "3"]);
+    assert!(out.contains("3333333 is ahead in the queue and still approved"), "an entry not pushed yet still blocks: {out}");
+}
+
+#[test]
+fn the_cli_and_the_mcp_tool_share_the_read_verbs() {
+    let e = setup();
+    let a = item(&e, "Item", "in-progress");
+    ok(&e, "w", &["land", "-p", "fx", "add", S1, "--items", &a]);
+    approved_only(&e, &[S1]);
+    approved(&e, &[S2, S3]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S1, S2, S3, "--run", "9"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "green", S1]);
+    assert!(out.contains("1111111 green") && out.contains("-> review"), "{out}");
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", "red", S2]);
+    assert!(out.contains("2222222 red"), "read <result> <sha> reads too: {out}");
+    let srv = breadcrumb::mcp::Server { vault_root: e.v.root.clone(), cwd: e.v.root.clone() };
+    let call = |args: serde_json::Value| srv.call_tool("land", args.as_object().unwrap());
+    let out = call(json!({"action": "read", "result": "green", "project": "fx", "sha": S3})).unwrap();
+    assert!(out.contains("3333333 green"), "{out}");
+    assert!(call(json!({"action": "read", "project": "fx", "sha": S3})).unwrap_err().to_string().contains("result is required"));
+    let out = call(json!({"action": "show", "project": "fx", "sha": S1})).unwrap();
+    assert!(out.starts_with(S1), "{out}");
+    let out = fails(&e, "r", &["land", "-p", "fx", "gren", S1]);
+    assert!(out.contains("green"), "clap names the close one: {out}");
+}
+
+#[test]
+fn the_next_line_names_a_renamed_session_by_its_current_name() {
+    let e = setup();
+    item(&e, "x", "queued");
+    let claude = e._d.path().join("claude");
+    const ID: &str = "aaaaaaaa-1111-2222-3333-444444444444";
+    let file = |name: &str| {
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        let pid = std::process::id();
+        std::fs::write(claude.join("sessions").join(format!("{pid}.json")), format!(r#"{{"pid":{pid},"sessionId":"{ID}","name":"{name}"}}"#)).unwrap();
+    };
+    let as_session = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_crumb")).args(args).env("BREADCRUMB_HOME", &e.v.root).env("BREADCRUMB_CLAUDE_DIR", &claude).env("CLAUDE_CODE_SESSION_ID", ID).env("BREADCRUMB_SESSION", "").output().unwrap();
+        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).to_string()
+    };
+    file("neocad-e4");
+    ok(&e, "w", &["land", "-p", "fx", "add", S1]);
+    as_session(&["land", "-p", "fx", "approve", S1]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S1, "--run", "4"]);
+    assert!(as_session(&["land", "-p", "fx"]).contains("read the run: neocad-e4 aaaaaaaa (you)"));
+    file("neocad-bd");
+    let list = as_session(&["land", "-p", "fx"]);
+    assert!(list.contains("read the run: neocad-bd aaaaaaaa (you)") && !list.contains("neocad-e4"), "{list}");
 }
