@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 /// Runs git with stdin closed and output captured, so it can never read or corrupt the MCP stdio stream.
@@ -154,6 +154,41 @@ pub fn config_remote_urls(dir: &Path) -> Vec<String> {
             if !v.is_empty() {
                 out.push(v.to_string());
             }
+        }
+    }
+    out
+}
+
+/// For a `dir` inside a linked worktree: the worktree's top and the same place in the main checkout, read from the
+/// `.git` file and the worktree's `commondir` without spawning git. A submodule or a worktree of a bare repo has no
+/// main checkout and gives None.
+pub fn main_checkout(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let top = dir.ancestors().find(|d| d.join(".git").exists())?;
+    let dot = top.join(".git");
+    if !dot.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&dot).ok()?;
+    let git_dir = top.join(text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim());
+    let common = lexical(&git_dir.join(std::fs::read_to_string(git_dir.join("commondir")).ok()?.trim()));
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    let main = common.parent()?;
+    let rel = dir.strip_prefix(top).ok()?;
+    Some((top.to_path_buf(), if rel.as_os_str().is_empty() { main.to_path_buf() } else { main.join(rel) }))
+}
+
+fn lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(out.components().next_back(), Some(Component::Normal(_))) => {
+                out.pop();
+            }
+            c => out.push(c),
         }
     }
     out

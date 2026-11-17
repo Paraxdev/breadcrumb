@@ -243,3 +243,28 @@ fn a_bad_slug_is_never_answered_with_a_scope_word_as_the_example() {
     let e = ops::project_add(&v, "My App", None, None, &[]).unwrap_err().to_string();
     assert!(e.contains("(for example 'my-app')"), "{e}");
 }
+
+#[test]
+fn a_git_worktree_outside_the_project_folder_detects_as_the_main_checkout_project() {
+    let (d, v) = common::vault();
+    let repo = d.path().join("code").join("app");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    common::git(&repo, &["init", "-q"]);
+    common::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first"]);
+    ops::project_link(&v, "app", &repo, None).unwrap();
+    let wt = d.path().join("code").join("app-wt").join("lane");
+    common::git(&repo, &["worktree", "add", "-q", &wt.to_string_lossy(), "-b", "lane"]);
+    std::fs::create_dir_all(wt.join("src").join("deep")).unwrap();
+    assert_eq!(v.detect_project(&wt).as_deref(), Some("app"));
+    assert_eq!(v.detect_project(&wt.join("src").join("deep")).as_deref(), Some("app"));
+    assert_eq!(v.detect_project_fast(&wt.join("src")).as_deref(), Some("app"));
+    let o = std::process::Command::new(env!("CARGO_BIN_EXE_crumb")).args(["land", "list"]).current_dir(wt.join("src")).env("BREADCRUMB_HOME", &v.root).env("CLAUDE_CODE_SESSION_ID", "").env("BREADCRUMB_SESSION", "").output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success() && text.contains("the landing queue is empty"), "{text}{}", String::from_utf8_lossy(&o.stderr));
+
+    ops::project_link(&v, "code", &d.path().join("code"), None).unwrap();
+    assert_eq!(v.detect_project(&wt).as_deref(), Some("app"), "a binding above the worktree loses to the main checkout's");
+    assert_eq!(v.detect_project(&d.path().join("code").join("app-wt")).as_deref(), Some("code"), "outside any checkout the binding holds");
+    ops::project_link(&v, "lane", &wt, None).unwrap();
+    assert_eq!(v.detect_project(&wt.join("src")).as_deref(), Some("lane"), "the worktree's own binding wins");
+}

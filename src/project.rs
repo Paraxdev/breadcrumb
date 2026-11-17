@@ -111,15 +111,28 @@ pub fn detect(projects: &[Project], cwd_remotes: &[String], cwd: &Path) -> Optio
             }
         }
     }
+    let own = by_path(projects, cwd);
+    let Some((top, main)) = crate::git::main_checkout(cwd) else { return own.map(|(_, s)| s) };
+    // A binding at or inside the worktree is its own, one above it (like a folder that holds all worktrees) loses
+    // to the main checkout's, since the worktree shares that repo.
+    let top_n = normalize_path(&top.to_string_lossy());
+    match own {
+        Some((pn, s)) if path_has_prefix(&pn, &top_n) => Some(s),
+        own => by_path(projects, &main).or(own).map(|(_, s)| s),
+    }
+}
+
+/// The project whose bound path is the longest prefix of `cwd`, with that path normalized.
+fn by_path(projects: &[Project], cwd: &Path) -> Option<(String, String)> {
     let cwd_n = normalize_path(&cwd.to_string_lossy());
-    let mut best: Option<(usize, &Project)> = None;
+    let mut best: Option<(String, &Project)> = None;
     for p in projects {
         for path in &p.paths {
             let pn = normalize_path(path);
-            if path_has_prefix(&cwd_n, &pn) && best.is_none_or(|(len, _)| pn.len() > len) {
-                best = Some((pn.len(), p));
+            if path_has_prefix(&cwd_n, &pn) && best.as_ref().is_none_or(|(b, _)| pn.len() > b.len()) {
+                best = Some((pn, p));
             }
         }
     }
-    best.map(|(_, p)| p.slug.clone())
+    best.map(|(pn, p)| (pn, p.slug.clone()))
 }
