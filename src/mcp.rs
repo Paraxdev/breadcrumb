@@ -245,7 +245,7 @@ impl Server {
                     let (text, cut) = format::body_only(&n, u(a, "tail"));
                     return Ok(format!("{lead}{}", cut.map_or(text.clone(), |c| format!("{c}\n{text}"))));
                 }
-                let shown = u(a, "tail").map(|t| format::tailed(&n, t));
+                let shown = u(a, "tail").map(|t| format::tailed(&n, t)).or_else(|| if b(a, "full") { None } else { format::handoff_short(&n) });
                 let note = format::note_compact(shown.as_ref().unwrap_or(&n), b(a, "full"));
                 let drift = crate::drift::get_line(&v, &n, &self.cwd_of(a)).map(|d| format!("\n{d}\n")).unwrap_or_default();
                 Ok(format!("{lead}{note}{}{}{drift}", format::inbound_text(&n, &all), question::notice(&n)))

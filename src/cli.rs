@@ -126,7 +126,7 @@ pub enum Cmd {
     Get {
         /// Note id or slug
         id: String,
-        /// Show the keys an import left too, as stored
+        /// Show the note as stored: the keys an import left and every update of a long handoff
         #[arg(long)]
         full: bool,
         /// Print the text alone, no frontmatter, History or links, for piping
@@ -1506,7 +1506,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 }
                 text
             } else {
-                let shown = tail.map(|t| format::tailed(&n, t));
+                let shown = tail.map(|t| format::tailed(&n, t)).or_else(|| if full { None } else { format::handoff_short(&n) });
                 let shown = shown.as_ref().unwrap_or(&n);
                 let notice = question::notice(&n);
                 let written = crate::session::written_line(&n).map(|w| format!("\n{w}\n")).unwrap_or_default();

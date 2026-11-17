@@ -190,11 +190,10 @@ fn is_stamp(l: &str) -> bool {
     l.len() >= 11 && l.len() <= 90 && l.ends_with(':') && l.is_char_boundary(10) && chrono::NaiveDate::parse_from_str(&l[..10], "%Y-%m-%d").is_ok() && (l.len() == 11 || l[10..].starts_with(' '))
 }
 
-/// The handoff's text for the digest: the writer's summary, then appended updates newest first, then what it first said,
-/// so a cut drops the oldest state and not the newest.
-fn handoff_text(h: &Note) -> String {
+/// A handoff's text apart: what it first said, then each appended update from its stamp on, oldest first.
+pub fn handoff_updates(body: &str) -> (String, Vec<String>) {
     let mut blocks: Vec<String> = vec![String::new()];
-    for l in h.body.lines() {
+    for l in body.lines() {
         if is_stamp(l) {
             blocks.push(String::new());
         }
@@ -203,6 +202,13 @@ fn handoff_text(h: &Note) -> String {
         b.push('\n');
     }
     let first = blocks.remove(0);
+    (first, blocks)
+}
+
+/// The handoff's text for the digest: the writer's summary, then appended updates newest first, then what it first said,
+/// so a cut drops the oldest state and not the newest.
+fn handoff_text(h: &Note) -> String {
+    let (first, blocks) = handoff_updates(&h.body);
     let mut out = String::new();
     if let Some(s) = h.field(SUMMARY_KEY).and_then(yaml_scalar_string).map(|s| one_line(&s)).filter(|s| !s.is_empty()) {
         let _ = writeln!(out, "Summary: {s}");
@@ -218,7 +224,8 @@ fn handoff_text(h: &Note) -> String {
     out
 }
 
-fn handoff_section(h: &Note, commits: &str, stale_days: u64, max: usize) -> String {
+/// `mine` marks the handoff of the session reading the digest, which leads even when a newer one exists.
+fn handoff_section(h: &Note, commits: &str, stale_days: u64, max: usize, mine: bool) -> String {
     let prev = h.links.iter().find(|l| l.rel == SUPERSEDES).map(|l| format!(", previous {}", l.to)).unwrap_or_default();
     let quiet = crate::util::now() - h.updated;
     let fresh = if quiet > chrono::Duration::hours(lifecycle::HANDOFF_FRESH_HOURS) {
@@ -227,9 +234,10 @@ fn handoff_section(h: &Note, commits: &str, stale_days: u64, max: usize) -> Stri
         commits.to_string()
     };
     let head = format!(
-        "Latest handoff {} ({}{}{prev}{fresh}): {}{}
+        "Latest handoff {} ({}{}{}{prev}{fresh}): {}{}
 ",
         h.handle(),
+        if mine { "yours, " } else { "" },
         crate::util::fmt_date(&h.created),
         lifecycle::handoff_who(h),
         short_title(&h.title),
@@ -482,10 +490,13 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     let want = if !listed("recent") { 0 } else if listed("prefs") { opts.recent.saturating_sub(prefs.len().min(opts.recent / 2)) } else { opts.recent };
     let recent_rows: Vec<String> = rest.iter().take(want).map(|n| format!("{}{}\n", row(n, project, false), crate::recall::stale_mark(n, days))).collect();
 
-    // A handoff a newer one covers, or whose items all landed, has nothing left to resume, so the newest other one leads.
+    // A handoff a newer one covers, or whose items all landed, has nothing left to resume, so the newest other one leads,
+    // unless this session wrote or holds one of them.
     let mut live = lifecycle::live_handoffs(&notes, project, &lapsed);
     let marks = lifecycle::handoff_marks(&live, &all);
-    if let Some(i) = live.iter().position(|h| !marks.contains_key(&h.id)) {
+    let me = crate::session::current();
+    let mine = |h: &Note| me.as_deref().is_some_and(|me| lifecycle::held_or_written_by(h, me));
+    if let Some(i) = live.iter().position(|h| !marks.contains_key(&h.id) && mine(h)).or_else(|| live.iter().position(|h| !marks.contains_key(&h.id))) {
         let lead = live.remove(i);
         live.insert(0, lead);
     }
@@ -502,21 +513,28 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     let rows_size = |rows: &[(bool, String)]| rows.iter().map(|(_, l)| chars(l)).sum::<usize>();
     let need_t = if listed("todos") { rows_size(&todo_rows) } else { 0 };
     let need_b = if listed("backlog") { rows_size(&board_rows) } else { 0 };
-    // What a digest over budget gives up first: todo and board rows, then the handoff text below HANDOFF_MIN, so the
-    // hook's cut at the budget never takes the lines that ask the agent to act, which come after them.
-    let (room_t, room_b) = {
+    // What a digest over budget gives up first: pin lines down to a third of the budget, then todo and board rows, then
+    // the handoff text below HANDOFF_MIN, so the hook's cut at the budget never takes the lines that ask the agent to
+    // act, which come after them.
+    let (pins, room_t, room_b) = {
         let always = [head.as_str(), no_notes, &judge, &answered, &review];
-        let blocks = [("workflows", workflows.as_str()), ("pins", &pins), ("handoffs", &others), ("prefs", &prefs_text), ("machine", &machine_text), ("landing", &landing), ("todos", todos_head), ("backlog", &board_head), ("backlog", &backlog_tail), ("recent", &global_more)];
+        let blocks = [("workflows", workflows.as_str()), ("handoffs", &others), ("prefs", &prefs_text), ("machine", &machine_text), ("landing", &landing), ("todos", todos_head), ("backlog", &board_head), ("backlog", &backlog_tail), ("recent", &global_more)];
         let kept = always.into_iter().map(chars).sum::<usize>() + blocks.iter().filter(|(n, _)| listed(n)).map(|(_, s)| chars(s)).sum::<usize>();
-        let floor = lead.map_or(0, |h| chars(&handoff_section(h, &commits(h), days, HANDOFF_MIN)));
-        let room = budget.saturating_sub(kept + floor);
+        let floor = lead.map_or(0, |h| chars(&handoff_section(h, &commits(h), days, HANDOFF_MIN, mine(h))));
+        let pins = match listed("pins") {
+            true if kept + chars(&pins) + floor + need_t + need_b > budget => pins_section(&notes, project, days, budget.saturating_sub(kept + floor + need_t + need_b).clamp(budget / 3, budget / 2)),
+            true => pins,
+            false => String::new(),
+        };
+        let room = budget.saturating_sub(kept + chars(&pins) + floor);
         let half = room / 2;
-        match (need_t, need_b) {
+        let (t, b) = match (need_t, need_b) {
             _ if need_t + need_b <= room => (need_t, need_b),
             (t, _) if t <= half => (t, room - t),
             (_, b) if b <= half => (room - b, b),
             _ => (half, room - half),
-        }
+        };
+        (pins, t, b)
     };
     let todos = format!("{todos_head}{}", fit_rows(&todo_rows, room_t, "breadcrumb list -k todo"));
     let backlog = format!("{board_head}{}{backlog_tail}", fit_rows(&board_rows, room_b, "breadcrumb backlog"));
@@ -526,8 +544,8 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     let handoff = match lead {
         Some(h) => {
             let reserve = RECENT_RESERVE.min(recent_rows.iter().map(|r| chars(r)).sum());
-            let full = handoff_section(h, &commits(h), days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX));
-            if chars(&full) <= left { full } else { handoff_section(h, &commits(h), days, left) }
+            let full = handoff_section(h, &commits(h), days, left.saturating_sub(reserve).clamp(HANDOFF_MIN, HANDOFF_MAX), mine(h));
+            if chars(&full) <= left { full } else { handoff_section(h, &commits(h), days, left, mine(h)) }
         }
         None => String::new(),
     };

@@ -321,7 +321,7 @@ fn mcp_duplicate_hint_needs_two_shared_title_words_and_lists_exact_titles_first(
     let srv = Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
     let mut input = call(1, "add", json!({"title": "Parser task"}));
     input.extend(call(2, "add", json!({"title": "Blocker task"})));
-    for (i, t) in ["conc 1 1", "conc 2 1", "conc 3 1", "conc 4 1", "conc 5 1", "conc 1 11", "conc 1 1"].iter().enumerate() {
+    for (i, t) in ["conc lexer pass", "conc parser pass", "conc typer pass", "conc linker pass", "conc emitter pass", "conc lexer stage", "conc lexer pass"].iter().enumerate() {
         input.extend(call(10 + i as u64, "add", json!({"title": t})));
     }
     let out = mcp_run(&srv, input);
@@ -331,7 +331,7 @@ fn mcp_duplicate_hint_needs_two_shared_title_words_and_lists_exact_titles_first(
     let last = text(&out[8]);
     let hint = last.lines().nth(1).unwrap_or_default();
     let first_hint = hint.split_once(": ").map(|x| x.1).unwrap_or_default();
-    assert!(first_hint.starts_with(&format!("{first_dup} \"conc 1 1\"")), "{last}");
+    assert!(first_hint.starts_with(&format!("{first_dup} \"conc lexer pass\"")), "{last}");
     assert_eq!(hint.matches('"').count(), 4, "at most 2 similar notes: {last}");
 }
 

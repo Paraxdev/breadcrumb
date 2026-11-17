@@ -27,6 +27,8 @@ pub struct Hit {
     pub exact_whole: bool,
     /// It holds a word of several terms literally, like an identifier or an error code with a dash.
     pub exact_identifier: bool,
+    /// How many query terms its title, slug or tags hold as a word, a plural counts.
+    pub named: usize,
     /// Set by callers that know the whole vault: superseded or expired.
     pub lapsed: Option<&'static str>,
 }
@@ -150,6 +152,12 @@ fn prepare(n: &Note) -> Prepared {
     }
 }
 
+/// `term` as a word of `tokens`, or its plural or singular with s or es.
+fn names(tokens: &[String], term: &str) -> bool {
+    let plural = |long: &str, short: &str| long.strip_prefix(short).is_some_and(|r| r == "s" || r == "es");
+    tokens.iter().any(|t| t == term || plural(t, term) || plural(term, t))
+}
+
 /// Exact token hit counts fully, a prefix-only hit counts half.
 fn token_weight(tokens: &[String], term: &str) -> f64 {
     if tokens.iter().any(|t| t == term) {
@@ -219,8 +227,9 @@ fn recency(n: &Note) -> f64 {
     1.0 + 0.2 * 0.5f64.powf(days / 30.0)
 }
 
-/// Scores notes against a query. A note the query names comes first, then notes holding the query or its words literally come first, then notes matching more
-/// terms, then by score weighted by kind and recency. Partial matches are kept only within a few terms of the best
+/// Scores notes against a query. A note the query names comes first, then notes holding the whole query literally, then
+/// notes matching more terms, other notes before code maps, then notes whose title, slug or tags name more terms, then
+/// notes holding more query words literally, then by score weighted by kind and recency. Partial matches are kept only within a few terms of the best
 /// match, so a long query never lists everything that shares one word with it, a literal identifier always stays.
 pub fn search(notes: Vec<Note>, q: &str) -> SearchResult {
     let query = parse_query(q);
@@ -258,7 +267,8 @@ pub fn search(notes: Vec<Note>, q: &str) -> SearchResult {
             let exact_identifier = query.words.iter().any(|w| tokenize(w).len() > 1 && holds(&p.text, w));
             let slug = n.slug();
             let own = query.terms.iter().any(|t| t.len() >= crate::id::MIN_PREFIX && n.id.starts_with(t.as_str())) || query.words.iter().any(|w| slug.as_deref() == Some(w.as_str()));
-            hits.push(Hit { note: n, score, snippet: snip, matched, matched_terms, own, exact, exact_whole, exact_identifier, lapsed: None });
+            let named = matched_terms.iter().filter(|t| names(&p.title, t) || names(&p.slug, t) || names(&p.tags, t)).count();
+            hits.push(Hit { note: n, score, snippet: snip, matched, matched_terms, own, exact, exact_whole, exact_identifier, named, lapsed: None });
         }
     }
     let terms = query.terms.len();
@@ -266,9 +276,11 @@ pub fn search(notes: Vec<Note>, q: &str) -> SearchResult {
     let floor = best.saturating_sub(terms / 4).max(1.min(terms));
     hits.retain(|h| h.matched >= floor || h.exact_identifier || h.own);
     let rank = |h: &Hit| h.score * kind_weight(&h.note.kind) * recency(&h.note);
+    // A code map lists many files, so its text holds many words without being about them.
+    let other = |h: &Hit| h.note.kind != "map";
     hits.sort_by(|a, b| {
-        (b.own, b.exact_whole, b.exact, b.matched)
-            .cmp(&(a.own, a.exact_whole, a.exact, a.matched))
+        (b.own, b.exact_whole, b.matched, other(b), b.named, b.exact)
+            .cmp(&(a.own, a.exact_whole, a.matched, other(a), a.named, a.exact))
             .then(rank(b).partial_cmp(&rank(a)).unwrap_or(std::cmp::Ordering::Equal))
             .then(b.note.updated.cmp(&a.note.updated))
     });

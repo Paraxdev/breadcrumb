@@ -190,3 +190,18 @@ fn the_display_form_of_an_id_finds_the_note_itself() {
     assert_eq!(r.hits[0].note.id, "wc579n42");
     assert_eq!(r.hits.len(), 2);
 }
+
+#[test]
+fn a_note_whose_title_names_the_terms_ranks_above_one_that_mentions_them_and_maps_come_after_other_notes() {
+    let mention = note("qqqq0001", "Localise the editor UI", &[], "Editor ran on 50440 because 50100 failed to bind (os error 10013, in the Windows excluded port range)");
+    let about = note("qqqq0002", "Windows reserves ports 50060 to 50359", &[], "Binding a port in that range fails with error 10013, see netsh show excludedportrange");
+    let r = search(vec![mention, about], "excluded port range 10013");
+    assert_eq!(r.hits.iter().map(|h| h.note.id.as_str()).collect::<Vec<_>>(), vec!["qqqq0002", "qqqq0001"], "ports in the title names port");
+    assert_eq!((r.hits[0].named, r.hits[1].named), (1, 0));
+
+    let mut map = note("rrrr0001", "field row layout", &[], "- src/params/engine.ts:184 circular check\n- src/params/engine.ts:200 params row");
+    map.kind = "map".into();
+    let item = note("rrrr0002", "Problem lines read in the chosen language", &[], "src/params/engine.ts returns circular as English");
+    let r = search(vec![map, item], "params engine circular");
+    assert_eq!(r.hits[0].note.id, "rrrr0002", "a code map comes after the other notes matching as much");
+}

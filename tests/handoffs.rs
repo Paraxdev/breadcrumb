@@ -258,3 +258,32 @@ fn the_mcp_add_names_the_retire_call_and_update_takes_supersedes() {
     assert!(out.contains("\nsuperseded ") && out.contains("First"), "{out}");
     assert!(superseded(&v, &second.id) == vec![first.id.clone()] && !v.get(&first.id).unwrap().pinned);
 }
+
+#[test]
+fn get_shows_a_long_handoffs_newest_updates_and_full_prints_the_whole_body() {
+    let (d, v) = common::vault();
+    let filler = "the build is green and the bench numbers are in the log. ".repeat(6);
+    let (id, _) = handoff(&v, A, "Engine state", &["--body", &format!("Plan at the start, {filler}")]);
+    for i in 1..=6 {
+        crumb(&v, A, &["append", &id, &format!("Update {i}: {filler}")]);
+    }
+    let short = crumb(&v, A, &["get", &id]);
+    assert!(short.contains(&format!("(3 older updates and the first text left out, `breadcrumb get {id} --full` (MCP full) prints the whole body)")), "{short}");
+    assert!(short.contains("Update 4: ") && short.contains("Update 6: ") && !short.contains("Update 3: ") && !short.contains("Plan at the start"), "{short}");
+    assert!(short.find("Update 4: ") < short.find("Update 6: "), "{short}");
+    for whole in [crumb(&v, A, &["get", &id, "--full"]), crumb(&v, A, &["get", &id, "--json"]), crumb(&v, A, &["get", &id, "--body"])] {
+        assert!(whole.contains("Plan at the start") && whole.contains("Update 1: ") && whole.contains("Update 6: "), "{whole}");
+    }
+
+    let srv = breadcrumb::mcp::Server { vault_root: v.root.clone(), cwd: d.path().to_path_buf() };
+    let get = |args: serde_json::Value| srv.call_tool("get", args.as_object().unwrap()).unwrap();
+    let short = get(serde_json::json!({"id": id}));
+    assert!(short.contains("3 older updates") && !short.contains("Update 3: "), "{short}");
+    assert!(get(serde_json::json!({"id": id, "full": true})).contains("Update 1: "));
+
+    let (brief, _) = handoff(&v, A, "Short state", &["--body", "One line."]);
+    for i in 1..=6 {
+        crumb(&v, A, &["append", &brief, &format!("Update {i}.")]);
+    }
+    assert!(crumb(&v, A, &["get", &brief]).contains("Update 1."), "a short handoff prints whole");
+}

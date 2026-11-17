@@ -459,3 +459,41 @@ fn the_handoff_window_counts_from_the_last_write() {
     assert_eq!(others_block(&d), vec![format!("{} 3h: Long running", old.handle())], "{d}");
     assert!(!d.contains("Forgotten"), "{d}");
 }
+
+fn digest_as(e: &Env, session: &str) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_crumb"))
+        .args(["context", "-p", "app"])
+        .current_dir(&e.work)
+        .env("BREADCRUMB_HOME", &e.v.root)
+        .env("BREADCRUMB_CLAUDE_DIR", &e.claude)
+        .env("CLAUDE_CODE_SESSION_ID", session)
+        .env("BREADCRUMB_SESSION", "")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[test]
+fn the_handoff_this_session_wrote_or_holds_leads_its_digest() {
+    let e = setup(&[(A, "app-a"), (B, "app-b")]);
+    let mine = added_id(&crumb(&e, A, &["add", "-k", "handoff", "-t", "Engine lane state", "-p", "app", "--body", "The copy path is half done."]));
+    tick();
+    let theirs = added_id(&crumb(&e, B, &["add", "-k", "handoff", "-t", "Docs lane state", "-p", "app", "--body", "The guide needs screenshots."]));
+    let lead = |d: &str| d.lines().find(|l| l.starts_with("Latest handoff")).unwrap_or_default().to_string();
+    let yours = |d: &str, id: &str| lead(d).starts_with(&format!("Latest handoff {} (yours, ", e.v.get(id).unwrap().handle()));
+
+    assert!(lead(&digest(&e)).contains(&theirs) && !lead(&digest(&e)).contains("yours"), "{}", digest(&e));
+    let d = digest_as(&e, A);
+    assert!(yours(&d, &mine), "{d}");
+    assert!(others_block(&d).iter().any(|l| l.contains(&theirs)), "{d}");
+    assert!(yours(&digest_as(&e, B), &theirs));
+
+    // A handoff another session holds is that session's, an older one this session holds leads.
+    crumb(&e, A, &["claim", &theirs]);
+    let d = digest_as(&e, B);
+    assert!(lead(&d).contains(&theirs) && !lead(&d).contains("yours"), "{d}");
+    crumb(&e, B, &["claim", &mine]);
+    let d = digest_as(&e, B);
+    assert!(yours(&d, &mine), "{d}");
+    assert!(yours(&digest_as(&e, A), &theirs));
+}
