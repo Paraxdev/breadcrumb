@@ -931,6 +931,8 @@ pub struct MoveReq {
     /// Who built the item, stamped as `built_by` on a move to review in place of the mover, empty leaves it unset.
     /// A green land read moves items for their builder.
     pub built_by: Option<String>,
+    /// A paragraph appended to the item with the move, stamped like `append`.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1410,7 +1412,8 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let release_note = req.release_note.as_deref().map(crate::util::one_line).filter(|s| !s.trim().is_empty());
     let waiting_for_user = if agent_check && req.verdict == Some(Verdict::Pass) { open_user_steps(&n) } else { vec![] };
     let to = if waiting_for_user.is_empty() { to } else { "review".to_string() };
-    let same = from == to && req.verdict.is_none() && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) && unchanged(RELEASE_NOTE_KEY, &release_note);
+    let note = req.note.as_deref().map(|t| crate::session::strip_own_stamp(&crate::util::normalize_newlines(t))).filter(|t| !t.trim().is_empty());
+    let same = from == to && note.is_none() && req.verdict.is_none() && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) && unchanged(RELEASE_NOTE_KEY, &release_note);
     let ticked = match &req.check {
         Some(c) => apply_check(&mut n, c, keep_user)?,
         None => 0,
@@ -1462,6 +1465,9 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
             clear_claim(&mut n);
         }
         _ => {}
+    }
+    if let Some(t) = &note {
+        n.body = insert_before_history(&n.body, &format!("{}\n{t}", crate::session::append_head()));
     }
     if to == "review" && from != "review" {
         match req.built_by.clone().or_else(|| session_name(req.by.as_deref())).filter(|b| !b.trim().is_empty()) {

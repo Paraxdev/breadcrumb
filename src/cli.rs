@@ -604,6 +604,9 @@ pub enum Cmd {
         /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, a bare sha reads as commit:<sha>, -type:value removes (repeatable)
         #[arg(long = "ref", alias = "refs", value_name = "REF", allow_hyphen_values = true)]
         refs: Vec<String>,
+        /// A paragraph appended to the item with the move, stamped like `append`
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        note: Option<String>,
         #[command(flatten)]
         _p: IgnoredProject,
     },
@@ -1950,7 +1953,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(format!("withdrew the question on {}", backlog::item_summary(&n)), n.to_json());
         }
         Cmd::Release { id, by, force, project } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force, project.as_deref())?,
-        Cmd::Move { ids, state, position, resolution, shipped_in, by, check, steps, release_note, refs, .. } => {
+        Cmd::Move { ids, state, position, resolution, shipped_in, by, check, steps, release_note, refs, note, .. } => {
             if let Some(pos) = backlog::queue_position(&state, position.as_deref())? {
                 let [id] = ids.as_slice() else {
                     bail!("position takes one id, it would put each of them in the same place");
@@ -1960,7 +1963,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, by_user: !backlog::in_session(), ..Default::default() };
+            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, note, by_user: !backlog::in_session(), ..Default::default() };
             let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "replaced_steps": r.replaced, "waiting_for_user": waiting_json(r), "left_for_user": steps_json(&r.kept_for_user), "note": r.note.to_json()});
             if let [id] = ids.as_slice() {
                 let r = backlog::move_item(&open()?, id, req)?;

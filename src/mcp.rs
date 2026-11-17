@@ -381,7 +381,7 @@ impl Server {
                     Some("fail") => ("queued".to_string(), Some(backlog::Verdict::Fail(evidence.clone().unwrap_or_default()))),
                     Some(other) => bail!("verdict is pass or fail, got '{other}'"),
                 };
-                let req = MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note"), built_by: None };
+                let req = MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note"), built_by: None, note: s(a, "note") };
                 let r = backlog::move_item(&v, &id, req)?;
                 if let Some(w) = backlog::user_wait_text(&r) {
                     return Ok(w.trim_end().to_string());
