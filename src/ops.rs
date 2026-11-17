@@ -479,14 +479,36 @@ pub fn landed(n: &Note) -> Option<String> {
 
 pub const SIMILAR_MAX: usize = 2;
 
+/// The words that tell a title's fact apart: no stopwords, single letters, bare numbers or text in parentheses.
 pub(crate) fn title_terms(title: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![];
-    for t in search::tokenize(title) {
-        if !crate::recall::STOPWORDS.contains(&t.as_str()) && !out.contains(&t) {
+    for t in search::tokenize(&without_parens(title)) {
+        if t.chars().count() > 1 && !t.chars().all(|c| c.is_ascii_digit()) && !crate::recall::STOPWORDS.contains(&t.as_str()) && !out.contains(&t) {
             out.push(t);
         }
     }
     out
+}
+
+fn without_parens(s: &str) -> String {
+    let (mut out, mut depth) = (String::new(), 0usize);
+    for c in s.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The words of a short `Label:` that opens a title, like `Turret idea:` or `Chat scan 2026-11-17:`.
+fn label_terms(title: &str) -> Vec<String> {
+    match title.split_once(": ") {
+        Some((label, _)) if label.split_whitespace().count() <= 4 => title_terms(label),
+        _ => vec![],
+    }
 }
 
 /// Same word, or one a prefix of the other when both have 4 or more chars, like limit and limits.
@@ -494,9 +516,16 @@ fn same_term(a: &str, b: &str) -> bool {
     a == b || (a.len() >= 4 && b.len() >= 4 && (a.starts_with(b) || b.starts_with(a)))
 }
 
-/// Notes that may hold the same fact as `n`, at most SIMILAR_MAX: an equal title, or two or more shared title words
-/// covering half of the longer title, or a third when they share a tag. Handoffs are new every session, so never.
-pub fn similar(v: &Vault, n: &Note) -> Vec<Note> {
+pub struct Similar {
+    pub note: Note,
+    /// The title words it shares with the new note.
+    pub shared: Vec<String>,
+}
+
+/// Notes that may hold the same fact as `n`, at most SIMILAR_MAX, see look_alike. Handoffs are new every session, and
+/// the notes `n` links to and code maps are known to be other notes, so never. Shared words covering under two thirds
+/// of the titles that two or more other titles hold too are a phrase the project uses, like `speaks the chosen language`.
+pub fn similar(v: &Vault, n: &Note) -> Vec<Similar> {
     if n.kind == HANDOFF {
         return vec![];
     }
@@ -504,31 +533,67 @@ pub fn similar(v: &Vault, n: &Note) -> Vec<Note> {
     let lapsed = crate::lifecycle::Lapsed::of(&all);
     let mine = title_terms(&n.title);
     let title = crate::util::one_line(&n.title).to_lowercase();
-    let mut hits: Vec<(bool, f64, Note)> = all
+    let pool: Vec<(Note, Vec<String>)> = all
         .into_iter()
-        .filter(|x| x.id != n.id && x.kind != HANDOFF && !x.is_archived() && !lapsed.hides(x) && (x.project == n.project || x.project.is_none()))
-        .filter_map(|x| look_alike(n, &mine, &title, &x, &title_terms(&x.title)).map(|(exact, score)| (exact, score, x)))
+        .filter(|x| x.id != n.id && x.kind != HANDOFF && (x.kind != "map" || n.kind == "map") && !x.is_archived() && !lapsed.hides(x))
+        .filter(|x| (x.project == n.project || x.project.is_none()) && !n.links.iter().any(|l| l.to == x.id))
+        .map(|x| {
+            let t = title_terms(&x.title);
+            (x, t)
+        })
         .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)).then(b.2.updated.cmp(&a.2.updated)));
+    let phrase = |x: &Note, shared: &[String]| pool.iter().filter(|(y, t)| y.id != x.id && shared.iter().all(|a| t.iter().any(|b| same_term(a, b)))).count() >= 2;
+    let mut hits: Vec<(bool, f64, Similar)> = pool
+        .iter()
+        .filter_map(|(x, theirs)| alike(n, &mine, &title, x, theirs).map(|a| (a, x)))
+        .filter(|(a, x)| a.exact || a.cover >= 2.0 / 3.0 || !phrase(x, &a.shared))
+        .map(|(a, x)| (a.exact, a.score, Similar { note: x.clone(), shared: a.shared }))
+        .collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)).then(b.2.note.updated.cmp(&a.2.note.updated)));
     hits.into_iter().take(SIMILAR_MAX).map(|h| h.2).collect()
+}
+
+struct Alike {
+    exact: bool,
+    score: f64,
+    cover: f64,
+    shared: Vec<String>,
+}
+
+/// An equal title, or two or more shared title words covering half of the longer title, or two fifths when they share a
+/// tag. A `Label:` both titles open with does not count, the rest of the titles has to match.
+fn alike(n: &Note, mine: &[String], title: &str, x: &Note, theirs: &[String]) -> Option<Alike> {
+    let exact = crate::util::one_line(&x.title).to_lowercase() == title;
+    let label = label_terms(&n.title);
+    let (mine, theirs): (Vec<&String>, Vec<&String>) = if !label.is_empty() && label == label_terms(&x.title) {
+        (mine.iter().filter(|t| !label.contains(t)).collect(), theirs.iter().filter(|t| !label.contains(t)).collect())
+    } else {
+        (mine.iter().collect(), theirs.iter().collect())
+    };
+    let shared: Vec<String> = mine.iter().filter(|a| theirs.iter().any(|b| same_term(a, b))).map(|a| a.to_string()).collect();
+    let tags = n.tags.iter().filter(|t| x.has_tag(t)).count().min(3);
+    let cover = shared.len() as f64 / mine.len().max(theirs.len()).max(1) as f64;
+    let alike = exact || (shared.len() >= 2 && (cover >= 0.5 || (cover >= 0.4 && tags > 0)));
+    let kind = if x.kind == n.kind { 0.05 } else { 0.0 };
+    alike.then_some(Alike { exact, score: cover + 0.1 * tags as f64 + kind, cover, shared })
 }
 
 /// `(equal title, score)` when `x` reads like the same fact as `n`. `mine` and `theirs` are title_terms, `title` is n's lowercase title.
 pub(crate) fn look_alike(n: &Note, mine: &[String], title: &str, x: &Note, theirs: &[String]) -> Option<(bool, f64)> {
-    let exact = crate::util::one_line(&x.title).to_lowercase() == title;
-    let shared = mine.iter().filter(|a| theirs.iter().any(|b| same_term(a, b))).count();
-    let tags = n.tags.iter().filter(|t| x.has_tag(t)).count().min(3);
-    let cover = shared as f64 / mine.len().max(theirs.len()).max(1) as f64;
-    let alike = exact || (shared >= 2 && (cover >= 0.5 || (cover >= 0.34 && tags > 0)));
-    let kind = if x.kind == n.kind { 0.05 } else { 0.0 };
-    alike.then_some((exact, cover + 0.1 * tags as f64 + kind))
+    alike(n, mine, title, x, theirs).map(|a| (a.exact, a.score))
 }
 
-pub fn similar_hint(xs: &[Note]) -> Option<String> {
+pub fn similar_hint(xs: &[Similar]) -> Option<String> {
     if xs.is_empty() {
         return None;
     }
-    let items: Vec<String> = xs.iter().map(|x| format!("{} \"{}\"", x.id, crate::util::truncate_chars(&crate::util::one_line(&x.title), 60))).collect();
+    let items: Vec<String> = xs
+        .iter()
+        .map(|x| {
+            let shares = if x.shared.is_empty() { String::new() } else { format!(" (shares {})", x.shared.join(", ")) };
+            format!("{} \"{}\"{shares}", x.note.id, crate::util::truncate_chars(&crate::util::one_line(&x.note.title), 60))
+        })
+        .collect();
     Some(format!("possible duplicates, update one instead if it holds the same fact: {}", items.join(", ")))
 }
 
