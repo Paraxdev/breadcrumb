@@ -203,7 +203,7 @@ pub fn ask(v: &Vault, req: AskReq) -> Result<(Note, Question)> {
         Some(i) => strip_qnum(i).to_string(),
         None => {
             let title = truncate_chars(&format!("Question: {text}"), 90);
-            backlog::capture_idea(v, &title, Some(text.clone()), req.project.clone(), vec![], false)?.id
+            backlog::capture_idea(v, &title, Some(text.clone()), req.project.clone(), vec![], None, false)?.id
         }
     };
     let _g = v.lock()?;

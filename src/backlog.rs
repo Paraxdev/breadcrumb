@@ -766,7 +766,7 @@ pub fn board_compact(cols: &[Column]) -> String {
     s
 }
 
-pub fn capture_idea(v: &Vault, title: &str, body: Option<String>, project: Option<String>, tags: Vec<String>, require_existing_project: bool) -> Result<Note> {
+pub fn capture_idea(v: &Vault, title: &str, body: Option<String>, project: Option<String>, tags: Vec<String>, priority: Option<String>, require_existing_project: bool) -> Result<Note> {
     crate::ops::add(
         v,
         crate::ops::AddReq {
@@ -775,7 +775,7 @@ pub fn capture_idea(v: &Vault, title: &str, body: Option<String>, project: Optio
             project,
             tags,
             body,
-            fields: vec![("state".into(), crate::ops::FieldInput::Raw("idea".into()))],
+            fields: crate::ops::with_field(vec![("state".into(), crate::ops::FieldInput::Raw("idea".into()))], "priority", priority),
             require_existing_project,
             ..Default::default()
         },

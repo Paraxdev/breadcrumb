@@ -150,7 +150,7 @@ fn tree_progress_promote_and_context() {
     assert!(e.line().contains("(1/2 done)"));
     assert!(e.key.starts_with("APP-"));
 
-    let idea = backlog::capture_idea(&v, "Sync over LAN", None, Some("app".into()), vec![], false).unwrap();
+    let idea = backlog::capture_idea(&v, "Sync over LAN", None, Some("app".into()), vec![], None, false).unwrap();
     assert_eq!(backlog::state(&idea), "idea");
     ops::link(&v, &idea.id, &f1.id, Some("relates"), false).unwrap();
     let e = backlog::promote(&v, &idea.id, "Backlog", None).unwrap_err().to_string();

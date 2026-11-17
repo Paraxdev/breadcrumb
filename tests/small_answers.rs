@@ -97,3 +97,12 @@ fn a_given_slug_with_a_word_over_20_letters_is_cut() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("[abcdefghijklmnopqrst-two]") && out.contains("slug shortened to abcdefghijklmnopqrst-two"), "{out}");
 }
+
+#[test]
+fn idea_takes_a_priority_as_add_and_judge_do() {
+    let (_d, v) = common::vault();
+    let (code, _, err) = crumb(&v, &["idea", "Faster boards", "--global", "--priority", "p1"]);
+    assert_eq!(code, 0, "{err}");
+    let n = v.load_notes().into_iter().find(|n| n.title == "Faster boards").unwrap();
+    assert_eq!(breadcrumb::backlog::priority(&n), "p1");
+}

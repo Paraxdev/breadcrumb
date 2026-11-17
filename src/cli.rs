@@ -420,6 +420,9 @@ pub enum Cmd {
         /// Tag (repeatable)
         #[arg(long = "tag", alias = "tags")]
         tags: Vec<String>,
+        /// p0 to p3, as add and judge --file take it
+        #[arg(long)]
+        priority: Option<String>,
     },
     /// Machine facts (kind env) for this computer: where files, folders and tools live
     Env {
@@ -1936,12 +1939,12 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(crate::stats::text(&st), crate::stats::json(&st));
         }
         Cmd::Guide => out.emit(crate::guide::AGENTS_MD, json!({"guide": crate::guide::AGENTS_MD})),
-        Cmd::Idea { title, body, project, global, tags } => {
+        Cmd::Idea { title, body, project, global, tags, priority } => {
             not_a_flag(&title, "idea <flags>")?;
             let v = open()?;
             let project = ops::target_project(&v, project.as_deref(), global, &cwd)?;
             let body = read_body_arg(body, None)?;
-            let n = backlog::capture_idea(&v, &title, body, project, tags, false)?;
+            let n = backlog::capture_idea(&v, &title, body, project, tags, priority, false)?;
             out.emit(format!("captured idea {}  {}", n.handle(), n.title), n.to_json());
         }
         Cmd::Env { scope, all_machines } => {
