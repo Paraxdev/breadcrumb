@@ -1409,7 +1409,7 @@ pub fn main_entry() -> i32 {
             let miss = eager.as_ref().map(|_| ("question".to_string(), format!("read as {}", p.path.replace('.', " "))));
             (p, miss)
         }
-        Err(e) => match forgiven(&e, &args) {
+        Err(e) => match forgiven(e, &args) {
             Ok(x) => x,
             Err((code, line)) => {
                 if let Some(root) = vault_of(&args).or_else(|| resolve_vault_path(None).ok()) {
@@ -2405,9 +2405,9 @@ fn refused_word(b: &crate::forgive::Bad) -> String {
 
 /// A command line clap refused, read the way an agent meant it (a note on stderr says how) with the refused word and
 /// the command it was read as, or the error with the nearest valid line and the usage line for the miss.
-fn forgiven(e: &clap::Error, args: &[String]) -> std::result::Result<Reading, (i32, Box<crate::usage::Line>)> {
+fn forgiven(mut e: clap::Error, args: &[String]) -> std::result::Result<Reading, (i32, Box<crate::usage::Line>)> {
     use clap::CommandFactory;
-    use clap::error::ErrorKind;
+    use clap::error::{ContextKind, ErrorKind};
     use crate::forgive;
     if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand) {
         e.exit()
@@ -2418,14 +2418,15 @@ fn forgiven(e: &clap::Error, args: &[String]) -> std::result::Result<Reading, (i
         && let Ok(p) = parse_from(r.iter().cloned())
     {
         eprintln!("note: read as `{}`", forgive::line(r));
-        let miss = forgive::Bad::from_error(e).map(|b| (refused_word(&b), format!("read as {}", p.path.replace('.', " "))));
+        let miss = forgive::Bad::from_error(&e).map(|b| (refused_word(&b), format!("read as {}", p.path.replace('.', " "))));
         return Ok((p, miss));
     }
     let retried = rewritten.and_then(|r| Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r.iter().cloned())).err().map(|e2| (r, e2)));
     let hint = |bad: Option<forgive::Bad>, r: &[String]| bad.and_then(|b| forgive::suggestion(&root, r, &b).map(|s| (s, refused_word(&b))));
+    let refused = forgive::Bad::from_error(&e).map(|b| refused_word(&b));
     let line = |kind: &str, s: Option<&((String, String), String)>| {
         let l = crate::usage::Line::new(forgive::path(&root, args), kind);
-        let word = s.map(|(_, w)| w.clone()).or_else(|| forgive::Bad::from_error(e).map(|b| refused_word(&b)));
+        let word = s.map(|(_, w)| w.clone()).or_else(|| refused.clone());
         match word {
             Some(w) => l.missed(&w, s.map(|((_, fix), _)| fix.as_str())),
             None => l,
@@ -2442,9 +2443,15 @@ fn forgiven(e: &clap::Error, args: &[String]) -> std::result::Result<Reading, (i
         let l = line("unknown_flag", s.as_ref());
         return Err((2, Box::new(if s.is_none() { l.missed(&refused_word(&forgive::Bad::Flag(flag)), None) } else { l })));
     }
+    let s = retried.as_ref().and_then(|(r, e2)| hint(forgive::Bad::from_error(e2), r)).or_else(|| hint(forgive::Bad::from_error(&e), args));
+    if s.is_some() {
+        // Note: clap's tip goes by spelling alone (gren gets get and recent), so it would contradict the line below.
+        for k in [ContextKind::SuggestedSubcommand, ContextKind::SuggestedArg, ContextKind::SuggestedValue] {
+            e.remove(k);
+        }
+    }
     crate::usage::printed(&e.to_string());
     let _ = e.print();
-    let s = retried.as_ref().and_then(|(r, e2)| hint(forgive::Bad::from_error(e2), r)).or_else(|| hint(forgive::Bad::from_error(e), args));
     if let Some(((s, _), _)) = &s {
         eprintln!("did you mean: {s}");
     }

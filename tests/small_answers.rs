@@ -106,3 +106,12 @@ fn idea_takes_a_priority_as_add_and_judge_do() {
     let n = v.load_notes().into_iter().find(|n| n.title == "Faster boards").unwrap();
     assert_eq!(breadcrumb::backlog::priority(&n), "p1");
 }
+
+#[test]
+fn a_mistyped_verb_with_a_line_that_works_gets_that_line_alone() {
+    let (_d, v) = common::vault();
+    let (code, _, err) = crumb(&v, &["gren", "abc1234"]);
+    assert!(code == 2 && err.contains("did you mean: breadcrumb land green abc1234") && !err.contains("tip:"), "{err}");
+    let (code, _, err) = crumb(&v, &["sessions"]);
+    assert!(code == 2 && err.contains("tip: a similar subcommand exists") && !err.contains("did you mean"), "{err}");
+}
