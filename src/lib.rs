@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod drift;
 pub mod export;
 pub mod fix;
+pub mod forgive;
 pub mod format;
 pub mod git;
 pub mod guide;

@@ -1334,15 +1334,10 @@ pub fn main_entry() -> i32 {
     crate::upgrade::cleanup_old_exes();
     let cli = match Cli::try_parse() {
         Ok(c) => c,
-        Err(e) => {
-            if e.kind() == clap::error::ErrorKind::UnknownArgument
-                && let Some(m) = mistyped_flag()
-            {
-                eprintln!("error: {m}");
-                return 2;
-            }
-            e.exit()
-        }
+        Err(e) => match forgiven(&e) {
+            Ok(c) => c,
+            Err(code) => return code,
+        },
     };
     if let Cmd::Hook(h) = &cli.cmd {
         run_hook(cli.vault.as_deref(), h);
@@ -2236,9 +2231,46 @@ fn not_a_flag(text: &str, usage: &str) -> Result<()> {
     Ok(())
 }
 
+/// A command line clap refused, read the way an agent meant it (a note on stderr says how), or the error with the
+/// nearest valid line.
+fn forgiven(e: &clap::Error) -> std::result::Result<Cli, i32> {
+    use clap::CommandFactory;
+    use clap::error::ErrorKind;
+    use crate::forgive;
+    if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand) {
+        e.exit()
+    }
+    let root = Cli::command();
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    let rewritten = forgive::rewrite(&root, &args);
+    if let Some(r) = &rewritten
+        && let Ok(c) = Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r.iter().cloned()))
+    {
+        eprintln!("note: read as `{}`", forgive::line(r));
+        return Ok(c);
+    }
+    let retried = rewritten.and_then(|r| Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r.iter().cloned())).err().map(|e2| (r, e2)));
+    let hint = |bad: Option<forgive::Bad>, r: &[String]| bad.and_then(|b| forgive::suggest(&root, r, &b));
+    if e.kind() == ErrorKind::UnknownArgument
+        && let Some((m, flag)) = mistyped_flag()
+    {
+        eprintln!("error: {m}");
+        let s = retried.as_ref().and_then(|(r, _)| hint(Some(forgive::Bad::Flag(flag.clone())), r)).or_else(|| hint(Some(forgive::Bad::Flag(flag)), &args));
+        if let Some(s) = s {
+            eprintln!("did you mean: {s}");
+        }
+        return Err(2);
+    }
+    let _ = e.print();
+    if let Some(s) = retried.as_ref().and_then(|(r, e2)| hint(forgive::Bad::from_error(e2), r)).or_else(|| hint(forgive::Bad::from_error(e), &args)) {
+        eprintln!("did you mean: {s}");
+    }
+    Err(e.exit_code())
+}
+
 /// add and idea take a title with a leading hyphen, so clap reads a mistyped flag before it as the title and blames
 /// the next word. This names the flag instead.
-fn mistyped_flag() -> Option<String> {
+fn mistyped_flag() -> Option<(String, String)> {
     use clap::CommandFactory;
     let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     if args.iter().any(|a| a == "--") {
@@ -2263,7 +2295,7 @@ fn mistyped_flag() -> Option<String> {
             None => {
                 let flag = t.split('=').next().unwrap_or_default();
                 if flag != "--help" && flag.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()) && !r.contains(char::is_whitespace)) {
-                    return Some(format!("unknown flag {flag}, `breadcrumb {} --help` lists the flags, and text that starts with -- goes last, after a lone --", sub.get_name()));
+                    return Some((format!("unknown flag {flag}, `breadcrumb {} --help` lists the flags, and text that starts with -- goes last, after a lone --", sub.get_name()), t.clone()));
                 }
             }
         }
@@ -2272,7 +2304,7 @@ fn mistyped_flag() -> Option<String> {
 }
 
 /// None when `token` is no flag of `cmds`, else whether its value is the token after it.
-fn value_follows(cmds: &[&clap::Command], token: &str) -> Option<bool> {
+pub(crate) fn value_follows(cmds: &[&clap::Command], token: &str) -> Option<bool> {
     let (long, short, inline) = match token.strip_prefix("--") {
         Some(l) => (Some(l.split('=').next().unwrap_or_default()), None, l.contains('=')),
         None => {
