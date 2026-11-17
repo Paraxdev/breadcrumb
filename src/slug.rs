@@ -150,7 +150,7 @@ fn reads_like_key(s: &str, projects: &[String]) -> bool {
 fn well_formed(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     let words = parts.len() - usize::from(parts.len() > 1 && parts[parts.len() - 1].chars().all(|c| c.is_ascii_digit()));
-    is_valid(s) && words <= MAX_WORDS
+    is_valid(s) && words <= MAX_WORDS && parts.iter().all(|p| p.chars().count() <= MAX_WORD)
 }
 
 /// A given name made valid the way title words are, cut to its first four words, and whether it was cut. None when no usable name is left.
@@ -220,7 +220,7 @@ pub fn assign(v: &Vault, n: &mut Note, given: Option<&str>) -> Option<String> {
     match (how, clash) {
         (Some(h), Some(c)) => Some(format!("slug {h} {name}, {c}")),
         (Some(h), None) => Some(format!("slug {h} {name}")),
-        (None, Some(c)) if given.is_some() => Some(format!("slug {name}, {c}")),
+        (None, Some(c)) => Some(format!("slug {name}, {c}")),
         _ => None,
     }
 }

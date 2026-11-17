@@ -147,6 +147,8 @@ fn undo_restores_both_notes_byte_for_byte_after_later_commits() {
     link(&v, &dup, &other, "relates");
     ops::update(&v, &dup.id, UpdateReq { pinned: Some(true), ..Default::default() }).unwrap();
     let snapshot: Vec<(String, String)> = [&keep, &dup, &pointing, &also, &other].iter().map(|n| (n.id.clone(), file(&v, &n.id))).collect();
+    // Note: notes stamp whole seconds, without the pause a file written anew would match the snapshot like a restore.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
 
     merge::merge(&v, &dup.id, &keep.id).unwrap();
     assert!(v.get(&keep.id).unwrap().pinned, "a pin is not lost");

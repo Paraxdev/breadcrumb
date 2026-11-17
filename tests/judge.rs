@@ -379,3 +379,14 @@ fn the_verdict_field_of_the_judgment_kind_cannot_be_redefined_and_the_rest_can()
     assert!(k.field("verdict").is_some_and(|f| f.values.iter().any(|x| x == "unrated")), "and the reply shows the verdict field that holds, removing it does nothing");
     assert!(std::fs::read_to_string(v.root.join("kinds/judgment.toml")).unwrap().contains("unrated"), "the file says the same");
 }
+
+#[test]
+fn doctor_names_a_verdict_word_added_by_hand_and_a_counted_judgment_its_unused_slug() {
+    let (d, v) = common::vault();
+    judge::judge(&v, "brief was what I needed", "helped", Some("brief"), None).unwrap();
+    std::fs::write(v.root.join("kinds/judgment.toml"), OLD_KIND.replace("\"helped\"]", "\"helped\", \"praised\"]")).unwrap();
+    let found: Vec<String> = breadcrumb::doctor::check(&v).into_iter().filter(|p| p.path.ends_with("judgment.toml")).map(|p| p.message).collect();
+    assert!(found.iter().any(|m| m.starts_with("verdict praised is not used, the verdict field of judgment is built in")), "{found:?}");
+    let (ok, out, err) = crumb_in(&v, d.path(), &["add", "-k", "judgment", "-t", "brief again", "--slug", "brief-again", "--field", "verdict=helped", "--field", "about=brief"]);
+    assert!(ok && out.contains("now holds 2") && out.contains("slug brief-again not used"), "{out}{err}");
+}

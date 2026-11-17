@@ -716,8 +716,13 @@ pub fn update_noted(v: &Vault, id: &str, req: UpdateReq) -> Result<(Note, Vec<St
             push_tag(&mut note.tags, t.strip_prefix('+').unwrap_or(t));
         }
     }
+    let mut notes = vec![];
     for key in &req.unset {
-        if key == "source" {
+        if key == "state" && crate::backlog::is_item(&note) && note.field("state").is_some() {
+            let was = crate::backlog::state(&note);
+            note.unset_field(key);
+            notes.push(format!("state unset, {} reads as {} now (was {was}), `breadcrumb move` changes the state with its checks", note.id, crate::backlog::state(&note)));
+        } else if key == "source" {
             note.source = None;
             note.clear_kept("source");
         } else if RESERVED_KEYS.contains(&key.as_str()) || key == crate::session::SESSION_KEY || key == crate::session::LAST_SESSION_KEY || key == crate::slug::SLUG_KEY || key == crate::note::PIN_VERIFIED_KEY {
@@ -729,7 +734,6 @@ pub fn update_noted(v: &Vault, id: &str, req: UpdateReq) -> Result<(Note, Vec<St
             }
         }
     }
-    let mut notes = vec![];
     let (fields, field_slug) = split_slug(req.fields);
     if let Some(s) = req.slug.or(field_slug) {
         notes.extend(crate::slug::rename(v, &mut note, &s)?);
@@ -918,7 +922,10 @@ pub fn link(v: &Vault, from: &str, to: &str, rel: Option<&str>, remove: bool) ->
         note.links.push(Link { to: to_id, rel });
     }
     crate::session::stamp_write(&mut note);
-    note.updated = now();
+    // A handoff's updated is how fresh its words are, the digest window reads it, and a link adds no words.
+    if note.kind != crate::lifecycle::HANDOFF {
+        note.updated = now();
+    }
     let p = v.write_note(&mut note)?;
     v.commit(&[p], &commit_msg(if remove { "unlink" } else { "link" }, &note))?;
     Ok(note)

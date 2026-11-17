@@ -212,5 +212,48 @@ fn a_refused_mcp_call_lists_the_parameters_and_a_working_call() {
     assert!(r[2].1.contains("titel is no argument of add, did you mean title?") && r[2].1.contains("title (required)") && r[2].1.contains("example: add "), "{}", r[2].1);
     assert!(r[3].0, "{}", r[3].1);
     assert!(v.get(&id).unwrap().body.contains("Built on fix/x"));
-    assert!(r[4].1.contains("id is no argument of map") && r[4].1.contains(r#"example: map {"action": "get", "area": "db"}"#), "{}", r[4].1);
+    assert!(!r[4].1.contains("no argument of map"), "id reads as area: {}", r[4].1);
+}
+
+#[test]
+fn question_actions_on_the_cli_are_not_read_as_ask() {
+    let (_d, v) = common::vault();
+    let id = common::add(&v, "An item", "task", Some("app"), &[("state", "queued")]).id;
+    ok(&v, &["ask", &id, "Which one?", "-o", "a: first", "-o", "b: second"]);
+    let qid = format!("{id}.1");
+    let (_, err) = ok(&v, &["question", "withdraw", &qid]);
+    assert!(err.contains(&format!("read as `breadcrumb unask {qid}`")), "{err}");
+    let (out, _) = ok(&v, &["ask", &id, "Again?", "-o", "a", "-o", "b", "--soft"]);
+    let again = out.split_whitespace().nth(1).unwrap().trim_end_matches(',').to_string();
+    let (out, _) = ok(&v, &["question", "answer", &again, "2"]);
+    assert!(out.contains("answered"), "{out}");
+    let (out, _) = ok(&v, &["question", "ack", &again]);
+    assert!(out.contains("acknowledged"), "{out}");
+    let (out, err) = ok(&v, &["ask", "Group the board by project?", "-o", "yes", "-o", "no", "-p", "app"]);
+    assert!(out.contains("asked") && !err.contains("read as"), "{out}");
+    assert!(refused(&v, &["ask", &id]).contains("give the question after it"));
+}
+
+#[test]
+fn mcp_keys_meant_as_another_are_read_as_it() {
+    let (d, v) = common::vault();
+    let id = common::add(&v, "An item", "task", Some("app"), &[("state", "queued")]).id;
+    let r = mcp(
+        &v,
+        d.path(),
+        &[
+            ("add", json!({"title": "Keep the lock short", "kind": "gotcha", "project": "app", "priority": "p1", "text": "the vault lock times out after 10s"})),
+            ("append", json!({"item": id, "body": "one more line"})),
+            ("question", json!({"action": "ask", "item_id": id, "question": "Which?", "options": ["a", "b"]})),
+            ("question", json!({"action": "answer", "qid": format!("{id}.1"), "choice": 2})),
+            ("move", json!({"id": id, "status": "in-progress"})),
+        ],
+    );
+    assert!(r.iter().all(|x| x.0), "{r:?}");
+    assert!(r[0].1.contains("note: priority not stored, a gotcha has no priority field, kinds with it: ") && r[0].1.contains("note: text read as body") && !r[0].1.contains("ignored"), "{}", r[0].1);
+    let n = v.load_notes().into_iter().find(|n| n.title == "Keep the lock short").unwrap();
+    assert!(n.body.contains("times out after 10s") && n.field("priority").is_none());
+    assert!(r[1].1.contains("note: item read as id") && v.get(&id).unwrap().body.contains("one more line"), "{}", r[1].1);
+    assert!(r[3].1.contains("answered") && r[3].1.contains('b'), "{}", r[3].1);
+    assert_eq!(backlog::state(&v.get(&id).unwrap()), "in-progress");
 }

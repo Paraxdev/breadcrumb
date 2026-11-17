@@ -54,6 +54,8 @@ pub struct Report {
     pub open: Vec<Note>,
     /// Matched items that stay where they are, with the reason.
     pub not_landed: Vec<(Note, String)>,
+    /// Ids among `not_landed` that wait for a check or the user's steps.
+    pub held: Vec<String>,
     pub closed: Vec<Note>,
     pub unmatched_merges: Vec<Commit>,
     /// Done items of the project with nothing that says where they landed, no range can ever match them.
@@ -81,7 +83,10 @@ pub fn report(v: &Vault, project: &str, commits: &[Commit], by_user: bool) -> Re
         hit.extend(found);
         if matches!(backlog::state(n).as_str(), "shipped" | "rejected") {
             r.closed.push(n.clone());
-        } else if let Some(why) = backlog::ship_blocker(n, &idx).or_else(|| backlog::review_hold(v, n, by_user)).or_else(|| backlog::user_hold(v, n, by_user)) {
+        } else if let Some(why) = backlog::ship_blocker(n, &idx) {
+            r.not_landed.push((n.clone(), why));
+        } else if let Some(why) = backlog::review_hold(v, n, by_user).or_else(|| backlog::user_hold(v, n, by_user)) {
+            r.held.push(n.id.clone());
             r.not_landed.push((n.clone(), why));
         } else {
             r.open.push(n.clone());
@@ -144,7 +149,11 @@ pub fn text(r: &Report, range: &str, repo: &Path) -> String {
     let (noted, plain): (Vec<&Note>, Vec<&Note>) = r.open.iter().filter(|n| !release_note_waived(n)).partition(|n| release_note(n).is_some());
     section(&mut s, "Release notes", noted.iter().map(|n| format!("- {} [{}, {}]", release_note(n).unwrap_or_default(), n.id, state_label(n))).collect());
     section(&mut s, "No release note", plain.iter().map(|n| item_line(n)).collect());
-    section(&mut s, "Matched but not landed, not moved", r.not_landed.iter().map(|(n, why)| format!("{}: {why}", item_line(n))).collect());
+    let (held, blocked): (Vec<_>, Vec<_>) = r.not_landed.iter().partition(|(n, _)| r.held.contains(&n.id));
+    section(&mut s, "Matched but not landed, not moved", blocked.iter().map(|(n, why)| format!("{}: {why}", item_line(n))).collect());
+    if !held.is_empty() {
+        section(&mut s, "Held for review, not moved", held.iter().map(|(n, why)| format!("{}: {why}", item_line(n))).collect());
+    }
     section(&mut s, "Already shipped or rejected, skipped", r.closed.iter().map(item_line).collect());
     section(&mut s, "Merges no item points at", r.unmatched_merges.iter().map(|c| format!("{} {}", &c.sha[..c.sha.len().min(9)], c.subject)).collect());
     s
@@ -175,7 +184,7 @@ pub fn json(r: &Report, range: &str, repo: &Path) -> Json {
         "commits": r.commits,
         "merges": r.merges,
         "open": r.open.iter().map(item).collect::<Vec<_>>(),
-        "not_moved": r.not_landed.iter().map(|(n, why)| { let mut j = item(n); j["reason"] = json!(why); j }).collect::<Vec<_>>(),
+        "not_moved": r.not_landed.iter().map(|(n, why)| { let mut j = item(n); j["reason"] = json!(why); j["held_for_review"] = json!(r.held.contains(&n.id)); j }).collect::<Vec<_>>(),
         "skipped": r.closed.iter().map(item).collect::<Vec<_>>(),
         "unmatched_merges": r.unmatched_merges.iter().map(|c| json!({"sha": c.sha, "subject": c.subject})).collect::<Vec<_>>(),
         "unrecorded_done": r.unrecorded.iter().map(item).collect::<Vec<_>>(),

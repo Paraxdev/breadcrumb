@@ -335,7 +335,7 @@ pub fn find_handoff(v: &Vault, target: &str, project: Option<&str>) -> Result<Op
                     [p] => format!("{p} has one, pass -p {p} (project in MCP)"),
                     ps => format!("{} have one, pass -p with one of them (project in MCP)", ps.join(", ")),
                 };
-                bail!("no live handoff on track {t} in {}, {hint}", project.unwrap_or("global"))
+                bail!("no live handoff on track {t} in {}, {hint}", project.map(|p| format!("project {p}")).unwrap_or_else(|| "the global notes".to_string()))
             }
         };
     }

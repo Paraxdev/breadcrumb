@@ -13,7 +13,7 @@ use std::fmt::Write;
 
 pub const KEY: &str = "questions";
 pub const MIN_OPTIONS: usize = 2;
-pub const MAX_OPTIONS: usize = 4;
+pub const MAX_OPTIONS: usize = 6;
 const DIGEST_LINES: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -43,6 +43,9 @@ pub struct Question {
     pub multi: bool,
     #[serde(default)]
     pub free: bool,
+    /// A soft question leaves its item open for claims and `next` while the user answers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub soft: bool,
     pub asked: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: String,
@@ -95,9 +98,9 @@ pub fn open_questions(n: &Note) -> Vec<Question> {
     questions(n).into_iter().filter(Question::open).collect()
 }
 
-/// An open question keeps the item out of `next` and claims.
+/// An open question keeps the item out of `next` and claims, unless it was asked soft.
 pub fn locked(n: &Note) -> bool {
-    backlog::is_item(n) && questions(n).iter().any(Question::open)
+    backlog::is_item(n) && questions(n).iter().any(|q| q.open() && !q.soft)
 }
 
 /// Answered and not yet acknowledged by an agent, nor acted on by a move to review or a closed state since.
@@ -140,6 +143,14 @@ pub fn hint(n: &Note) -> &'static str {
     if built(n) { "already built, adjust it to the answer" } else { "not built yet, build it with the answer" }
 }
 
+/// The item id of `<item>.<n>`, a bare id as it is.
+pub fn strip_qnum(target: &str) -> &str {
+    match target.rsplit_once('.') {
+        Some((id, q)) if !q.is_empty() && q.chars().all(|c| c.is_ascii_digit()) => id,
+        _ => target,
+    }
+}
+
 /// Splits `<item>.<n>`, a bare item id leaves the number open.
 fn parse_qid(v: &Vault, target: &str) -> Result<(Note, Option<u32>)> {
     let (id, q) = match target.rsplit_once('.') {
@@ -150,12 +161,16 @@ fn parse_qid(v: &Vault, target: &str) -> Result<(Note, Option<u32>)> {
 }
 
 pub struct AskReq {
-    pub id: String,
+    /// The item, None files the question on a new idea in `project`.
+    pub id: Option<String>,
     pub text: String,
     pub options: Vec<Opt>,
     pub multi: bool,
     pub free: bool,
+    pub soft: bool,
     pub by: Option<String>,
+    /// Where a question without an item goes.
+    pub project: Option<String>,
 }
 
 /// Parses `label: description` option arguments.
@@ -184,8 +199,15 @@ pub fn ask(v: &Vault, req: AskReq) -> Result<(Note, Question)> {
     if req.options.iter().any(|o| o.label.is_empty()) {
         bail!("every option needs a label");
     }
+    let id = match req.id.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+        Some(i) => strip_qnum(i).to_string(),
+        None => {
+            let title = truncate_chars(&format!("Question: {text}"), 90);
+            backlog::capture_idea(v, &title, Some(text.clone()), req.project.clone(), vec![], false)?.id
+        }
+    };
     let _g = v.lock()?;
-    let mut n = get_item(v, &req.id)?;
+    let mut n = get_item(v, &id)?;
     let mut qs = questions(&n);
     let by = backlog::session_name(req.by.as_deref()).unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
     let q = Question {
@@ -194,6 +216,7 @@ pub fn ask(v: &Vault, req: AskReq) -> Result<(Note, Question)> {
         options: req.options,
         multi: req.multi,
         free: req.free || n_opts == 0,
+        soft: req.soft,
         asked: fmt_time(&now()),
         by: by.clone(),
         answer: None,
@@ -223,36 +246,50 @@ pub fn parse_choices(tokens: &[String]) -> Result<Vec<usize>> {
 }
 
 /// Records an answer by option numbers and/or free text. `target` may be a bare item id when it has one open question.
-pub fn answer(v: &Vault, target: &str, choices: &[usize], text: Option<&str>, by: &str) -> Result<(Note, Question)> {
+/// A free text answer that is only option numbers picks those options. `replace` corrects an answer already given.
+pub fn answer(v: &Vault, target: &str, choices: &[usize], text: Option<&str>, by: &str, replace: bool) -> Result<(Note, Question)> {
     let _g = v.lock()?;
     let (mut n, num) = parse_qid(v, target)?;
     let mut qs = questions(&n);
-    let open: Vec<usize> = qs.iter().enumerate().filter(|(_, q)| q.open() && num.is_none_or(|x| q.q == x)).map(|(i, _)| i).collect();
+    let open: Vec<usize> = qs.iter().enumerate().filter(|(_, q)| (replace || q.open()) && num.is_none_or(|x| q.q == x)).map(|(i, _)| i).collect();
     let i = match open.as_slice() {
         [i] => *i,
         [] => match num {
-            Some(x) if qs.iter().any(|q| q.q == x) => bail!("{} question {x} is already answered", n.id),
+            Some(x) if qs.iter().any(|q| q.q == x) => bail!("{} question {x} is already answered, pass --replace (MCP replace: true) to correct the answer", n.id),
             Some(x) => bail!("{} has no question {x}", n.id),
+            None if replace => bail!("{} has no question", n.id),
             None => bail!("{} has no open question", n.id),
         },
         many => {
             let ids: Vec<String> = many.iter().map(|&i| qid(&n, &qs[i])).collect();
-            bail!("{} has several open questions, name one: {}", n.id, ids.join(", "));
+            bail!("{} has several {}questions, name one: {}", n.id, if replace { "" } else { "open " }, ids.join(", "));
         }
     };
     let q = &mut qs[i];
-    let text = text.map(one_line).filter(|t| !t.is_empty());
+    let was = q.answer.is_some();
+    let mut text = text.map(one_line).filter(|t| !t.is_empty());
+    let mut choices = choices.to_vec();
+    if choices.is_empty()
+        && !q.options.is_empty()
+        && let Some(t) = &text
+        && let Ok(picks) = parse_choices(std::slice::from_ref(t))
+        && !picks.is_empty()
+        && (picks.iter().all(|&c| c <= q.options.len()) || !q.free)
+    {
+        choices = picks;
+        text = None;
+    }
     if choices.is_empty() && text.is_none() {
         bail!("pick an option number or give a free text answer");
     }
     if text.is_some() && !q.free {
-        bail!("question {} takes no free text, pick one of its options", q.q);
+        bail!("question {} takes no free text, pick one of its options by number ({} to {})", q.q, 1, q.options.len());
     }
     if choices.len() > 1 && !q.multi {
         bail!("question {} takes a single option", q.q);
     }
     let mut picked = vec![];
-    for &c in choices {
+    for &c in &choices {
         match q.options.get(c.wrapping_sub(1)) {
             Some(o) => picked.push(o.label.clone()),
             None => bail!("question {} has {} options, not {c}", q.q, q.options.len()),
@@ -263,7 +300,8 @@ pub fn answer(v: &Vault, target: &str, choices: &[usize], text: Option<&str>, by
     q.seen = false;
     let q = q.clone();
     store(&mut n, &qs);
-    n.body = backlog::append_history(&n.body, &event_line(&format!("question {} answered", q.q), by));
+    let what = if was { "answer replaced" } else { "answered" };
+    n.body = backlog::append_history(&n.body, &event_line(&format!("question {} {what}", q.q), by));
     save(v, &mut n, "answer")?;
     Ok((n, q))
 }
@@ -301,7 +339,7 @@ pub fn ack_in(n: &mut Note, by: &str) -> bool {
 
 pub fn ack(v: &Vault, id: &str, by: &str) -> Result<Option<Note>> {
     let _g = v.lock()?;
-    let mut n = get_item(v, id)?;
+    let mut n = get_item(v, strip_qnum(id))?;
     if !ack_in(&mut n, by) {
         return Ok(None);
     }
@@ -327,7 +365,9 @@ pub fn notice(n: &Note) -> String {
 
 /// One open question with numbered options, for `questions` and the interactive prompt.
 pub fn render(n: &Note, q: &Question) -> String {
-    let mut s = format!("{} {}\n  {}\n", qid(n, q), crate::format::short_title(&n.title), q.text);
+    let project = n.project.as_deref().map(|p| format!(" [{p}]")).unwrap_or_default();
+    let soft = if q.soft { " (soft, the item stays open for work)" } else { "" };
+    let mut s = format!("{}{project} {}\n  {}{soft}\n", qid(n, q), crate::format::short_title(&n.title), q.text);
     for (i, o) in q.options.iter().enumerate() {
         let _ = writeln!(s, "  {}. {}{}", i + 1, o.label, if o.desc.is_empty() { String::new() } else { format!(": {}", o.desc) });
     }
@@ -339,6 +379,26 @@ pub fn render(n: &Note, q: &Question) -> String {
     };
     let _ = writeln!(s, "  ({how})");
     s
+}
+
+/// What `ask` prints, the lock only applies to a hard question.
+pub fn asked_line(n: &Note, q: &Question) -> String {
+    let qid = qid(n, q);
+    if q.soft {
+        format!("asked {qid}, a soft question, {} stays open for work while the user answers", n.id)
+    } else {
+        format!("asked {qid}, {} is locked until the user answers (`breadcrumb answer {qid}`), pick other work", n.id)
+    }
+}
+
+/// A pointer to open questions in `all` that `shown` leaves out, empty when there are none.
+pub fn elsewhere_line(all: &[Note], shown: &[Note]) -> String {
+    let ids: std::collections::HashSet<&str> = shown.iter().map(|n| n.id.as_str()).collect();
+    let rest: Vec<Note> = all.iter().filter(|n| !ids.contains(n.id.as_str())).cloned().collect();
+    match open_in(&rest).len() {
+        0 => String::new(),
+        k => format!("{k} more open question{} in other projects, `breadcrumb questions -p all` lists them\n", if k == 1 { "" } else { "s" }),
+    }
 }
 
 /// Open questions in the given notes, oldest first, with their items.

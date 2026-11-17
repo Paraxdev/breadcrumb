@@ -182,9 +182,9 @@ fn claim_and_release_read_the_project_of_a_track() {
     let (_d, v) = common::vault();
     crumb(&v, &["add", "Pick up the parser", "-k", "handoff", "--track", "main", "-p", "app"]);
     let (ok, _, err) = crumb(&v, &["claim", "track:main", "--by", "me"]);
-    assert!(!ok && err.contains("no live handoff on track main in global, app has one, pass -p app (project in MCP)"), "{err}");
+    assert!(!ok && err.contains("no live handoff on track main in the global notes, app has one, pass -p app (project in MCP)"), "{err}");
     let (ok, _, err) = crumb(&v, &["claim", "track:nope", "--by", "me"]);
-    assert!(!ok && err.contains("no live handoff on track nope in global, pass -p <slug> (project in MCP) for another project's track"), "{err}");
+    assert!(!ok && err.contains("no live handoff on track nope in the global notes, pass -p <slug> (project in MCP) for another project's track"), "{err}");
     let (ok, out, err) = crumb(&v, &["claim", "track:main", "-p", "app", "--by", "me"]);
     assert!(ok && out.contains("took pick-parser"), "{err}");
     let (ok, out, err) = crumb(&v, &["release", "track:main", "--project", "app", "--by", "me"]);

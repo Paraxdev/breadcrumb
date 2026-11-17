@@ -263,7 +263,7 @@ fn a_session_check_leaves_user_steps_open_where_agents_review() {
     user_steps(&v, &b.id);
     let r = backlog::move_item(&v, &b.id, MoveReq { state: "review".into(), check: Some(backlog::Check::All), ..Default::default() }).unwrap();
     assert_eq!(r.kept_for_user.len(), 1, "the MCP move check is a session's");
-    assert!(backlog::move_text(&r).contains("left open for the user: 2."), "{}", backlog::move_text(&r));
+    assert!(backlog::move_text(&r).contains("kept the user's open steps, a session cannot drop them: 2."), "{}", backlog::move_text(&r));
 
     let mut v2 = v.clone();
     breadcrumb::config::set(&mut v2, "review_by", "user").unwrap();
@@ -356,7 +356,7 @@ fn a_session_keeps_the_users_open_steps_in_a_re_review_and_cannot_close_past_the
     let a = common::add(&v, "Thing", "feature", Some("app"), &[]);
     user_steps(&v, &a.id);
     let (ok, out, err) = crumb_in_session(&v, &["move", &a.id, "review", "--by", "builder", "--step", "Run it again", "--step", "Check the log"]);
-    assert!(ok && out.contains("replaced 1 open step with the ones given") && out.contains("left open for the user: 1. USER: install it on the laptop, only the user ticks these"), "{out}{err}");
+    assert!(ok && out.contains("replaced 1 open step with the ones given") && out.contains("kept the user's open steps, a session cannot drop them: 1. USER: install it on the laptop, only the user ticks these"), "{out}{err}");
     let n = v.get(&a.id).unwrap();
     let mut open = backlog::review_steps(&n);
     open.sort();
@@ -392,4 +392,20 @@ fn a_session_keeps_the_users_open_steps_in_a_re_review_and_cannot_close_past_the
     update(&v, &c.id, UpdateReq { fields: vec![("acceptance".into(), list(&["[ ] user: try it"]))], ..Default::default() }).unwrap();
     let (ok, _, err) = crumb(&v, &["move", &c.id, "done"]);
     assert!(ok, "the user's terminal closes it: {err}");
+}
+
+#[test]
+fn review_all_json_says_who_checks_each_item() {
+    let (_d, v) = common::vault();
+    let a = common::add(&v, "App thing", "feature", Some("app"), &[]);
+    let w = common::add(&v, "Web thing", "feature", Some("web"), &[]);
+    for id in [&a.id, &w.id] {
+        backlog::move_item(&v, id, MoveReq { state: "review".into(), steps: vec!["Run it".into()], by: Some("builder".into()), ..Default::default() }).unwrap();
+    }
+    breadcrumb::config::set_in(&v, "app", "review_by", "agent").unwrap();
+    let (ok, out, err) = crumb(&v, &["--json", "review", "--all"]);
+    assert!(ok, "{err}");
+    let j: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let by = |id: &str| j["items"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap()["review_by"].clone();
+    assert_eq!((by(&a.id), by(&w.id)), (serde_json::json!("agent"), serde_json::json!("user")), "{out}");
 }

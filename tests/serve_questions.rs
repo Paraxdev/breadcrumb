@@ -27,7 +27,7 @@ fn authed(mut r: Request) -> Request {
 
 fn ask(v: &Vault, id: &str, multi: bool, free: bool) -> String {
     let options = ["red", "blue", "green"].iter().map(|l| Opt { label: l.to_string(), desc: format!("{l} way") }).collect();
-    let (n, q) = question::ask(v, AskReq { id: id.into(), text: "Which colour?".into(), options, multi, free, by: Some("agent-1".into()) }).unwrap();
+    let (n, q) = question::ask(v, AskReq { id: Some(id.to_string()), text: "Which colour?".into(), options, multi, free, by: Some("agent-1".into()), soft: false, project: None }).unwrap();
     question::qid(&n, &q)
 }
 

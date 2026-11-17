@@ -168,6 +168,9 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
     for (p, e) in kind_errors {
         err(v.rel(&p), None, "error", format!("invalid kind file: {e}"));
     }
+    if let Some(m) = crate::judge::dropped_verdicts_text(v) {
+        err(v.rel(&v.kinds_dir().join(format!("{}.toml", crate::judge::JUDGMENT))), None, "warning", m);
+    }
     let (projects, project_errors) = v.load_projects_report();
     for (p, e) in project_errors {
         err(v.rel(&p), None, "error", format!("invalid project file: {e}"));
@@ -326,18 +329,25 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
 
 /// `.local` holds machine state, the serve token among it, and every write commits with `git add -A`.
 fn local_dir_problem(v: &Vault) -> Option<Problem> {
-    // git knows every spelling and a later `!.local/`, its exit code is 0 for ignored and 1 for not. The line match is for a machine without git.
-    let by_git = crate::git::available().then(|| crate::git::run(&v.root, &["check-ignore", "-q", ".local/probe"]).ok()).flatten().and_then(|o| o.status.code()).filter(|c| *c < 2).map(|c| c == 0);
-    let ignored = by_git.unwrap_or_else(|| std::fs::read_to_string(v.root.join(".gitignore")).unwrap_or_default().lines().any(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".local"));
-    if ignored {
-        return None;
-    }
-    Some(Problem {
-        path: ".gitignore".into(),
-        id: None,
-        severity: "error",
-        message: "`.local/` is not ignored, it holds machine state like the serve token and the next write would commit it, add the line `.local/` to .gitignore".into(),
-    })
+    // git knows every spelling and a later `!.local/`, exit 1 is not ignored and -v names the file that ignores it.
+    // Only the vault's .gitignore travels to another clone, .git/info/exclude and a global excludes file stay behind.
+    let by_git = crate::git::available().then(|| crate::git::run(&v.root, &["check-ignore", "-v", ".local/probe"]).ok()).flatten().and_then(|o| match o.status.code()? {
+        0 => Some(Some(String::from_utf8_lossy(&o.stdout).split(':').next().unwrap_or_default().to_string())),
+        1 => Some(None),
+        _ => None,
+    });
+    let by = by_git.unwrap_or_else(|| {
+        std::fs::read_to_string(v.root.join(".gitignore")).unwrap_or_default().lines().map(str::trim).fold(None, |by, l| {
+            let (negated, pattern) = l.strip_prefix('!').map_or((false, l), |p| (true, p));
+            if pattern.trim_start_matches('/').trim_end_matches('/') == ".local" { (!negated).then(|| ".gitignore".to_string()) } else { by }
+        })
+    });
+    let (severity, message) = match by.as_deref() {
+        Some(".gitignore") => return None,
+        Some(other) => ("warning", format!("`.local/` is ignored only by {other}, which another clone of the vault does not have, it holds machine state like the serve token, add the line `.local/` to .gitignore")),
+        None => ("error", "`.local/` is not ignored, it holds machine state like the serve token and the next write would commit it, add the line `.local/` to .gitignore".to_string()),
+    };
+    Some(Problem { path: ".gitignore".into(), id: None, severity, message })
 }
 
 /// A global note's scope words that match no registered project, which hide it from every project.
