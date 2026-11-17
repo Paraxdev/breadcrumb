@@ -321,6 +321,7 @@ pub fn run(v: &Vault, scope: &Scope, claude_dir: Option<&std::path::Path>) -> Ru
     out.extend(project_files(v, &projects));
     out.extend(crate::config::vault_problems(v).into_iter().map(|message| Problem { path: crate::vault::CONFIG_FILE.into(), id: None, severity: "warning", message }));
     out.extend(local_dir_problem(v));
+    out.extend(crate::usage::doctor_problems(v));
     Run { problems: out, checked, scope: scope.clone() }
 }
 

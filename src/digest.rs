@@ -582,5 +582,7 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         (None, review),
         (Some("recent"), recent),
     ];
-    Ok(trim_to_budget(&head, blocks, &order, budget) + &kinds)
+    let text = trim_to_budget(&head, blocks, &order, budget);
+    crate::usage::digest_built(chars(&text), budget, text.contains("[cut to fit digest_budget"));
+    Ok(text + &kinds)
 }

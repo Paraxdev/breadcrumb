@@ -117,23 +117,35 @@ impl Server {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let defs = tool_defs();
                 if !defs.iter().any(|t| t["name"] == name) {
-                    let near = crate::util::nearest(name, defs.iter().filter_map(|t| t["name"].as_str())).map(|n| format!(", did you mean {n}?")).unwrap_or_default();
-                    return Some(rpc_error(id, -32602, &format!("Unknown tool: {name}{near}")));
+                    let nearest = crate::util::nearest(name, defs.iter().filter_map(|t| t["name"].as_str()));
+                    let near = nearest.map(|n| format!(", did you mean {n}?")).unwrap_or_default();
+                    let msg = format!("Unknown tool: {name}{near}");
+                    crate::usage::begin();
+                    crate::usage::printed(&msg);
+                    self.log_call(crate::usage::Line::new("mcp", "unknown_tool").missed(name, nearest), &Map::new());
+                    return Some(rpc_error(id, -32602, &msg));
                 }
                 let args = match params.get("arguments") {
                     Some(Value::Object(m)) => m.clone(),
                     _ => Map::new(),
                 };
                 let (seen, _) = self.top_level_fields(name, &args);
-                let res = match self.call_tool(name, &args) {
-                    Ok(text) => text_result(format!("{text}{}", ignored_note(name, &seen)), false),
+                crate::usage::begin();
+                let (text, outcome) = match self.call_tool(name, &args) {
+                    Ok(text) => (format!("{text}{}", ignored_note(name, &seen)), "ok"),
                     Err(e) => {
                         eprintln!("breadcrumb mcp: tool {name} failed: {e:#}");
                         let e = format!("{e:#}");
-                        text_result(format!("error: {e}{}", arg_help(name, &seen, &e)), true)
+                        (format!("error: {e}{}", arg_help(name, &seen, &e)), crate::usage::kind_of(&e))
                     }
                 };
-                rpc_result(id, res)
+                crate::usage::printed(&text);
+                let mut line = crate::usage::Line::new(call_path(name, &seen), outcome);
+                if let Some((w, h)) = miss_of(name, &seen) {
+                    line = line.missed(&w, h.as_deref());
+                }
+                self.log_call(line, &seen);
+                rpc_result(id, text_result(text, outcome != "ok"))
             }
             _ => rpc_error(id, -32601, &format!("Method not found: {method}")),
         })
@@ -141,6 +153,14 @@ impl Server {
 
     fn vault(&self) -> Result<Vault> {
         Vault::open(&self.vault_root)
+    }
+
+    /// The call's usage line, in the project it names or the one its cwd is in, and the judgment for a miss enough
+    /// sessions repeat.
+    fn log_call(&self, line: crate::usage::Line, a: &Map<String, Value>) {
+        let line = line.with_project(s(a, "project").as_deref());
+        crate::usage::record(&self.vault_root, line.clone(), Some(&self.cwd_of(a)));
+        crate::usage::adapt(&self.vault_root, &line);
     }
 
     fn cwd_of(&self, a: &Map<String, Value>) -> PathBuf {
@@ -476,6 +496,10 @@ impl Server {
                 other => bail!("view must be board, review, tree or deps, got '{other}'"),
             },
             "project" => match s(a, "action").as_deref().unwrap_or("list") {
+                "usage" => {
+                    let days = u(a, "days").map_or(crate::usage::DEFAULT_DAYS, |d| d as u64);
+                    Ok(crate::usage::report(&v.root, days, s(a, "slug").as_deref()).text())
+                }
                 "list" => {
                     let ps = v.load_projects();
                     let detected = v.detect_project(&self.cwd_of(a));
@@ -501,7 +525,7 @@ impl Server {
                     let value = a.get("value").filter(|x| !x.is_null()).map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string()));
                     crate::config::mcp(&v, s(a, "slug").as_deref(), s(a, "key").as_deref(), value.as_deref(), v.detect_project(&self.cwd_of(a)).as_deref())
                 }
-                other => bail!("action must be list, link or config, got '{other}'"),
+                other => bail!("action must be list, link, config or usage, got '{other}'"),
             },
             "kinds" => match a.get("define") {
                 Some(Value::Object(d)) => {
@@ -818,6 +842,7 @@ const UNLISTED: &[(&str, &str)] = &[
     ("backlog", "kind assignee"),
     ("land", "force by"),
     ("sync", "fix apply"),
+    ("project", "days"),
 ];
 
 /// One call that works, per tool or per tool and action.
@@ -846,6 +871,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("project", r#"{"action": "list"}"#),
     ("project.link", r#"{"action": "link", "slug": "myproj", "path": "D:/dev/myproj"}"#),
     ("project.config", r#"{"action": "config", "key": "digest_budget", "value": "6000"}"#),
+    ("project.usage", r#"{"action": "usage", "days": 7}"#),
     ("kinds", r#"{"define": {"name": "runbook", "fields": ["owner:string"]}}"#),
     ("workflow", r#"{"action": "list"}"#),
     ("workflow.save", r#"{"action": "save", "paths": ["flows/check.js"]}"#),
@@ -886,6 +912,35 @@ fn unknown_keys(name: &str, a: &Map<String, Value>) -> Vec<String> {
             None => format!("{k} is no argument of {name}"),
         })
         .collect()
+}
+
+/// `mcp:land.read`, the action or view only when it is one the tool lists, so no typed text gets into the log.
+fn call_path(name: &str, a: &Map<String, Value>) -> String {
+    let schema = schema_of(name).unwrap_or_default();
+    let listed = |k: &str| {
+        let given = a.get(k).and_then(Value::as_str)?;
+        schema["properties"][k]["enum"].as_array()?.iter().any(|e| e == given).then(|| given.to_string())
+    };
+    match listed("action").or_else(|| listed("view")) {
+        Some(x) => format!("mcp:{name}.{x}"),
+        None => format!("mcp:{name}"),
+    }
+}
+
+/// The first argument the tool does not read, else the first value its list of values lacks, with the nearest one.
+fn miss_of(name: &str, a: &Map<String, Value>) -> Option<(String, Option<String>)> {
+    let listed = schema_keys(name);
+    let extra = unlisted(name);
+    if let Some(k) = a.keys().find(|k| !listed.contains(k) && !extra.contains(&k.as_str())) {
+        let near = crate::util::nearest(k, listed.iter().map(String::as_str).chain(extra.iter().copied())).map(String::from);
+        return Some((k.clone(), near));
+    }
+    let schema = schema_of(name)?;
+    schema["properties"].as_object()?.iter().find_map(|(k, p)| {
+        let options: Vec<&str> = p["enum"].as_array()?.iter().filter_map(Value::as_str).collect();
+        let given = a.get(k)?.as_str()?;
+        (!options.contains(&given)).then(|| (given.to_string(), crate::util::nearest(given, options.iter().copied()).map(String::from)))
+    })
 }
 
 fn ignored_note(name: &str, a: &Map<String, Value>) -> String {
@@ -1035,7 +1090,7 @@ pub fn tool_defs() -> Vec<Value> {
             "include_closed": bl(),
         })), &[])),
         tool("project", "List or link projects, or config: settings, slug for one project.", obj(json!({
-            "action": {"type": "string", "enum": ["list", "link", "config"]},
+            "action": {"type": "string", "enum": ["list", "link", "config", "usage"]},
             "slug": st(),
             "path": st(),
             "description": st(),

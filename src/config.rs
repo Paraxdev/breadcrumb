@@ -34,6 +34,7 @@ const SETTINGS: &[Def] = &[
     Def { key: "digest_budget", about: "chars the session digest may take, 1000 or more", words: &[], project: true },
     Def { key: "digest_recent", about: "recent notes the digest lists, unset is 10 at session start and 15 from context", words: &[], project: true },
     Def { key: "handoff_digest_days", about: "other live handoffs older than this many days leave the digest unless pinned", words: &[], project: true },
+    Def { key: "adapt_threshold", about: "times sessions repeat a refused word or flag, from 2 or more sessions, before it is filed as a judgment by itself, 0 is off", words: &[], project: false },
     Def { key: "auto_commit", about: "commit every write to git", words: &[], project: false },
     Def { key: "lock_timeout_secs", about: "seconds a write waits for the vault lock", words: &[], project: false },
     Def { key: "remote", about: "git remote sync pushes to, empty to unset", words: &[], project: false },
