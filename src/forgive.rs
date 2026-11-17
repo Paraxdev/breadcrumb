@@ -108,13 +108,25 @@ impl Bad {
 
 /// The nearest valid command line for what clap refused, as `breadcrumb ...`, or a hint naming the command that does it.
 pub fn suggest(root: &Command, args: &[String], bad: &Bad) -> Option<String> {
+    suggestion(root, args, bad).map(|(l, _)| l)
+}
+
+/// The command path the words name, like `land.read`, `cli` when they name no command.
+pub fn path(root: &Command, args: &[String]) -> String {
+    let names: Vec<&str> = chain(root, args).0.iter().skip(1).map(|c| c.get_name()).collect();
+    if names.is_empty() { "cli".into() } else { names.join(".") }
+}
+
+/// `suggest` and the word, flag or value it puts in place of the refused one, which the usage log keeps instead of
+/// the line, since the line can hold a title or body.
+pub fn suggestion(root: &Command, args: &[String], bad: &Bad) -> Option<(String, String)> {
     match bad {
         Bad::Subcommand(w) => {
             let i = args.iter().position(|a| a == w)?;
             let (cmds, _) = chain(root, &args[..i]);
             let parent = cmds.last()?;
             let lw = w.to_ascii_lowercase();
-            let with = |repl: &str| line(&splice(args, i, 1, repl.split(' ')));
+            let with = |repl: &str| (line(&splice(args, i, 1, repl.split(' '))), repl.to_string());
             if cmds.len() == 1
                 && let Some((_, r)) = VERBS.iter().find(|(v, _)| *v == lw)
             {
@@ -124,7 +136,7 @@ pub fn suggest(root: &Command, args: &[String], bad: &Bad) -> Option<String> {
                         let extra = if lw == "reject" { " --resolution \"why\"" } else { "" };
                         let mut out = splice(args, i, 1, ["move"]);
                         out.push(state.into());
-                        format!("{}{extra}", line(&out))
+                        (format!("{}{extra}", line(&out)), format!("move {state}"))
                     }
                     _ => with(r),
                 });
@@ -151,15 +163,16 @@ pub fn suggest(root: &Command, args: &[String], bad: &Bad) -> Option<String> {
             let lname = name.to_ascii_lowercase();
             if matches!(lname.as_str(), "link" | "links" | "blocks" | "depends-on" | "depends_on" | "relates") && leaf.get_name() != "link" {
                 let rel = if lname.starts_with("link") || lname == "relates" { String::new() } else { format!(" --rel {}", lname.replace('_', "-")) };
-                return Some(format!("links are their own command: breadcrumb link <id> <other-id>{rel}, after the note exists"));
+                return Some((format!("links are their own command: breadcrumb link <id> <other-id>{rel}, after the note exists"), "link".into()));
             }
             if FIELD_FLAGS.contains(&lname.as_str()) && has("field") {
                 let (val, take) = match inline {
                     Some(v) => (v, 1),
                     None => (args.get(i + 1).cloned().unwrap_or_else(|| "<value>".into()), 2),
                 };
-                let field = format!("{}={val}", lname.replace('-', "_"));
-                return Some(line(&splice(args, i, take.min(args.len() - i), ["--field".to_string(), field])));
+                let name = lname.replace('-', "_");
+                let field = format!("{name}={val}");
+                return Some((line(&splice(args, i, take.min(args.len() - i), ["--field".to_string(), field])), format!("--field {name}=")));
             }
             let target = FLAGS.iter().find(|(f, _)| *f == lname).map(|(_, t)| *t).filter(|t| has(t)).map(String::from).or_else(|| {
                 let longs: Vec<&str> = cmds.iter().flat_map(|c| c.get_arguments()).filter_map(|a| a.get_long()).collect();
@@ -171,7 +184,7 @@ pub fn suggest(root: &Command, args: &[String], bad: &Bad) -> Option<String> {
             };
             let mut out = args.to_vec();
             out[i] = fixed;
-            Some(line(&out))
+            Some((line(&out), format!("--{target}")))
         }
         Bad::Value(v, valid) => {
             let n = crate::util::nearest(v, valid.iter().map(String::as_str))?;
@@ -180,7 +193,7 @@ pub fn suggest(root: &Command, args: &[String], bad: &Bad) -> Option<String> {
                 Some((f, _)) if args[i] != *v => format!("{f}={n}"),
                 _ => n.to_string(),
             };
-            Some(line(&splice(args, i, 1, [fixed])))
+            Some((line(&splice(args, i, 1, [fixed])), n.to_string()))
         }
     }
 }
