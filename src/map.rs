@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 pub const MAP: &str = "map";
 pub const AREA_KEY: &str = "area";
 pub const BLOBS_KEY: &str = "blobs";
+/// Stands in for the blob hash of a directory, no git hash equals it.
+const DIR: &str = "dir";
 const HASH_LEN: usize = 12;
 /// About 2k tokens at 4 chars per token.
 pub const BRIEF_BUDGET: usize = 8000;
@@ -29,6 +31,8 @@ pub struct MapLine {
     pub line: Option<String>,
     pub symbol: String,
     pub text: String,
+    /// A directory, written with a trailing slash and only checked for being there.
+    pub dir: bool,
 }
 
 fn looks_like_path(s: &str) -> bool {
@@ -39,34 +43,74 @@ fn is_line_no(s: &str) -> bool {
     s.starts_with(|c: char| c.is_ascii_digit()) && s.chars().all(|c| c.is_ascii_digit() || c == '-')
 }
 
+fn is_abs(s: &str) -> bool {
+    let b = s.as_bytes();
+    s.starts_with('/') || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || b[2] == b'/'))
+}
+
+/// The first word of a map line without list mark, backticks and trailing colon, and the rest.
+fn split_loc(raw: &str) -> (String, &str) {
+    let s = raw.trim();
+    let s = s.strip_prefix("- ").or_else(|| s.strip_prefix("* ")).unwrap_or(s).trim();
+    let (loc, rest) = s.split_once(char::is_whitespace).unwrap_or((s, ""));
+    (loc.trim_matches('`').trim_end_matches([':', ',']).replace('\\', "/"), rest)
+}
+
+/// The words of a note without the mark it was written or stored with, for comparing notes.
+fn note_words(raw: &str) -> String {
+    let t = raw.trim();
+    let t = t.strip_prefix('>').or_else(|| t.strip_prefix("- ")).or_else(|| t.strip_prefix("* ")).unwrap_or(t);
+    one_line(t.trim())
+}
+
 impl MapLine {
     /// Reads `file:line symbol, what it does`, the line number and the description are optional. An absolute
     /// file inside `repo` becomes relative to it.
     pub fn parse(raw: &str, repo: Option<&Path>) -> Option<MapLine> {
-        let s = raw.trim();
-        let s = s.strip_prefix("- ").or_else(|| s.strip_prefix("* ")).unwrap_or(s).trim();
-        let (loc, rest) = s.split_once(char::is_whitespace).unwrap_or((s, ""));
-        let loc = loc.trim_matches('`').trim_end_matches([':', ',']).replace('\\', "/");
-        let (file, line) = match loc.rsplit_once(':') {
-            Some((f, n)) if is_line_no(n) => (f.to_string(), Some(n.to_string())),
-            _ => (loc.clone(), None),
-        };
-        let mut file = file.trim_start_matches("./").to_string();
-        let b = file.as_bytes();
-        if file.starts_with('/') || (b.len() >= 2 && b[1] == b':') {
-            file = rel_to_root(&file, &path_str(repo?))?;
-        }
-        if !looks_like_path(&file) || file.split('/').any(|x| x == "..") {
+        Self::read(raw, repo).map(|x| x.0)
+    }
+
+    /// `parse`, also saying whether a symbol followed the file after a colon, like `src/a.rs:put(` or `src/a.rs:4:put`.
+    fn read(raw: &str, repo: Option<&Path>) -> Option<(MapLine, bool)> {
+        let (loc, rest) = split_loc(raw);
+        if loc.contains("://") {
             return None;
         }
-        let rest = one_line(rest.trim().trim_start_matches(['-', ':']).trim());
-        let symbol = rest.split_once(',').map(|x| x.0).unwrap_or(&rest).trim().to_string();
-        let at = match &line {
-            Some(n) => format!("{file}:{n}"),
-            None => file.clone(),
+        let skip = if is_abs(&loc) && !loc.starts_with('/') { 2 } else { 0 };
+        let (file, tail) = match loc[skip..].find(':') {
+            Some(i) => (&loc[..skip + i], &loc[skip + i + 1..]),
+            None => (loc.as_str(), ""),
         };
+        let (line, sym) = match tail.split_once(':') {
+            Some((n, s)) if is_line_no(n) => (Some(n), s),
+            _ if is_line_no(tail) => (Some(tail), ""),
+            _ => (None, tail),
+        };
+        let sym = sym.split('(').next().unwrap_or("");
+        let mut file = file.trim_start_matches("./").to_string();
+        let dir = file.len() > 1 && file.ends_with('/');
+        file = file.trim_end_matches('/').to_string();
+        if is_abs(&file) {
+            file = rel_to_root(&file, &path_str(repo?))?;
+        }
+        let slash = if dir { "/" } else { "" };
+        if !looks_like_path(&format!("{file}{slash}")) || file.split('/').any(|x| x == "..") {
+            return None;
+        }
+        let mut rest = one_line(rest.trim().trim_start_matches(['-', ':']).trim());
+        if !sym.is_empty() {
+            rest = if rest.is_empty() { sym.to_string() } else { format!("{sym}, {rest}") };
+        }
+        let symbol = rest.split_once(',').map(|x| x.0).unwrap_or(&rest).trim().to_string();
+        let at = format!("{file}{slash}{}", line.map(|n| format!(":{n}")).unwrap_or_default());
         let text = if rest.is_empty() { at } else { format!("{at} {rest}") };
-        Some(MapLine { file, line, symbol, text })
+        Some((MapLine { file, line: line.map(str::to_string), symbol, text, dir }, !sym.is_empty()))
+    }
+
+    fn as_dir(mut self) -> MapLine {
+        self.text = format!("{}/{}", self.file, &self.text[self.file.len()..]);
+        self.dir = true;
+        self
     }
 
     /// Lines with the same key describe the same thing, a put replaces them.
@@ -97,27 +141,27 @@ pub enum Fresh {
 pub struct CodeMap {
     pub note: Note,
     pub lines: Vec<MapLine>,
-    /// Body lines that are not map lines, kept as written.
-    pub prose: Vec<String>,
+    /// The area's notes: body lines that are not map lines, kept as written and never checked. A put stores a new
+    /// one as `> text`, which every binary reads as no map line.
+    pub notes: Vec<String>,
     pub blobs: HashMap<String, String>,
 }
 
 impl CodeMap {
     pub fn of(note: Note) -> CodeMap {
         let mut lines = vec![];
-        let mut prose = vec![];
-        for l in note.body.lines() {
+        let mut notes = vec![];
+        for l in note.body.lines().filter(|l| !l.trim().is_empty()) {
             match MapLine::parse(l, None) {
-                Some(m) => lines.push(m),
-                None if !l.trim().is_empty() => prose.push(l.trim_end().to_string()),
-                None => {}
+                Some(m) if !l.trim_start().starts_with('>') => lines.push(m),
+                _ => notes.push(l.trim_end().to_string()),
             }
         }
         let blobs = match note.field(BLOBS_KEY) {
             Some(Value::Mapping(m)) => m.iter().filter_map(|(k, v)| Some((yaml_scalar_string(k)?, yaml_scalar_string(v)?))).collect(),
             _ => HashMap::new(),
         };
-        CodeMap { note, lines, prose, blobs }
+        CodeMap { note, lines, notes, blobs }
     }
 
     pub fn area(&self) -> String {
@@ -130,7 +174,7 @@ impl CodeMap {
 
     /// Files with a line whose saved hash differs from the current one, the only ones worth reading.
     pub fn changed_files(&self, cur: &HashMap<String, Option<String>>) -> BTreeSet<String> {
-        let differs = |l: &&MapLine| matches!(cur.get(&l.file), Some(Some(h)) if self.blobs.get(&l.key()) != Some(h));
+        let differs = |l: &&MapLine| matches!(cur.get(&l.file), Some(Some(h)) if h != DIR && self.blobs.get(&l.key()) != Some(h));
         self.lines.iter().filter(differs).map(|l| l.file.clone()).collect()
     }
 
@@ -142,7 +186,7 @@ impl CodeMap {
             .map(|l| match current {
                 None => Fresh::Unknown,
                 Some(cur) => match cur.get(&l.file) {
-                    Some(Some(h)) if self.blobs.get(&l.key()) == Some(h) => Fresh::Fresh,
+                    Some(Some(h)) if h == DIR || self.blobs.get(&l.key()) == Some(h) => Fresh::Fresh,
                     Some(Some(_)) => texts.get(&l.file).map_or(Fresh::Changed, |t| locate(l, t)),
                     _ => Fresh::Gone,
                 },
@@ -153,7 +197,9 @@ impl CodeMap {
     /// One line: area, id, line count and which files went stale.
     pub fn header(&self, states: &[Fresh]) -> String {
         let n = self.lines.len();
-        let head = format!("map {} {}: {n} line{}", self.area(), self.note.id, if n == 1 { "" } else { "s" });
+        let k = self.notes.len();
+        let notes = if k == 0 { String::new() } else { format!(", {k} note{}", if k == 1 { "" } else { "s" }) };
+        let head = format!("map {} {}: {n} line{}{notes}", self.area(), self.note.id, if n == 1 { "" } else { "s" });
         if states.contains(&Fresh::Unknown) {
             return format!("{head}, freshness unknown, no checkout of the repo found here (pass repo)");
         }
@@ -194,7 +240,7 @@ impl CodeMap {
     pub fn render(&self, states: &[Fresh]) -> String {
         let mut out = self.header(states);
         out.push('\n');
-        for p in &self.prose {
+        for p in &self.notes {
             out.push_str(p);
             out.push('\n');
         }
@@ -266,9 +312,17 @@ fn line_warnings(repo: &Path, lines: &[MapLine], blobs: &HashMap<String, Option<
     let mut texts: HashMap<&str, Option<String>> = HashMap::new();
     let mut out = vec![];
     for l in lines {
+        let at = l.text.split_whitespace().next().unwrap_or_default();
+        match blobs.get(&l.file) {
+            Some(Some(h)) if h == DIR => continue,
+            _ if l.dir => {
+                out.push(format!("{at} directory not found"));
+                continue;
+            }
+            _ => {}
+        }
         let present = blobs.get(&l.file).is_none_or(Option::is_some);
         let text = texts.entry(&l.file).or_insert_with(|| present.then(|| std::fs::read(repo.join(&l.file)).ok()).flatten().map(|b| String::from_utf8_lossy(&b).into_owned()));
-        let at = format!("{}{}", l.file, l.line.as_deref().map(|n| format!(":{n}")).unwrap_or_default());
         let Some(text) = text else {
             out.push(format!("{at} file not found"));
             continue;
@@ -335,23 +389,25 @@ pub fn check_new(v: &Vault, n: &Note) -> Result<()> {
     Ok(())
 }
 
-/// The git checkout maps of `project` are checked against: `explicit`, else the checkout holding cwd, else a
-/// recorded project path on this PC.
+/// The git checkout maps of `project` are checked against: `explicit`, else the linked worktree of the project
+/// holding cwd, else the checkout holding cwd, else a recorded project path on this PC.
 pub fn repo_for(v: &Vault, project: &str, explicit: Option<&Path>, cwd: &Path) -> Result<PathBuf> {
     let dir = match explicit {
         Some(p) => crate::util::absolutize(p),
+        // A linked worktree holds its branch's files, which the checkout at the bound path may lack.
+        None if crate::git::main_checkout(cwd).is_some() && v.detect_project(cwd).as_deref() == Some(project) => cwd.to_path_buf(),
         None => crate::workflow::target_dir(v, project, None, cwd)?,
     };
     let top = crate::git::toplevel(&dir).with_context(|| format!("{} is not inside a git checkout, pass repo", path_str(&dir)))?;
     Ok(PathBuf::from(top))
 }
 
-/// Blob hashes of the files as they are in the working tree, None for a file that is not there.
+/// Blob hashes of the files as they are in the working tree, `DIR` for a directory, None for a path that is not there.
 pub fn current_blobs(repo: &Path, files: &[String]) -> Result<HashMap<String, Option<String>>> {
     let mut out: HashMap<String, Option<String>> = HashMap::new();
     let present: Vec<&String> = files.iter().filter(|f| repo.join(f).is_file()).collect();
     for f in files {
-        out.insert(f.clone(), None);
+        out.insert(f.clone(), repo.join(f).is_dir().then(|| DIR.to_string()));
     }
     for chunk in present.chunks(200) {
         let mut args = vec!["hash-object", "--"];
@@ -370,7 +426,7 @@ pub struct PutReq {
     pub project: String,
     pub lines: Vec<String>,
     pub paths: Vec<String>,
-    /// Line keys (`file symbol`) or whole files to remove.
+    /// Line keys (`file symbol`), whole files or note texts to remove.
     pub drop: Vec<String>,
 }
 
@@ -383,6 +439,9 @@ pub struct PutReport {
     pub refreshed: usize,
     pub unchanged: usize,
     pub dropped: usize,
+    pub notes_added: usize,
+    /// How each line that is not a plain file line was taken: as a note, a directory or a file and symbol.
+    pub taken: Vec<String>,
     /// Lines that do not match the checkout, saved all the same.
     pub warnings: Vec<String>,
 }
@@ -390,10 +449,15 @@ pub struct PutReport {
 impl PutReport {
     pub fn text(&self) -> String {
         let m = &self.map;
-        let warned: String = self.warnings.iter().map(|w| format!("
+        let k = m.notes.len();
+        let mut notes = if k == 0 { String::new() } else { format!(", {k} note{}", if k == 1 { "" } else { "s" }) };
+        if self.notes_added > 0 {
+            notes.push_str(&format!(" ({} new)", self.notes_added));
+        }
+        let warned: String = self.taken.iter().chain(&self.warnings).map(|w| format!("
 {w}")).collect();
         format!(
-            "{} map {} {}: {} added, {} replaced, {} refreshed, {} unchanged, {} dropped, {} lines{warned}",
+            "{} map {} {}: {} added, {} replaced, {} refreshed, {} unchanged, {} dropped, {} lines{notes}{warned}",
             if self.created { "created" } else { "updated" },
             m.area(),
             m.note.id,
@@ -416,16 +480,46 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
     }
     let project = crate::ops::check_slug(&req.project)?;
     let mut incoming: Vec<MapLine> = vec![];
+    let mut notes: Vec<String> = vec![];
+    let mut taken: Vec<String> = vec![];
     for raw in req.lines.iter().flat_map(|l| l.lines()) {
         let t = raw.trim();
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-        let Some(l) = MapLine::parse(t, Some(repo)) else {
-            bail!("map line '{t}' must start with a repo relative file, like src/view/overlay.ts:42 setOverlay, what it does");
+        let read = if t.starts_with('>') { None } else { MapLine::read(t, Some(repo)) };
+        let why = match read {
+            None if is_abs(&split_loc(t).0) && !t.starts_with('>') => {
+                let file = split_loc(t).0;
+                let hint = Path::new(&file).parent().and_then(crate::git::toplevel).map(|r| format!(" ({r})")).unwrap_or_default();
+                bail!("map line '{t}' names a file outside the checkout {}, write it relative to that checkout or pass repo (--repo) with the checkout it lies in{hint}", path_str(repo));
+            }
+            None => "not checked".to_string(),
+            Some((l, sym)) => {
+                let at = repo.join(&l.file);
+                let l = if !l.dir && at.is_dir() {
+                    taken.push(format!("taken as a directory: {t}"));
+                    l.as_dir()
+                } else {
+                    l
+                };
+                if !l.dir && !sym && l.line.is_none() && !l.file.contains('/') && !at.exists() {
+                    format!("no file {} here", l.file)
+                } else {
+                    if sym {
+                        taken.push(format!("taken as {}: {t}", l.text.split(',').next().unwrap_or_default()));
+                    }
+                    incoming.retain(|x| x.key() != l.key());
+                    incoming.push(l);
+                    continue;
+                }
+            }
         };
-        incoming.retain(|x| x.key() != l.key());
-        incoming.push(l);
+        let words = note_words(t);
+        if !words.is_empty() {
+            taken.push(format!("taken as a note, {why}: {}", truncate_chars(&words, 100)));
+            notes.push(words);
+        }
     }
     let files: Vec<String> = incoming.iter().map(|l| l.file.clone()).collect::<BTreeSet<_>>().into_iter().collect();
     let hashes = current_blobs(repo, &files)?;
@@ -441,13 +535,20 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
             let mut n = Note::new(&v.fresh_id(), &area, MAP);
             n.project = Some(project.clone());
             n.set_field(AREA_KEY, Value::String(area.clone()));
-            CodeMap { note: n, lines: vec![], prose: vec![], blobs: HashMap::new() }
+            CodeMap { note: n, lines: vec![], notes: vec![], blobs: HashMap::new() }
         }
     };
-    let mut r = PutReport { map: m.clone(), created, added: 0, replaced: 0, refreshed: 0, unchanged: 0, dropped: 0, warnings };
-    let before = m.lines.len();
+    let mut r = PutReport { map: m.clone(), created, added: 0, replaced: 0, refreshed: 0, unchanged: 0, dropped: 0, notes_added: 0, taken, warnings };
+    let before = m.lines.len() + m.notes.len();
     m.lines.retain(|l| !req.drop.iter().any(|d| d.trim() == l.key() || d.trim().trim_end_matches('/') == l.file));
-    r.dropped = before - m.lines.len();
+    m.notes.retain(|n| !req.drop.iter().any(|d| note_words(d).eq_ignore_ascii_case(&note_words(n))));
+    r.dropped = before - m.lines.len() - m.notes.len();
+    for n in notes {
+        if !m.notes.iter().any(|x| note_words(x).eq_ignore_ascii_case(&n)) {
+            m.notes.push(format!("> {n}"));
+            r.notes_added += 1;
+        }
+    }
     for l in incoming {
         let hash = hashes[&l.file].clone().unwrap_or_default();
         let key = l.key();
@@ -479,7 +580,7 @@ pub fn put(v: &Vault, req: PutReq, repo: &Path) -> Result<PutReport> {
     if paths.is_empty() {
         paths = m.files();
     }
-    let mut body: Vec<String> = m.prose.clone();
+    let mut body: Vec<String> = m.notes.clone();
     if !body.is_empty() {
         body.push(String::new());
     }
@@ -555,6 +656,11 @@ fn covers(target: &str, file: &str) -> bool {
     f == t || f.starts_with(&format!("{t}/")) || (t.contains(['*', '?']) && glob_match(target, file))
 }
 
+/// A directory line also covers the files inside it.
+fn line_covers(target: &str, l: &MapLine) -> bool {
+    covers(target, &l.file) || (l.dir && covers(&l.file, target))
+}
+
 fn kind_rank(kind: &str) -> Option<usize> {
     ["gotcha", "decision", "feedback"].iter().position(|k| *k == kind)
 }
@@ -598,7 +704,7 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
         .filter(|i| {
             let m = &all[*i];
             areas.contains(i)
-                || paths.iter().any(|p| m.lines.iter().any(|l| covers(p, &l.file)) || m.note.path_globs().iter().any(|g| glob_match(g, p)))
+                || paths.iter().any(|p| m.lines.iter().any(|l| line_covers(p, l)) || m.note.path_globs().iter().any(|g| glob_match(g, p)))
         })
         .collect();
     let chosen: Vec<CodeMap> = picked.iter().map(|i| all[*i].clone()).collect();
@@ -623,9 +729,13 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
     for (si, (m, st)) in chosen.iter().zip(&states).enumerate() {
         let by_area = areas.iter().any(|i| all[*i].note.id == m.note.id);
         items.push(Item { class: 0, rank: 0, section: si, order: 0, text: m.header(st), of: m.area(), is_note: false });
+        for (ni, t) in m.notes.iter().enumerate() {
+            let class = if ni < FIRST_LINES { 1 } else { 3 };
+            items.push(Item { class, rank: ni, section: si, order: ni + 1, text: t.clone(), of: m.area(), is_note: false });
+        }
         let mut seen = [0usize; 8];
         for (li, (l, s)) in m.lines.iter().zip(st).enumerate() {
-            let named = paths.iter().any(|p| covers(p, &l.file));
+            let named = paths.iter().any(|p| line_covers(p, l));
             let stale = matches!(s, Fresh::Changed | Fresh::Gone);
             let class = match (named, by_area, stale) {
                 (true, _, _) if seen[1] < FIRST_LINES => 1,
@@ -635,7 +745,7 @@ pub fn brief(v: &Vault, project: &str, targets: &[String], repo: Option<&Path>, 
             };
             let rank = seen[class as usize];
             seen[class as usize] += 1;
-            items.push(Item { class, rank, section: si, order: li + 1, text: line_text(l, *s), of: m.area(), is_note: false });
+            items.push(Item { class, rank, section: si, order: m.notes.len() + li + 1, text: line_text(l, *s), of: m.area(), is_note: false });
         }
     }
     let notes_section = chosen.len();
