@@ -1003,7 +1003,7 @@ pub fn tool_defs() -> Vec<Value> {
         }), &["from", "to"])),
         tool("merge", "Merge a duplicate note into another, undo restores it.", obj(with(id(), json!({"into": st(), "undo": bl()})), &["id"])),
         tool("delete", "Delete a note, prefer archiving.", obj(with(id(), json!({"confirm": bl()})), &["id", "confirm"])),
-        tool("move", "Change a backlog item's state.", obj(with(json!({"id": {"type": ["string", "array"]}}), json!({
+        tool("move", "Change backlog items' state.", obj(with(json!({"id": {"type": ["string", "array"]}}), json!({
             "state": {"type": "string", "enum": backlog::STATES},
             "position": {"type": "string", "description": "queued: top or id"},
             "resolution": {"type": "string", "description": "for rejected"},
