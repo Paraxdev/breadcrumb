@@ -208,7 +208,7 @@ pub fn ahead_of_origin(dir: &Path) -> usize {
 
 /// Ends `child` and every process it started. A process git spawned (a launcher style git.exe starts the real one)
 /// inherits our handles, the hook's stdout among them on Windows, and would keep the hook's reader waiting.
-fn kill_tree(child: &mut std::process::Child) {
+pub(crate) fn kill_tree(child: &mut std::process::Child) {
     #[cfg(windows)]
     {
         // Note: std cannot start a child suspended, so a job object would be assigned only after a launcher may have
@@ -241,7 +241,7 @@ fn kill_tree(child: &mut std::process::Child) {
 /// would keep the hook's reader waiting on them. std passes a child fresh copies for the stdio it asks for, so this
 /// only stops the handing on to processes that never asked.
 #[cfg(windows)]
-fn keep_own_output() {
+pub(crate) fn keep_own_output() {
     use std::os::windows::io::AsRawHandle;
     unsafe extern "system" {
         fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
