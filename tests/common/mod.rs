@@ -5,7 +5,20 @@ use breadcrumb::ops::{self, AddReq, FieldInput};
 use breadcrumb::vault::Vault;
 use std::path::Path;
 
+/// In-process tests run without the shell's Claude Code session or breadcrumb session name, so what a note records
+/// does not depend on who runs cargo test. Every test that makes a vault calls it first.
+pub fn isolate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // Note: Once blocks every other caller until the variables are gone, and the tests read the environment only
+    // through std, which locks it, so removing them here races with nothing.
+    ONCE.call_once(|| unsafe {
+        std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+        std::env::remove_var("BREADCRUMB_SESSION");
+    });
+}
+
 pub fn vault() -> (tempfile::TempDir, Vault) {
+    isolate();
     let dir = tempfile::tempdir().unwrap();
     let (v, _) = Vault::init(&dir.path().join("vault"), None).unwrap();
     (dir, v)
