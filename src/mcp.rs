@@ -1025,8 +1025,8 @@ pub fn tool_defs() -> Vec<Value> {
             "repo": st(),
             "budget": int(),
         })), &[])),
-        tool("land", "Landing queue of merges pushed in order, CI read green or red.", obj(with(json!({"project": st()}), json!({
-            "action": {"type": "string", "enum": ["list", "show", "add", "replace", "approve", "verify", "pushed", "green", "red", "read", "drop", "move"]},
+        tool("land", "Landing queue of merges pushed in order, CI reads.", obj(with(json!({"project": st()}), json!({
+            "action": {"type": "string", "enum": ["list", "show", "add", "replace", "approve", "verify", "pushed", "check", "green", "red", "infra", "read", "drop", "move"]},
             "sha": {"type": "string", "description": "several: pushed, green, red"},
             "result": {"type": "string", "enum": ["green", "red"]},
             "replaces": st(),

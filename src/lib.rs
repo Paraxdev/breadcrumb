@@ -1,6 +1,7 @@
 //! breadcrumb: a local-first, git-backed knowledge vault for AI coding agents.
 
 pub mod backlog;
+pub mod ci;
 pub mod cli;
 pub mod config;
 pub mod digest;

@@ -3,6 +3,7 @@
 //! line so git merges concurrent edits of different entries, and syncs like notes do.
 
 use crate::backlog::{self, MoveReq};
+use crate::ci;
 use crate::note::is_commit_hex;
 use crate::session;
 use crate::util::{atomic_write, now, one_line, short_age, truncate_chars};
@@ -65,7 +66,31 @@ pub struct Entry {
     /// Approval notes a later approve, verify, push or replace took off, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier_notes: Vec<OldNote>,
+    /// Reads of the run with an attempt, a note or failed gate jobs, and infra reds, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<ReadRec>,
     /// Keys a newer binary wrote stay as they are.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+    /// What gh said of the run just now, `list` and the digest ask it before marking the entry stale. Never stored.
+    #[serde(skip)]
+    pub live: Option<ci::RunRow>,
+}
+
+/// One read of an entry's run. `result` is green, red or infra, an earlier attempt found when a rerun is read may also be
+/// cancelled or going.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReadRec {
+    pub result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    /// The gate jobs that failed, with how.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub by: String,
+    pub at: DateTime<Utc>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -104,8 +129,37 @@ impl Entry {
         matches!(self.state.as_str(), "built" | "approved" | "verified" | "pushed")
     }
 
-    pub fn stale(&self) -> bool {
+    fn late(&self) -> bool {
         self.state == "pushed" && now() - self.at >= Duration::minutes(STALE_MINUTES)
+    }
+
+    /// Pushed with no read for STALE_MINUTES, unless gh said just now that its run is still going.
+    pub fn stale(&self) -> bool {
+        self.late() && !self.live.as_ref().is_some_and(|r| r.status != "completed")
+    }
+
+    /// The last read of the run that counts against a rerun: its attempt when known, and when it was made.
+    fn last_read(&self) -> Option<(Option<u32>, DateTime<Utc>)> {
+        let rec = self.reads.iter().rev().find(|r| matches!(r.result.as_str(), "green" | "red" | "infra")).map(|r| (r.attempt, r.at));
+        let step = self.steps.iter().rev().find(|s| matches!(s.state.as_str(), "green" | "red" | "infra")).map(|s| (None, s.at));
+        match (rec, step) {
+            (Some(r), Some(s)) if s.1 > r.1 + Duration::seconds(1) => Some(s),
+            (r, s) => r.or(s),
+        }
+    }
+
+    /// The run's current attempt was read already, so a check records nothing until it is rerun.
+    fn covers(&self, run: &ci::Run) -> bool {
+        match self.last_read() {
+            None => false,
+            Some((Some(a), _)) => run.attempt <= a,
+            Some((None, at)) => run.started_at.is_none_or(|s| s <= at),
+        }
+    }
+
+    /// Pushed with an infra red as the last read, waiting for its failed jobs to be rerun.
+    fn infra(&self) -> Option<&ReadRec> {
+        self.reads.last().filter(|r| r.result == "infra" && self.state == "pushed" && self.steps.last().is_some_and(|s| s.state == "infra"))
     }
 
     fn by(&self, state: &str) -> Option<&str> {
@@ -127,6 +181,7 @@ impl Entry {
             "built" => Some("approve"),
             "approved" => Some("verify or push"),
             "verified" => Some("push"),
+            "pushed" if self.infra().is_some() => Some("rerun the failed jobs, then read the run"),
             "pushed" => Some("read the run"),
             "red" => Some("fix, or drop it"),
             _ => None,
@@ -264,10 +319,20 @@ pub enum Op {
     Add { sha: String, items: Vec<String>, note: Option<String>, to: Option<String>, replaces: Option<String>, clear_approval: bool },
     Approve { sha: String, note: Option<String>, to: Option<String> },
     Verify { sha: String, to: Option<String> },
-    Pushed { shas: Vec<String>, run: String, to: Option<String> },
-    Read { shas: Vec<String>, green: bool, to: Option<String> },
+    Pushed { shas: Vec<String>, run: Option<String>, to: Option<String> },
+    Read { shas: Vec<String>, green: bool, to: Option<String>, attempt: Option<u32>, note: Option<String> },
+    Infra { shas: Vec<String>, note: Option<String>, attempt: Option<u32>, to: Option<String> },
+    Check { shas: Vec<String>, wait: Option<Wait>, to: Option<String> },
+    Ci { repo: Option<String>, workflow: Option<String>, branch: Option<String>, gate: Option<Vec<String>>, clear: bool },
     Drop { sha: String },
     Move { sha: String, after: Option<String> },
+}
+
+/// How long `land wait` waits for the gate and how often it looks.
+#[derive(Clone, Debug)]
+pub struct Wait {
+    pub minutes: u64,
+    pub every: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -307,7 +372,42 @@ fn head(entries: &[Entry], e: &Entry) -> String {
     if let Some(n) = &e.note {
         s.push_str(&format!(" ({})", truncate_chars(n, NOTE_MAX)));
     }
+    if let Some(t) = read_tag(e) {
+        s.push_str(&format!(" ({t})"));
+    }
     s + &run_age(entries, e)
+}
+
+fn attempt_text(a: Option<u32>) -> String {
+    a.map(|a| format!(" on attempt {a}")).unwrap_or_default()
+}
+
+/// What the last read says beyond the state: an infra red waiting for a rerun, a read after a rerun, a note.
+fn read_tag(e: &Entry) -> Option<String> {
+    let note = |r: &ReadRec| r.note.as_ref().map(|n| truncate_chars(n, DIGEST_NOTE));
+    if let Some(r) = e.infra() {
+        return Some(format!("infra red{}{}", attempt_text(r.attempt), note(r).map(|n| format!(": {n}")).unwrap_or_default()));
+    }
+    let r = e.reads.iter().rev().find(|r| r.result == e.state)?;
+    if e.steps.last().is_none_or(|s| s.state != e.state) {
+        return None;
+    }
+    let mut parts = vec![];
+    if let Some(a) = r.attempt.filter(|a| *a > 1) {
+        let mut by_attempt = std::collections::BTreeMap::new();
+        for x in &e.reads {
+            if let Some(k) = x.attempt.filter(|k| *k < a) {
+                by_attempt.insert(k, if x.result == "infra" { "infra red" } else { x.result.as_str() });
+            }
+        }
+        let earlier: Vec<String> = by_attempt.iter().map(|(k, r)| format!("attempt {k} {r}")).collect();
+        parts.push(if earlier.is_empty() { format!("attempt {a}") } else { format!("attempt {a}, after {}", earlier.join(", ")) });
+    }
+    if !r.failed.is_empty() {
+        parts.push(r.failed.join(", "));
+    }
+    parts.extend(note(r));
+    Some(parts.join(", ")).filter(|t| !t.is_empty())
 }
 
 fn run_age(entries: &[Entry], e: &Entry) -> String {
@@ -316,8 +416,12 @@ fn run_age(entries: &[Entry], e: &Entry) -> String {
         s.push_str(&format!(", run {r}{}", peers(entries, e)));
     }
     s.push_str(&format!(", {} ago", short_age(&e.at)));
-    if e.stale() {
-        s.push_str(", STALE, no read yet");
+    match &e.live {
+        Some(r) if e.late() && r.status != "completed" => s.push_str(", run still going"),
+        Some(r) if e.stale() && e.infra().is_some() => s.push_str(&format!(", STALE, run finished {}, no rerun yet", r.conclusion)),
+        Some(r) if e.stale() => s.push_str(&format!(", STALE, run finished {}, no read yet, `crumb land check {}` reads it", r.conclusion, e.short())),
+        _ if e.stale() => s.push_str(", STALE, no read yet"),
+        _ => {}
     }
     s
 }
@@ -355,6 +459,14 @@ fn show_text(v: &Vault, entries: &[Entry], i: usize) -> String {
     }
     if let Some(r) = &e.replaces {
         s.push_str(&format!("  replaces: {r}\n"));
+    }
+    if !e.reads.is_empty() {
+        s.push_str("  reads:\n");
+        for r in &e.reads {
+            let failed = if r.failed.is_empty() { String::new() } else { format!(", {}", r.failed.join(", ")) };
+            let note = r.note.as_ref().map(|n| format!(": {n}")).unwrap_or_default();
+            s.push_str(&format!("    {}{} {} by {}{failed}{note}\n", r.result, attempt_text(r.attempt), when(&r.at), named(&r.by)));
+        }
     }
     s.push_str("  steps:\n");
     for st in &e.steps {
@@ -512,6 +624,50 @@ fn blocker<'a>(entries: &'a [Entry], i: usize, call: &[usize]) -> Option<&'a Ent
     entries[..i].iter().enumerate().find(|(j, e)| matches!(e.state.as_str(), "built" | "approved" | "verified") && !call.contains(j)).map(|(_, e)| e)
 }
 
+/// Refuses a push of an entry that is not approved or verified, or that an earlier unpushed entry holds back. With a run
+/// id, a pushed entry that has none takes it.
+fn push_check(entries: &[Entry], idx: &[usize], run_known: bool) -> Result<()> {
+    for &i in idx {
+        let e = &entries[i];
+        let fill = run_known && e.state == "pushed" && e.run.is_none();
+        if !fill && !matches!(e.state.as_str(), "approved" | "verified") {
+            return Err(step_error(e, "pushed", "an approved entry"));
+        }
+        if let Some(b) = blocker(entries, i, idx) {
+            let name = if b.state == "built" { "" } else { ", or name it in this call if the push carries it" };
+            bail!("{} is ahead in the queue and still {}, push in order{name}, or `--force`, or `crumb land move`/`drop`", b.short(), b.state);
+        }
+    }
+    Ok(())
+}
+
+/// How long one gh call of a land step may take.
+const GH_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long `list` and the digest wait on gh for the state of a run that looks stale.
+const GH_LIST_LIMIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The id of the newest run for one of `shas`, a few looks apart since GitHub starts a run some seconds after the push.
+fn find_run(c: &ci::Ci, shas: &[&str]) -> std::result::Result<Option<String>, ci::GhError> {
+    for i in 0..4 {
+        if i > 0 {
+            std::thread::sleep(ci::pause());
+        }
+        if let Some(r) = ci::run_for(&ci::runs(c, GH_LIMIT)?, shas) {
+            return Ok(Some(r.database_id.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// `build run on dev`, less when the workflow or branch is unset.
+fn ci_where(c: &ci::Ci) -> String {
+    let mut s = if c.workflow.is_empty() { "run".to_string() } else { format!("{} run", c.workflow) };
+    if !c.branch.is_empty() {
+        s.push_str(&format!(" on {}", c.branch));
+    }
+    s
+}
+
 /// The entries a call names, in queue order.
 fn find_all(entries: &[Entry], shas: &[String]) -> Result<Vec<usize>> {
     let mut idx = shas.iter().map(|s| find(entries, s)).collect::<Result<Vec<_>>>()?;
@@ -560,18 +716,22 @@ fn current(v: &Vault, slug: &str) -> Result<(Vec<Entry>, Vec<Parked>, String)> {
     Ok((entries, parked, said))
 }
 
+/// One entry after a step, with what is due next.
+fn state_out(v: &Vault, slug: &str, e: &Entry, extra: &str) -> Outcome {
+    let all = read(v, slug).unwrap_or_default();
+    let memo = e.memo.as_ref().map(|m| format!("\n  note: {m}")).unwrap_or_default();
+    Outcome { text: format!("{}\n  next: {}{memo}{extra}", head(&all, e), due_text(e)), data: json!({"entry": e}) }
+}
+
 pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
     let slug = slug_of(v, project)?;
     let by = session::attribute(req.by.as_deref());
     let force = req.force;
-    let state_out = |e: &Entry, extra: &str| {
-        let all = read(v, &slug).unwrap_or_default();
-        let memo = e.memo.as_ref().map(|m| format!("\n  note: {m}")).unwrap_or_default();
-        Outcome { text: format!("{}\n  next: {}{memo}{extra}", head(&all, e), due_text(e)), data: json!({"entry": e}) }
-    };
+    let state_out = |e: &Entry, extra: &str| state_out(v, &slug, e, extra);
     match req.op {
         Op::List { all } => {
-            let (entries, parked, settled) = current(v, &slug)?;
+            let (mut entries, parked, settled) = current(v, &slug)?;
+            ask_live(v, &slug, &mut entries);
             let shown: Vec<&Entry> = entries.iter().filter(|e| all || e.state != "green").collect();
             let mut data = json!({"entries": shown});
             if !parked.is_empty() {
@@ -626,7 +786,9 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                     steps: vec![Step { state: "built".into(), at: t, by: by.clone() }],
                     replaces: None,
                     earlier_notes: vec![],
+                    reads: vec![],
                     extra: Map::new(),
+                    live: None,
                 };
                 let mut said = String::new();
                 let mut at = entries.len();
@@ -747,28 +909,39 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
             Ok(state_out(&e, &settled))
         }
         Op::Pushed { shas, run, to } => {
-            let run = one_line(&run).trim().to_string();
-            if run.is_empty() {
-                bail!("pushed needs the CI run id, `--run <id>`");
-            }
+            let given = run.map(|r| one_line(&r).trim().to_string()).filter(|r| !r.is_empty());
+            let (run, why) = match given {
+                Some(r) => (Some(r), String::new()),
+                None => {
+                    let ci = ci::load(v, &slug)?.filter(|c| !c.repo.is_empty()).context("pushed needs the CI run id, `--run <id>`, or `crumb land ci --repo <owner/name>` once so pushed finds the run itself")?;
+                    // Check the call first, a refused push should not wait on gh.
+                    let entries = read(v, &slug)?;
+                    let idx = find_all(&entries, &shas)?;
+                    if !force {
+                        push_check(&entries, &idx, false)?;
+                    }
+                    let want: Vec<&str> = idx.iter().rev().map(|&i| entries[i].sha.as_str()).collect();
+                    let shorts = idx.iter().map(|&i| entries[i].short()).collect::<Vec<_>>().join(" ");
+                    match find_run(&ci, &want) {
+                        Ok(Some(id)) => (Some(id), String::new()),
+                        Ok(None) => (None, format!("\n  GitHub has no {} for it yet, `crumb land check {shorts}` finds it once one starts", ci_where(&ci))),
+                        Err(e) => (None, format!("\n  the run is not known, {e}, `crumb land pushed {shorts} --run <id>` adds it")),
+                    }
+                }
+            };
             let (es, settled) = mutate(v, &slug, |entries, _| {
                 let idx = find_all(entries, &shas)?;
                 if !force {
-                    for &i in &idx {
-                        let e = &entries[i];
-                        if !matches!(e.state.as_str(), "approved" | "verified") {
-                            return Err(step_error(e, "pushed", "an approved entry"));
-                        }
-                        if let Some(b) = blocker(entries, i, &idx) {
-                            let name = if b.state == "built" { "" } else { ", or name it in this call if the push carries it" };
-                            bail!("{} is ahead in the queue and still {}, push in order{name}, or `--force`, or `crumb land move`/`drop`", b.short(), b.state);
-                        }
-                    }
+                    push_check(entries, &idx, run.is_some())?;
                 }
                 for &i in &idx {
                     let e = &mut entries[i];
+                    if e.state == "pushed" && e.run.is_none() && run.is_some() && !force {
+                        e.run = run.clone();
+                        continue;
+                    }
                     set_state(e, "pushed", &by);
-                    e.run = Some(run.clone());
+                    e.run = run.clone();
                     e.retire_note();
                     e.next = to.as_deref().map(holder).or_else(|| e.by("approved").map(str::to_string));
                 }
@@ -776,71 +949,83 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                 Ok((format!("land pushed {}", es.iter().map(Entry::short).collect::<Vec<_>>().join(" ")), es))
             })?;
             if let [e] = es.as_slice() {
-                return Ok(state_out(e, &settled));
+                return Ok(state_out(e, &(why + &settled)));
             }
             let all = read(v, &slug)?;
             let text = es.iter().map(|e| format!("{}, next: {}", head(&all, e), due_text(e))).collect::<Vec<_>>().join("\n");
-            Ok(Outcome { text: text + &settled, data: json!({"entries": es}) })
+            Ok(Outcome { text: text + &why + &settled, data: json!({"entries": es}) })
         }
-        Op::Read { shas, green, to } => {
-            let word = if green { "green" } else { "red" };
-            let ((es, retried, others, all), settled) = mutate(v, &slug, |entries, _| {
+        Op::Read { shas, green, to, attempt, note } => {
+            let note = note.map(|n| truncate_chars(&one_line(&n), NOTE_MAX)).filter(|n| !n.is_empty());
+            read_entries(v, &slug, &by, req.by.clone(), force, &shas, green, to, ReadInfo { attempt, note, ..Default::default() })
+        }
+        Op::Infra { shas, note, attempt, to } => {
+            let note = note.map(|n| truncate_chars(&one_line(&n), NOTE_MAX)).filter(|n| !n.is_empty());
+            let attempt = attempt.or_else(|| {
+                let c = ci::load(v, &slug).ok().flatten().filter(|c| !c.repo.is_empty())?;
+                let entries = read(v, &slug).ok()?;
+                let run = find_all(&entries, &shas).ok()?.iter().find_map(|&i| entries[i].run.clone())?;
+                ci::view(&c, &run, None, GH_LIMIT).ok().map(|r| r.attempt)
+            });
+            let (es, settled) = mutate(v, &slug, |entries, _| {
                 let idx = find_all(entries, &shas)?;
-                let again = |e: &Entry| green && e.state == "green";
-                if let Some(e) = idx.iter().map(|&i| &entries[i]).find(|e| !force && e.state != "pushed" && !again(e)) {
-                    return Err(step_error(e, "read", "a pushed entry"));
+                if let Some(e) = idx.iter().map(|&i| &entries[i]).find(|e| !force && !matches!(e.state.as_str(), "pushed" | "red")) {
+                    return Err(step_error(e, "infra", "a pushed or red entry"));
                 }
-                let mut changed = vec![];
-                let mut retried = vec![];
                 for &i in &idx {
                     let e = &mut entries[i];
-                    if again(e) {
-                        retried.push(e.sha.clone());
-                        continue;
-                    }
-                    set_state(e, word, &by);
-                    e.next = if green { None } else { to.as_deref().map(holder).or_else(|| e.by("built").map(str::to_string)) };
-                    changed.push(e.short().to_string());
-                }
-                let mut others: Vec<(String, Vec<String>)> = vec![];
-                for r in idx.iter().filter_map(|&i| entries[i].run.as_ref()) {
-                    let unread: Vec<String> = entries.iter().enumerate().filter(|(j, e)| !idx.contains(j) && e.state == "pushed" && e.run.as_ref() == Some(r)).map(|(_, e)| e.short().to_string()).collect();
-                    if !unread.is_empty() && !others.iter().any(|(o, _)| o == r) {
-                        others.push((r.clone(), unread));
+                    let was_red = e.state == "red";
+                    e.reads.push(ReadRec { result: "infra".to_string(), attempt, failed: vec![], note: note.clone(), by: by.clone(), at: now(), extra: Map::new() });
+                    set_state(e, "infra", &by);
+                    e.state = "pushed".to_string();
+                    if to.is_some() || was_red {
+                        e.next = to.as_deref().map(holder).or_else(|| e.by("approved").map(str::to_string));
                     }
                 }
-                let msg = if changed.is_empty() { String::new() } else { format!("land read {} {word}", changed.join(" ")) };
-                Ok((msg, (idx.iter().map(|&i| entries[i].clone()).collect::<Vec<Entry>>(), retried, others, entries.clone())))
+                let es: Vec<Entry> = idx.iter().map(|&i| entries[i].clone()).collect();
+                Ok((format!("land infra {}", es.iter().map(Entry::short).collect::<Vec<_>>().join(" ")), es))
             })?;
-            let multi = es.len() > 1;
-            let mut blocks = vec![];
-            let mut moved_all = vec![];
-            let mut done = vec![];
-            for e in &es {
-                let mut out = state_out(e, "");
-                if green {
-                    let (text, moved) = land_items(v, e, &all, req.by.clone(), &mut done);
-                    out.text.push_str(&text);
-                    if retried.contains(&e.sha) {
-                        out.text.push_str(&format!("\n  {} green already, moved what was left", if multi { format!("{} was", e.short()) } else { "it was".to_string() }));
-                    }
-                    moved_all.extend(moved);
+            let shorts = es.iter().map(Entry::short).collect::<Vec<_>>().join(" ");
+            let all = read(v, &slug)?;
+            let mut text = es.iter().map(|e| format!("{}, next: {}", head(&all, e), due_text(e))).collect::<Vec<_>>().join("\n");
+            text.push_str(&format!("\n  it stays pushed and its items stay where they are, `crumb land check {shorts}` reads the rerun{settled}"));
+            Ok(Outcome { text, data: json!({"entries": es}) })
+        }
+        Op::Check { shas, wait, to } => check(v, &slug, &by, req.by.clone(), &shas, wait, to),
+        Op::Ci { repo, workflow, branch, gate, clear } => {
+            if clear {
+                ci::save(v, &slug, None)?;
+                return Ok(Outcome { text: format!("{slug} has no CI gate now, runs are read by hand"), data: json!({"ci": null}) });
+            }
+            let old = ci::load(v, &slug)?;
+            if repo.is_none() && workflow.is_none() && branch.is_none() && gate.is_none() {
+                return Ok(match old {
+                    Some(c) => Outcome { text: format!("CI gate of {slug}: {}", c.text()), data: json!({"ci": c}) },
+                    None => Outcome { text: format!("{slug} has no CI gate, `crumb land ci --repo <owner/name> --workflow <name> --branch <branch> --gate <jobs>` sets one"), data: json!({"ci": null}) },
+                });
+            }
+            let mut c = old.unwrap_or_default();
+            let clean = |s: String| one_line(&s).trim().to_string();
+            if let Some(r) = repo {
+                let r = clean(r);
+                let n = crate::project::normalize_remote(&r);
+                c.repo = n.strip_prefix("github.com/").unwrap_or(&n).to_string();
+                if !c.repo.is_empty() && c.repo.split('/').filter(|p| !p.is_empty()).count() != 2 {
+                    bail!("the repo is owner/name, like Paraxdev/FundaCAD, got {r:?}");
                 }
-                blocks.push(out.text);
             }
-            let mut text = blocks.join("\n");
-            if !green {
-                text.push_str(if multi { "\n  their items stay where they are" } else { "\n  its items stay where they are" });
+            if let Some(w) = workflow {
+                c.workflow = clean(w);
             }
-            for (r, unread) in &others {
-                text.push_str(&format!("\n  run {r} also holds {} unread, `crumb land read {} {word}` reads {} too", unread.join(", "), unread.join(" "), if unread.len() > 1 { "them" } else { "it" }));
+            if let Some(b) = branch {
+                c.branch = clean(b);
             }
-            text.push_str(&settled);
-            let mut data = if multi { json!({"entries": es}) } else { json!({"entry": es[0]}) };
-            if green {
-                data["items"] = json!(moved_all);
+            if let Some(g) = gate {
+                c.gate = g.into_iter().map(clean).filter(|g| !g.is_empty()).collect();
             }
-            Ok(Outcome { text, data })
+            ci::save(v, &slug, Some(&c))?;
+            let missing = if c.repo.is_empty() || c.gate.is_empty() { ", check and wait need a repo and gate jobs" } else { "" };
+            Ok(Outcome { text: format!("CI gate of {slug}: {}{missing}", c.text()), data: json!({"ci": c}) })
         }
         Op::Drop { sha } => {
             let ((gone, all), settled) = mutate(v, &slug, |entries, parked| match find(entries, &sha) {
@@ -884,6 +1069,267 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
             let entries = read(v, &slug)?;
             Ok(Outcome { text: list_text(v, &entries, &[], false) + &settled, data: json!({"moved": e.sha}) })
         }
+    }
+}
+
+/// What a read records beyond green or red.
+#[derive(Default)]
+struct ReadInfo {
+    attempt: Option<u32>,
+    note: Option<String>,
+    failed: Vec<String>,
+    /// Earlier attempts of the run, found when a rerun is read.
+    earlier: Vec<ReadRec>,
+    /// The run a check found for entries pushed without one.
+    run: Option<String>,
+    /// The check saw a newer attempt than the last read, so a red entry reads again.
+    rerun: bool,
+}
+
+/// Reads entries green or red: saves the read, then a green read moves the items.
+#[allow(clippy::too_many_arguments)]
+fn read_entries(v: &Vault, slug: &str, by: &str, req_by: Option<String>, force: bool, shas: &[String], green: bool, to: Option<String>, info: ReadInfo) -> Result<Outcome> {
+    let word = if green { "green" } else { "red" };
+    let ((es, retried, others, all), settled) = mutate(v, slug, |entries, _| {
+        let idx = find_all(entries, &shas)?;
+        let again = |e: &Entry| green && e.state == "green";
+        // A red entry reads again for a rerun of its run, a newer attempt than the one read red.
+        let rerun = |e: &Entry| e.state == "red" && (info.rerun || info.attempt.is_some_and(|a| a > e.last_read().and_then(|r| r.0).unwrap_or(1)));
+        if let Some(e) = idx.iter().map(|&i| &entries[i]).find(|e| !force && e.state != "pushed" && !again(e) && !rerun(e)) {
+            return Err(step_error(e, "read", "a pushed entry"));
+        }
+        let mut changed = vec![];
+        let mut retried = vec![];
+        for &i in &idx {
+            let e = &mut entries[i];
+            if again(e) {
+                retried.push(e.sha.clone());
+                continue;
+            }
+            if e.run.is_none() {
+                e.run = info.run.clone();
+            }
+            let known: Vec<Option<u32>> = e.reads.iter().map(|r| r.attempt).collect();
+            e.reads.extend(info.earlier.iter().filter(|r| !known.contains(&r.attempt)).cloned());
+            if info.attempt.is_some() || info.note.is_some() || !info.failed.is_empty() {
+                e.reads.push(ReadRec { result: word.to_string(), attempt: info.attempt, failed: info.failed.clone(), note: info.note.clone(), by: by.to_string(), at: now(), extra: Map::new() });
+            }
+            set_state(e, word, by);
+            e.next = if green { None } else { to.as_deref().map(holder).or_else(|| e.by("built").map(str::to_string)) };
+            changed.push(e.short().to_string());
+        }
+        let mut others: Vec<(String, Vec<String>)> = vec![];
+        for r in idx.iter().filter_map(|&i| entries[i].run.as_ref()) {
+            let unread: Vec<String> = entries.iter().enumerate().filter(|(j, e)| !idx.contains(j) && e.state == "pushed" && e.run.as_ref() == Some(r)).map(|(_, e)| e.short().to_string()).collect();
+            if !unread.is_empty() && !others.iter().any(|(o, _)| o == r) {
+                others.push((r.clone(), unread));
+            }
+        }
+        let msg = if changed.is_empty() { String::new() } else { format!("land read {} {word}", changed.join(" ")) };
+        Ok((msg, (idx.iter().map(|&i| entries[i].clone()).collect::<Vec<Entry>>(), retried, others, entries.clone())))
+    })?;
+    let multi = es.len() > 1;
+    let mut blocks = vec![];
+    let mut moved_all = vec![];
+    let mut done = vec![];
+    for e in &es {
+        let mut out = state_out(v, slug, e, "");
+        if green {
+            let (text, moved) = land_items(v, e, &all, req_by.clone(), &mut done);
+            out.text.push_str(&text);
+            if retried.contains(&e.sha) {
+                out.text.push_str(&format!("\n  {} green already, moved what was left", if multi { format!("{} was", e.short()) } else { "it was".to_string() }));
+            }
+            moved_all.extend(moved);
+        }
+        blocks.push(out.text);
+    }
+    let mut text = blocks.join("\n");
+    if !green {
+        text.push_str(if multi { "\n  their items stay where they are" } else { "\n  its items stay where they are" });
+    }
+    for (r, unread) in &others {
+        text.push_str(&format!("\n  run {r} also holds {} unread, `crumb land read {} {word}` reads {} too", unread.join(", "), unread.join(" "), if unread.len() > 1 { "them" } else { "it" }));
+    }
+    text.push_str(&settled);
+    let mut data = if multi { json!({"entries": es}) } else { json!({"entry": es[0]}) };
+    if green {
+        data["items"] = json!(moved_all);
+    }
+    Ok(Outcome { text, data })
+}
+
+/// Asks gh once for the runs of entries that look stale, so one whose run is still going is not marked stale.
+fn ask_live(v: &Vault, slug: &str, entries: &mut [Entry]) {
+    if !entries.iter().any(Entry::late) {
+        return;
+    }
+    let Some(c) = ci::load(v, slug).ok().flatten().filter(|c| !c.repo.is_empty()) else { return };
+    let Ok(rows) = ci::runs(&c, GH_LIST_LIMIT) else { return };
+    for e in entries.iter_mut().filter(|e| e.late()) {
+        e.live = match &e.run {
+            Some(r) => rows.iter().find(|x| x.database_id.to_string() == *r),
+            None => ci::run_for(&rows, &[&e.sha]),
+        }
+        .cloned();
+    }
+}
+
+/// One look at the run of the named entries.
+struct Looked {
+    text: String,
+    /// The gate is decided and read, or says nothing more until someone acts.
+    done: bool,
+    data: Value,
+}
+
+fn need_ci(v: &Vault, slug: &str) -> Result<ci::Ci> {
+    let c = ci::load(v, slug)?.with_context(|| format!("{slug} has no CI gate, `crumb land ci --repo <owner/name> --workflow <name> --branch <branch> --gate <jobs>` sets one, `crumb land read <sha> green|red` reads a run by hand"))?;
+    if c.repo.is_empty() || c.gate.is_empty() {
+        bail!("the CI gate of {slug} needs a repo and gate jobs, `crumb land ci --repo <owner/name> --gate <jobs>` sets them ({})", c.text());
+    }
+    Ok(c)
+}
+
+/// Looks at the run of `shas` once: prints each gate job, and reads every entry pushed on the run once the gate is
+/// decided for an attempt not read yet. A red entry whose run was rerun goes back to pushed.
+#[allow(clippy::too_many_arguments)]
+fn look(v: &Vault, slug: &str, c: &ci::Ci, by: &str, req_by: Option<String>, shas: &[String], to: &Option<String>) -> Result<std::result::Result<Looked, ci::GhError>> {
+    let entries = read(v, slug)?;
+    let idx = find_all(&entries, shas)?;
+    for &i in &idx {
+        let e = &entries[i];
+        if !matches!(e.state.as_str(), "pushed" | "red" | "green") {
+            return Err(step_error(e, "check", "a pushed entry"));
+        }
+    }
+    let mut runs: Vec<&String> = idx.iter().filter_map(|&i| entries[i].run.as_ref()).collect();
+    runs.dedup();
+    if runs.len() > 1 {
+        let names = idx.iter().map(|&i| entries[i].short()).collect::<Vec<_>>().join(", ");
+        bail!("{names} are on different runs ({}), check the entries of one run", runs.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", "));
+    }
+    let shorts = |ix: &[usize]| ix.iter().map(|&i| entries[i].short().to_string()).collect::<Vec<_>>().join(" ");
+    let (id, found) = match runs.first() {
+        Some(r) => (r.to_string(), false),
+        None => {
+            let want: Vec<&str> = idx.iter().rev().map(|&i| entries[i].sha.as_str()).collect();
+            let rows = match ci::runs(c, GH_LIMIT) {
+                Ok(r) => r,
+                Err(e) => return Ok(Err(e)),
+            };
+            match ci::run_for(&rows, &want) {
+                Some(r) => (r.database_id.to_string(), true),
+                None => return Ok(Ok(Looked { text: format!("GitHub has no {} for {} yet", ci_where(c), shorts(&idx)), done: false, data: json!({"run": null}) })),
+            }
+        }
+    };
+    let run = match ci::view(c, &id, None, GH_LIMIT) {
+        Ok(r) => r,
+        Err(e) => return Ok(Err(e)),
+    };
+    let gate = ci::gate(&c.gate, &run);
+    let status = if run.status == "completed" { format!("finished {}", run.conclusion) } else { run.status.replace('_', " ") };
+    let mut text = format!("run {id} attempt {}, {status}, gate {}:\n  {}", run.attempt, gate.verdict.word(), gate.lines.join("\n  "));
+    let data = json!({"run": id, "attempt": run.attempt, "gate": gate.verdict.word(), "jobs": gate.lines});
+    let group: Vec<usize> = entries.iter().enumerate().filter(|(i, e)| idx.contains(i) || (matches!(e.state.as_str(), "pushed" | "red") && e.run.as_deref() == Some(id.as_str()))).map(|(i, _)| i).collect();
+    let open: Vec<usize> = group.iter().copied().filter(|&i| entries[i].state != "green" && !entries[i].covers(&run)).collect();
+    let decided = matches!(gate.verdict, ci::Verdict::Green | ci::Verdict::Red(_));
+    if !decided || open.is_empty() {
+        let back: Vec<String> = open.iter().filter(|&&i| entries[i].state == "red").map(|&i| entries[i].sha.clone()).collect();
+        let fill: Vec<String> = if found { group.iter().map(|&i| entries[i].sha.clone()).collect() } else { vec![] };
+        if !back.is_empty() || !fill.is_empty() {
+            mutate(v, slug, |es, _| {
+                let mut n = vec![];
+                for e in es.iter_mut() {
+                    if fill.contains(&e.sha) && e.run.is_none() {
+                        e.run = Some(id.clone());
+                        n.push(e.short().to_string());
+                    }
+                    if back.contains(&e.sha) && e.state == "red" {
+                        set_state(e, "rerun", by);
+                        e.state = "pushed".to_string();
+                        e.next = to.as_deref().map(holder).or_else(|| e.by("approved").map(str::to_string));
+                        n.push(e.short().to_string());
+                    }
+                }
+                n.dedup();
+                Ok((if n.is_empty() { String::new() } else { format!("land check {}", n.join(" ")) }, ()))
+            })?;
+        }
+        if !back.is_empty() {
+            text.push_str(&format!("\n{} pushed again, run {id} was rerun", back.iter().map(|s| &s[..s.len().min(7)]).collect::<Vec<_>>().join(", ")));
+        }
+        let waiting = group.iter().find_map(|&i| entries[i].infra().filter(|_| !open.contains(&i)).map(|r| (i, r)));
+        let (tail, done) = match (&gate.verdict, waiting) {
+            (ci::Verdict::Going, _) => ("the gate is still going, nothing read yet".to_string(), false),
+            (ci::Verdict::Cancelled, _) => (format!("run {id} was cancelled, so it says nothing of the code, a later push's run carries it, read {} by hand once that one is read, or drop it", shorts(&group)), true),
+            (_, Some((i, r))) => (format!("{} has an infra red{}, waiting for a rerun of the failed jobs", entries[i].short(), attempt_text(r.attempt)), false),
+            (verdict, None) => (format!("{} read {} for this attempt already", shorts(&group), verdict.word()), true),
+        };
+        text.push_str(&format!("\n{tail}"));
+        return Ok(Ok(Looked { text, done, data }));
+    }
+    let failed = match &gate.verdict {
+        ci::Verdict::Red(f) => f.clone(),
+        _ => vec![],
+    };
+    let mut earlier = vec![];
+    let known: Vec<u32> = open.iter().flat_map(|&i| entries[i].reads.iter().filter_map(|r| r.attempt)).collect();
+    for k in run.attempt.saturating_sub(3).max(1)..run.attempt {
+        if known.contains(&k) {
+            continue;
+        }
+        if let Ok(r) = ci::view(c, &id, Some(k), GH_LIMIT) {
+            let g = ci::gate(&c.gate, &r);
+            let failed = if let ci::Verdict::Red(f) = &g.verdict { f.clone() } else { vec![] };
+            earlier.push(ReadRec { result: g.verdict.word().to_string(), attempt: Some(k), failed, note: None, by: by.to_string(), at: now(), extra: Map::new() });
+        }
+    }
+    let green = gate.verdict == ci::Verdict::Green;
+    let read_shas: Vec<String> = open.iter().map(|&i| entries[i].sha.clone()).collect();
+    let info = ReadInfo { attempt: Some(run.attempt), failed, earlier, run: Some(id.clone()), rerun: true, ..Default::default() };
+    let out = read_entries(v, slug, by, req_by, false, &read_shas, green, to.clone(), info)?;
+    let mut data = data;
+    data["read"] = out.data;
+    Ok(Ok(Looked { text: format!("{text}\n{}", out.text), done: true, data }))
+}
+
+/// `land check` looks once, `land wait` looks every so often until the gate is decided or the time is up.
+fn check(v: &Vault, slug: &str, by: &str, req_by: Option<String>, shas: &[String], wait: Option<Wait>, to: Option<String>) -> Result<Outcome> {
+    let c = need_ci(v, slug)?;
+    let Some(w) = wait else {
+        let l = look(v, slug, &c, by, req_by, shas, &to)?.map_err(|e| anyhow::anyhow!("{e}, `crumb land read <sha> green|red` reads the run by hand"))?;
+        return Ok(Outcome { text: l.text, data: l.data });
+    };
+    let start = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(w.minutes * 60);
+    let every = std::time::Duration::from_secs(w.every.max(1));
+    let (mut shown, mut fails) = (String::new(), 0);
+    loop {
+        match look(v, slug, &c, by, req_by.clone(), shas, &to)? {
+            Ok(l) if l.done => return Ok(Outcome { text: l.text, data: l.data }),
+            Ok(l) => {
+                fails = 0;
+                if l.text != shown {
+                    eprintln!("{} {}", chrono::Local::now().format("%H:%M"), l.text);
+                    shown = l.text;
+                }
+            }
+            Err(e @ (ci::GhError::Missing | ci::GhError::Auth)) => bail!("{e}, `crumb land read <sha> green|red` reads the run by hand"),
+            Err(e) => {
+                fails += 1;
+                if fails >= 5 {
+                    bail!("{e}, five looks in a row failed, `crumb land wait` again or read the run by hand");
+                }
+                eprintln!("{e}, looking again");
+            }
+        }
+        if start.elapsed() + every > limit {
+            let last = if shown.is_empty() { String::new() } else { format!(", last look:\n{shown}") };
+            return Ok(Outcome { text: format!("the gate is not decided after {} minutes, nothing read{last}", w.minutes), data: json!({"decided": false}) });
+        }
+        std::thread::sleep(every);
     }
 }
 
@@ -1024,7 +1470,8 @@ fn land_left(v: &Vault, gone: &Entry, all: &[Entry], by: Option<String>) -> (Str
 
 /// The queue's head for the digest: what is open, whose move it is, and any pushed entry nobody read.
 pub fn digest_lines(v: &Vault, project: Option<&str>) -> Option<String> {
-    let entries = read(v, project?).ok()?;
+    let mut entries = read(v, project?).ok()?;
+    ask_live(v, project?, &mut entries);
     let open: Vec<&Entry> = entries.iter().filter(|e| e.is_open() || e.state == "red").collect();
     if open.is_empty() {
         return None;
@@ -1125,9 +1572,9 @@ pub enum LandCmd {
         /// The merge commits, 4 or more leading hex characters find a queued one
         #[arg(required = true, value_delimiter = ',')]
         shas: Vec<String>,
-        /// The CI run id
+        /// The CI run id, found by the commit when left out and the project has a CI gate (`land ci`)
         #[arg(long)]
-        run: String,
+        run: Option<String>,
         /// Session that holds the next step
         #[arg(long)]
         to: Option<String>,
@@ -1137,11 +1584,17 @@ pub enum LandCmd {
         /// The merge commits of one run, 4 or more leading hex characters find a queued one
         #[arg(required = true, value_delimiter = ',')]
         shas: Vec<String>,
-        /// green or red
+        /// green, red, or infra for a red from outside the code
         result: String,
         /// Session that holds the next step
         #[arg(long)]
         to: Option<String>,
+        /// The run attempt read, a rerun's is 2 or more
+        #[arg(long)]
+        attempt: Option<u32>,
+        /// What the read found, like the job that flaked
+        #[arg(long)]
+        note: Option<String>,
     },
     /// The CI run was read green, the same as `read <sha> green`
     Green {
@@ -1151,6 +1604,12 @@ pub enum LandCmd {
         /// Session that holds the next step
         #[arg(long)]
         to: Option<String>,
+        /// The run attempt read, a rerun's is 2 or more
+        #[arg(long)]
+        attempt: Option<u32>,
+        /// What the read found, like the job that flaked
+        #[arg(long)]
+        note: Option<String>,
     },
     /// The CI run was read red, the same as `read <sha> red`
     Red {
@@ -1160,6 +1619,69 @@ pub enum LandCmd {
         /// Session that holds the next step
         #[arg(long)]
         to: Option<String>,
+        /// The run attempt read, a rerun's is 2 or more
+        #[arg(long)]
+        attempt: Option<u32>,
+        /// What the read found, like the job that flaked
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// The run failed outside the code, like a runner out of disk: the entry stays pushed, waiting for a rerun
+    Infra {
+        /// The merge commits of one run, 4 or more leading hex characters find a queued one
+        #[arg(required = true, value_delimiter = ',')]
+        shas: Vec<String>,
+        /// What failed, like "runner disk full"
+        #[arg(long)]
+        note: Option<String>,
+        /// The run attempt that failed, asked of gh when left out
+        #[arg(long)]
+        attempt: Option<u32>,
+        /// Session that holds the next step
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// One look at the run of pushed entries: each gate job, and a green or red read once the gate is decided
+    Check {
+        /// The merge commits of one run, 4 or more leading hex characters find a queued one
+        #[arg(required = true, value_delimiter = ',')]
+        shas: Vec<String>,
+        /// Session that holds the next step
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Looks at the run every so often until the gate is decided, then reads it green or red
+    Wait {
+        /// The merge commits of one run, 4 or more leading hex characters find a queued one
+        #[arg(required = true, value_delimiter = ',')]
+        shas: Vec<String>,
+        /// Minutes to wait at most
+        #[arg(long, default_value_t = 180)]
+        timeout: u64,
+        /// Seconds between looks
+        #[arg(long, default_value_t = 60)]
+        every: u64,
+        /// Session that holds the next step
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// The project's CI gate: the repo, workflow and branch pushes run on and the jobs that must pass. Shows it, or sets what is given
+    Ci {
+        /// The GitHub repo, owner/name
+        #[arg(long)]
+        repo: Option<String>,
+        /// The workflow, by name or file
+        #[arg(long)]
+        workflow: Option<String>,
+        /// The branch the queue pushes to
+        #[arg(long)]
+        branch: Option<String>,
+        /// Gate jobs, comma separated: a job name, which takes a matrix job's legs too, or a prefix ending in *
+        #[arg(long, value_delimiter = ',')]
+        gate: Option<Vec<String>>,
+        /// Remove the project's CI gate
+        #[arg(long)]
+        clear: bool,
     },
     /// The queue in order, finished entries only with --all
     List {
@@ -1195,16 +1717,25 @@ impl LandArgs {
             LandCmd::Approve { sha, note, to } => Op::Approve { sha, note, to },
             LandCmd::Verify { sha, to } => Op::Verify { sha, to },
             LandCmd::Pushed { shas, run, to } => Op::Pushed { shas, run, to },
-            LandCmd::Read { mut shas, mut result, to } => {
+            LandCmd::Read { mut shas, mut result, to, attempt, note } => {
+                let word = |s: &str| s.trim().eq_ignore_ascii_case("infra") || parse_result(s).is_ok();
                 // `read green <sha>` reads as meant too.
-                if parse_result(&result).is_err() && shas.first().is_some_and(|s| parse_result(s).is_ok()) {
+                if !word(&result) && shas.first().is_some_and(|s| word(s)) {
                     std::mem::swap(&mut shas[0], &mut result);
                 }
                 let shas = shas.iter().flat_map(|s| s.split(',')).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
-                Op::Read { shas, green: parse_result(&result)?, to }
+                if result.trim().eq_ignore_ascii_case("infra") {
+                    Op::Infra { shas, note, attempt, to }
+                } else {
+                    Op::Read { shas, green: parse_result(&result)?, to, attempt, note }
+                }
             }
-            LandCmd::Green { shas, to } => Op::Read { shas, green: true, to },
-            LandCmd::Red { shas, to } => Op::Read { shas, green: false, to },
+            LandCmd::Green { shas, to, attempt, note } => Op::Read { shas, green: true, to, attempt, note },
+            LandCmd::Red { shas, to, attempt, note } => Op::Read { shas, green: false, to, attempt, note },
+            LandCmd::Infra { shas, note, attempt, to } => Op::Infra { shas, note, attempt, to },
+            LandCmd::Check { shas, to } => Op::Check { shas, wait: None, to },
+            LandCmd::Wait { shas, timeout, every, to } => Op::Check { shas, wait: Some(Wait { minutes: timeout, every }), to },
+            LandCmd::Ci { repo, workflow, branch, gate, clear } => Op::Ci { repo, workflow, branch, gate, clear },
             LandCmd::List { all } => Op::List { all },
             LandCmd::Show { sha } => Op::Show { sha },
             LandCmd::Drop { sha } => Op::Drop { sha },
@@ -1237,12 +1768,14 @@ pub fn mcp(v: &Vault, project: Option<&str>, a: &Map<String, Value>, cwd: &Path)
         "replace" => Op::Add { sha: need("sha")?, items, note: s("note"), to, replaces: Some(need("replaces")?), clear_approval: flag("clear_approval") },
         "approve" => Op::Approve { sha: need("sha")?, note: s("note"), to },
         "verify" => Op::Verify { sha: need("sha")?, to },
-        "pushed" => Op::Pushed { shas: shas()?, run: need("run")?, to },
-        read @ ("green" | "red") => Op::Read { shas: shas()?, green: read == "green", to },
-        "read" => Op::Read { shas: shas()?, green: parse_result(&need("result")?)?, to },
+        "pushed" => Op::Pushed { shas: shas()?, run: s("run"), to },
+        read @ ("green" | "red") => Op::Read { shas: shas()?, green: read == "green", to, attempt: None, note: s("note") },
+        "read" => Op::Read { shas: shas()?, green: parse_result(&need("result")?)?, to, attempt: None, note: s("note") },
+        "infra" => Op::Infra { shas: shas()?, note: s("note"), attempt: None, to },
+        "check" => Op::Check { shas: shas()?, wait: None, to },
         "drop" => Op::Drop { sha: need("sha")? },
         "move" => Op::Move { sha: need("sha")?, after: s("after") },
-        other => bail!("unknown land action {other:?}, use list, show, add, replace, approve, verify, pushed, green, red, read, drop or move"),
+        other => bail!("unknown land action {other:?}, use list, show, add, replace, approve, verify, pushed, check, green, red, infra, read, drop or move"),
     };
     Ok(run(v, project, Req { op, by: s("by"), force: flag("force"), cwd: Some(cwd.to_path_buf()) })?.text)
 }
