@@ -139,8 +139,10 @@ pub enum Cmd {
     #[command(subcommand)]
     Project(ProjectCmd),
     /// Add a note
+    #[command(alias = "new", alias = "create")]
     Add(AddArgs),
     /// Print a full note
+    #[command(alias = "show", alias = "view", alias = "cat")]
     Get {
         /// Note id or slug
         id: String,
@@ -248,6 +250,7 @@ pub enum Cmd {
         _p: IgnoredProject,
     },
     /// Delete a note file (git history keeps it)
+    #[command(alias = "rm", alias = "remove")]
     Delete {
         /// Note id or slug
         id: String,
@@ -258,6 +261,7 @@ pub enum Cmd {
         _p: IgnoredProject,
     },
     /// List notes
+    #[command(alias = "ls")]
     List {
         #[command(flatten)]
         scope: ScopeArgs,
@@ -272,6 +276,7 @@ pub enum Cmd {
         filter: FilterArgs,
     },
     /// Ranked full-text search
+    #[command(alias = "find")]
     Search {
         /// Words to search for
         #[arg(required = true, num_args = 1..)]
@@ -356,6 +361,22 @@ pub enum Cmd {
         severity: Option<String>,
         #[command(flatten)]
         scope: ScopeArgs,
+    },
+    /// Pin notes, the same as `update <id> --pin`, `pins` lists them
+    Pin {
+        /// Note ids or slugs
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
+    },
+    /// Unpin notes, the same as `update <id> --unpin`
+    Unpin {
+        /// Note ids or slugs
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Every pin with its age and why it is flagged, flagged first, with the commands to verify, unpin or archive it (changes nothing)
     Pins {
@@ -574,6 +595,7 @@ pub enum Cmd {
         _p: IgnoredProject,
     },
     /// Change the state of a backlog item
+    #[command(alias = "mv")]
     Move {
         /// Item ids or slugs, several move in one vault commit
         #[arg(required = true, num_args = 1.., value_name = "ID")]
@@ -1201,6 +1223,15 @@ pub struct AddArgs {
     /// Short name, two to four words with hyphens, generated from the title when left out, a name that breaks the rule is repaired
     #[arg(long)]
     pub slug: Option<String>,
+    /// The same as --field priority=P
+    #[arg(long, hide = true)]
+    pub priority: Option<String>,
+    /// The same as --field state=S
+    #[arg(long, hide = true)]
+    pub state: Option<String>,
+    /// Taken and ignored, add records no author
+    #[arg(long, hide = true)]
+    pub by: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1461,7 +1492,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 kind: a.kind,
                 project,
                 tags: a.tags,
-                fields: ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires), a.said, a.said_on),
+                fields: ops::with_field(ops::with_field(ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires), a.said, a.said_on), "priority", a.priority), "state", a.state),
                 pinned: a.pin,
                 body: read_body_arg(a.body, a.body_file)?,
                 source: a.source,
@@ -1482,6 +1513,9 @@ pub fn run(cli: Cli) -> Result<i32> {
                 ops::add_noted(&v, req)?
             };
             let mut created = if new_project { format!("\n(created new project {})", n.scope_label()) } else { String::new() };
+            if a.by.is_some() {
+                created.push_str("\n--by was ignored, add records no author, moves and claims do");
+            }
             if let Some(m) = slug_note {
                 created.push_str(&format!("\n{m}"));
             }
@@ -1993,6 +2027,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 return Ok(1);
             }
         }
+        Cmd::Pin { ids, .. } => pin_cmd(&out, &open()?, &ids, true)?,
+        Cmd::Unpin { ids, .. } => pin_cmd(&out, &open()?, &ids, false)?,
         Cmd::Pins { scope } => {
             let v = open()?;
             let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
@@ -2249,6 +2285,18 @@ fn value_follows(cmds: &[&clap::Command], token: &str) -> Option<bool> {
         None => a.get_short() == short,
     })?;
     Some(arg.get_action().takes_values() && !inline)
+}
+
+fn pin_cmd(out: &Out, v: &Vault, ids: &[String], pin: bool) -> Result<()> {
+    let mut text = String::new();
+    let mut data = vec![];
+    for id in ids {
+        let n = ops::update(v, id, UpdateReq { pinned: Some(pin), by_user: !backlog::in_session(), ..Default::default() })?;
+        text.push_str(&format!("{} {}  {}\n", if pin { "pinned" } else { "unpinned" }, n.id, n.title));
+        data.push(n.to_json());
+    }
+    out.emit(text, Json::Array(data));
+    Ok(())
 }
 
 fn track_project(v: &Vault, id: &str, project: Option<&str>, cwd: &Path) -> Result<Option<String>> {
