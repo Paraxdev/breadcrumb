@@ -206,6 +206,14 @@ pub fn writer(n: &Note) -> Option<String> {
     }
 }
 
+/// Whether the session `me` holds the handoff, or wrote it while nobody holds it.
+pub fn held_or_written_by(n: &Note, me: &str) -> bool {
+    match n.field(HELD_BY_KEY).and_then(yaml_scalar_string).filter(|s| !s.trim().is_empty()) {
+        Some(who) => crate::session::same_holder(&who, me),
+        None => crate::session::created_by(n).is_some_and(|by| by.trim().eq_ignore_ascii_case(me.trim())),
+    }
+}
+
 /// Who holds the handoff's work now: the session that took it with `claim`, by its current name, `(gone)` once it ended.
 pub fn holder(n: &Note) -> Option<String> {
     let who = n.field(HELD_BY_KEY).and_then(yaml_scalar_string).filter(|s| !s.trim().is_empty())?;

@@ -386,3 +386,25 @@ fn the_cut_to_fit_never_takes_an_answer_that_arrived_or_leaves_a_heading_alone()
     });
     assert!(alone, "a handoff title that ends with a colon is no heading, its line stays when it is all of the handoff that fits");
 }
+
+#[test]
+fn pins_give_up_lines_before_the_board_and_the_handoff_text_when_the_digest_is_full() {
+    let (_d, v) = common::vault();
+    for i in 0..30 {
+        let n = common::add(&v, &format!("Decision {i:02} that every session has to know about, written out at its full length here"), "decision", Some("app"), &[]);
+        pin(&v, &n.id);
+    }
+    for i in 0..40 {
+        common::add(&v, &format!("Feature {i:02} that someone is building, its title as long as they come"), "feature", Some("app"), &[("state", "in-progress")]);
+    }
+    let body: String = (0..40).map(|i| format!("2026-11-{:02} app-a:\nStep {i} of the work, where it stands and what comes next.\n", 1 + i % 28)).collect();
+    ops::add(&v, AddReq { title: "Engine state".into(), kind: Some("handoff".into()), project: Some("app".into()), body: Some(body), ..Default::default() }).unwrap();
+
+    let d = ops::context(&v, Some("app"), 15).unwrap();
+    assert!(d.chars().count() <= digest::DIGEST_BUDGET, "{} chars\n{d}", d.chars().count());
+    let at = d.find("Latest handoff").unwrap();
+    let handoff = d[at..].split("\nBacklog: ").next().unwrap().split("\nJudge ").next().unwrap().chars().count();
+    assert!(handoff >= 800, "{handoff} chars of handoff\n{d}");
+    assert!(d.matches(" decision Decision ").count() <= 20, "pins keep a third of the budget: {d}");
+    assert!(d.lines().filter(|l| l.contains(" Feature ")).count() >= 20, "{d}");
+}
