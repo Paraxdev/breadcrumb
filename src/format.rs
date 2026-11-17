@@ -129,6 +129,24 @@ pub fn tailed(n: &Note, lines: usize) -> Note {
     out
 }
 
+/// The updates `get` keeps of a long handoff unless asked for the whole body.
+pub const HANDOFF_GET_UPDATES: usize = 3;
+const HANDOFF_GET_CHARS: usize = 2000;
+
+/// A copy of a long handoff with its newest updates only, what a session resumes from, None for any other note.
+pub fn handoff_short(n: &Note) -> Option<Note> {
+    if n.kind != crate::lifecycle::HANDOFF || n.body.chars().count() <= HANDOFF_GET_CHARS {
+        return None;
+    }
+    let (log, history) = crate::backlog::split_history(&n.body);
+    let (_, updates) = crate::digest::handoff_updates(&log);
+    let left = updates.len().checked_sub(HANDOFF_GET_UPDATES).filter(|&k| k > 0)?;
+    let cut = format!("({left} older updates and the first text left out, `breadcrumb get {} --full` (MCP full) prints the whole body)", n.id);
+    let mut out = n.clone();
+    out.body = [cut, updates[left..].concat().trim_end().to_string(), history.unwrap_or_default()].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n");
+    Some(out)
+}
+
 /// The body alone for piping, no History, and the cut line apart so a pipe stays clean.
 pub fn body_only(n: &Note, tail: Option<usize>) -> (String, Option<String>) {
     let (log, _) = crate::backlog::split_history(&n.body);
