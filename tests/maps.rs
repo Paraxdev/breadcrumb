@@ -1,6 +1,6 @@
 mod common;
 
-use breadcrumb::map::{self, PutReq};
+use breadcrumb::map::{self, MapLine, PutReq};
 use breadcrumb::mcp::Server;
 use breadcrumb::vault::Vault;
 use serde_json::{Map, Value, json};
@@ -121,8 +121,6 @@ src/a.rs:3 gamma, third [moved from 1]"), "{text}");
 
     let req = PutReq { area: "core".into(), project: "app".into(), drop: vec!["src/a.rs gamma".into()], ..Default::default() };
     assert_eq!(map::put(&v, req, &root).unwrap().dropped, 1);
-    let req = PutReq { area: "core".into(), project: "app".into(), lines: vec!["not a map line".into()], ..Default::default() };
-    assert!(map::put(&v, req, &root).is_err());
     assert_eq!(get(&v, &root, "core").lines().count(), 3);
 }
 
@@ -338,4 +336,89 @@ fn the_map_tool_reply_carries_the_warnings() {
     let reply: Value = serde_json::from_slice(&out).unwrap();
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.ends_with("\nsrc/a.rs:40 is past the end, the file ends at line 2"), "{text}");
+}
+
+#[test]
+fn lines_that_name_no_file_are_kept_as_notes_and_shown_with_the_map() {
+    let (_vd, v, _rd, root) = setup(&[("src/a.rs", "fn alpha() {}\n")]);
+    let r = put(
+        &v,
+        &root,
+        "core",
+        &[
+            "src/a.rs:1 alpha, entry",
+            "Trap: working copies mix CRLF and LF per file",
+            "- Node.js caches the module per realm",
+            "> src/a.rs is generated, edit the template",
+            "https://example.com/docs explains the format",
+        ],
+    );
+    let id = r.map.note.id.clone();
+    let text = r.text();
+    assert!(r.added == 1 && text.lines().next().unwrap().ends_with(", 1 lines, 4 notes (4 new)"), "{text}");
+    assert_eq!(
+        text.lines().skip(1).collect::<Vec<_>>(),
+        [
+            "taken as a note, not checked: Trap: working copies mix CRLF and LF per file",
+            "taken as a note, no file Node.js here: Node.js caches the module per realm",
+            "taken as a note, not checked: src/a.rs is generated, edit the template",
+            "taken as a note, not checked: https://example.com/docs explains the format",
+        ],
+        "{text}"
+    );
+    let g = get(&v, &root, "core");
+    assert!(g.starts_with(&format!("map core {id}: 1 line, 4 notes, all fresh\n> Trap: working copies mix CRLF and LF per file\n> Node.js caches")), "{g}");
+    assert!(g.ends_with("\nsrc/a.rs:1 alpha, entry\n"), "{g}");
+    let body = v.get(&id).unwrap().body;
+    assert!(body.starts_with("> Trap: working copies mix CRLF and LF per file\n> Node.js caches the module per realm\n"), "{body}");
+    for l in body.lines().filter(|l| l.starts_with('>')) {
+        assert!(MapLine::parse(l, None).is_none(), "an older binary keeps '{l}' as a body line too");
+    }
+
+    let again = put(&v, &root, "core", &["trap: working copies mix CRLF and LF per file"]);
+    assert!(again.text().lines().next().unwrap().ends_with(", 1 lines, 4 notes"), "{}", again.text());
+    let req = PutReq { area: "core".into(), project: "app".into(), drop: vec!["> https://example.com/docs explains the format".into()], ..Default::default() };
+    assert_eq!(map::put(&v, req, &root).unwrap().dropped, 1);
+    let b = map::brief(&v, "app", &["src/a.rs".into()], Some(&root), map::BRIEF_BUDGET).unwrap();
+    assert!(b.contains(&format!("\nmap core {id}: 1 line, 3 notes, all fresh\n> Trap: working copies")) && b.contains("\nsrc/a.rs:1 alpha, entry"), "{b}");
+}
+
+#[test]
+fn a_symbol_after_a_colon_and_a_directory_are_read_as_such() {
+    let (_vd, v, _rd, root) = setup(&[("src/a.rs", "fn alpha() {}\nfn beta() {}\n"), ("tools/harness/run.sh", "echo\n")]);
+    let r = put(&v, &root, "core", &["src/a.rs:beta( second fn", "src/a.rs:1:alpha", "tools/harness drives the harness", "tools/ every tool", "src/gone/ an old dir"]);
+    let text = r.text();
+    assert_eq!(r.added, 5, "{text}");
+    assert_eq!(
+        text.lines().skip(1).collect::<Vec<_>>(),
+        ["taken as src/a.rs beta: src/a.rs:beta( second fn", "taken as src/a.rs:1 alpha: src/a.rs:1:alpha", "taken as a directory: tools/harness drives the harness", "src/gone/ directory not found"],
+        "{text}"
+    );
+    let g = get(&v, &root, "core");
+    assert!(g.contains("\nsrc/a.rs beta, second fn\n") && g.contains("\ntools/harness/ drives the harness\n") && g.contains("\ntools/ every tool\n"), "{g}");
+    assert!(g.contains("4 fresh, 1 stale (src/gone gone)") && g.contains("[stale] src/gone/ an old dir"), "{g}");
+    let b = map::brief(&v, "app", &["tools/harness/run.sh".into()], Some(&root), map::BRIEF_BUDGET).unwrap();
+    assert!(b.contains("tools/harness/ drives the harness"), "a directory line covers the files inside it\n{b}");
+
+    std::fs::remove_dir_all(root.join("tools/harness")).unwrap();
+    assert!(get(&v, &root, "core").contains("[stale] tools/harness/ drives"));
+    let req = PutReq { area: "core".into(), project: "app".into(), drop: vec!["tools/harness/".into(), "src/gone".into()], ..Default::default() };
+    assert_eq!(map::put(&v, req, &root).unwrap().dropped, 2);
+}
+
+#[test]
+fn a_map_body_an_older_binary_wrote_reads_the_same_and_keeps_its_lines() {
+    let (_vd, v, _rd, root) = setup(&[("src/a.rs", "fn alpha() {}\nfn beta() {}\n"), ("tools/harness/run.sh", "echo\n")]);
+    let id = put(&v, &root, "core", &["src/a.rs:1 alpha, entry"]).map.note.id;
+    let mut n = v.get(&id).unwrap();
+    n.body = "Area prose written by hand\n\n- src/a.rs:1 alpha, entry\n- src/a.rs:beta( second\n- tools/harness the harness".into();
+    v.write_note(&mut n).unwrap();
+    let g = get(&v, &root, "core");
+    assert!(g.starts_with(&format!("map core {id}: 3 lines, 1 note, all fresh\nArea prose written by hand\n")), "{g}");
+    assert!(g.contains("\nsrc/a.rs beta, second\n") && g.contains("\ntools/harness the harness\n"), "{g}");
+
+    put(&v, &root, "core", &["Trap: CRLF and LF mix"]);
+    let body = v.get(&id).unwrap().body;
+    assert!(body.starts_with("Area prose written by hand\n> Trap: CRLF and LF mix\n\n- "), "{body}");
+    assert!(body.contains("\n- src/a.rs beta, second") && body.contains("\n- tools/harness the harness"), "{body}");
 }

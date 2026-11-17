@@ -925,7 +925,7 @@ pub enum MapCmd {
     Put {
         /// Map area name
         area: String,
-        /// `file:line symbol, what it does` (repeatable)
+        /// `file:line symbol, what it does` (repeatable), a line naming no file is kept as a note of the area
         #[arg(long = "line", alias = "lines", value_name = "LINE")]
         lines: Vec<String>,
         /// File with one map line per line, `-` reads stdin
@@ -934,7 +934,7 @@ pub enum MapCmd {
         /// Path glob the area covers (repeatable), default the files its lines name
         #[arg(long = "path-glob", alias = "paths", value_name = "GLOB")]
         paths: Vec<String>,
-        /// Remove the lines of a file, or one line by `file symbol` (repeatable)
+        /// Remove the lines of a file, one line by `file symbol`, or a note by its text (repeatable)
         #[arg(long, value_name = "KEY")]
         drop: Vec<String>,
         /// Project slug (default: detected from the current directory)
@@ -2331,6 +2331,7 @@ fn map_cmd(out: &Out, v: &Vault, mc: MapCmd, cwd: &Path) -> Result<()> {
             let mut data = r.map.note.to_json();
             if let Json::Object(o) = &mut data {
                 o.entry("warnings").or_insert(json!(r.warnings));
+                o.entry("taken").or_insert(json!(r.taken));
             }
             out.emit(r.text(), data);
         }
