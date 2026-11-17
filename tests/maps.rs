@@ -422,3 +422,24 @@ fn a_map_body_an_older_binary_wrote_reads_the_same_and_keeps_its_lines() {
     assert!(body.starts_with("Area prose written by hand\n> Trap: CRLF and LF mix\n\n- "), "{body}");
     assert!(body.contains("\n- src/a.rs beta, second") && body.contains("\n- tools/harness the harness"), "{body}");
 }
+
+#[test]
+fn a_put_in_a_linked_worktree_checks_the_files_its_branch_adds() {
+    let (_vd, v, rd, root) = setup(&[("src/a.rs", "fn alpha() {}\n")]);
+    common::git(&root, &["add", "."]);
+    common::git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "first"]);
+    let crumb = |dir: &Path, args: &[&str]| {
+        let o = std::process::Command::new(env!("CARGO_BIN_EXE_breadcrumb")).args(args).current_dir(dir).env("BREADCRUMB_HOME", &v.root).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    for (wt, area) in [(rd.path().join("app-wt").join("lane"), "outside"), (root.join(".claude").join("worktrees").join("inner"), "inside")] {
+        common::git(&root, &["worktree", "add", "-q", &wt.to_string_lossy(), "-b", area]);
+        write(&wt, "tools/harness/run.sh", "run\n");
+        write(&wt, "src/new.rs", "fn fresh_one() {}\n");
+        let text = crumb(&wt.join("src"), &["map", "put", area, "--line", "src/new.rs:1 fresh_one, added on the branch", "--line", "tools/harness the harness"]);
+        assert!(!text.contains("not found") && text.contains("taken as a directory"), "{area}: {text}");
+        assert!(crumb(&wt, &["map", "get", area]).contains("all fresh"), "{area}");
+        assert!(crumb(&root, &["map", "get", area]).contains("2 stale"), "{area}: the main checkout lacks the branch's files");
+    }
+}

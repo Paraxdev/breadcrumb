@@ -389,11 +389,13 @@ pub fn check_new(v: &Vault, n: &Note) -> Result<()> {
     Ok(())
 }
 
-/// The git checkout maps of `project` are checked against: `explicit`, else the checkout holding cwd, else a
-/// recorded project path on this PC.
+/// The git checkout maps of `project` are checked against: `explicit`, else the linked worktree of the project
+/// holding cwd, else the checkout holding cwd, else a recorded project path on this PC.
 pub fn repo_for(v: &Vault, project: &str, explicit: Option<&Path>, cwd: &Path) -> Result<PathBuf> {
     let dir = match explicit {
         Some(p) => crate::util::absolutize(p),
+        // A linked worktree holds its branch's files, which the checkout at the bound path may lack.
+        None if crate::git::main_checkout(cwd).is_some() && v.detect_project(cwd).as_deref() == Some(project) => cwd.to_path_buf(),
         None => crate::workflow::target_dir(v, project, None, cwd)?,
     };
     let top = crate::git::toplevel(&dir).with_context(|| format!("{} is not inside a git checkout, pass repo", path_str(&dir)))?;
