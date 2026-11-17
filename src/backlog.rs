@@ -17,6 +17,54 @@ pub const CLOSED: [&str; 3] = ["done", "shipped", "rejected"];
 pub const KINDS: [&str; 5] = ["idea", "epic", "feature", "task", "bug"];
 pub const PRIORITIES: [&str; 4] = ["p0", "p1", "p2", "p3"];
 pub const DEFAULT_ACTOR: &str = "user";
+pub const PRIORITY_WORDS: &str = "p0 urgent, p1 high, p2 normal, p3 low";
+
+/// The word given for a p0 to p3 priority field and the p value it reads as, like high as p1. None when the value
+/// already holds or no word fits, so the field's own check speaks.
+pub fn priority_word(fd: &FieldDef, input: &crate::ops::FieldInput) -> Option<(String, &'static str)> {
+    if fd.name != "priority" || fd.ty != FieldType::Enum || !PRIORITIES.iter().all(|p| fd.values.iter().any(|v| v == p)) {
+        return None;
+    }
+    let given = match input {
+        crate::ops::FieldInput::Raw(s) => s.trim().to_string(),
+        crate::ops::FieldInput::Value(v) => yaml_scalar_string(v)?.trim().to_string(),
+    };
+    if fd.values.contains(&given) {
+        return None;
+    }
+    let p = match given.to_ascii_lowercase().as_str() {
+        "p0" | "0" | "critical" | "urgent" | "blocker" | "highest" | "asap" => "p0",
+        "p1" | "1" | "high" | "important" => "p1",
+        "p2" | "2" | "medium" | "normal" | "mid" | "moderate" | "default" => "p2",
+        "p3" | "3" | "low" | "lowest" | "minor" | "later" => "p3",
+        _ => return None,
+    };
+    Some((given, p))
+}
+
+/// Why a word is no state, with the state it most likely means.
+fn unknown_state(s: &str) -> String {
+    let all = STATES.join(", ");
+    let meant = match s {
+        "land" | "landed" | "landing" | "merged" => {
+            return format!(
+                "unknown state '{s}', landed work waits in review for its check, `breadcrumb move <id> review` (MCP move with state review), and the landing queue is `breadcrumb land add <sha> --items <id>`, whose green read moves its items to review. States: {all}"
+            );
+        }
+        "todo" | "open" | "ready" | "pending" | "next" => "queued",
+        "doing" | "started" | "active" | "working" | "progress" => "in-progress",
+        "complete" | "completed" | "finished" | "closed" | "fixed" | "resolved" | "accepted" | "passed" => "done",
+        "released" | "deployed" | "live" => "shipped",
+        "cancelled" | "canceled" | "wontfix" | "dropped" | "declined" | "abandoned" | "duplicate" => "rejected",
+        "testing" | "test" | "verify" | "check" | "checking" => "review",
+        "archived" | "archive" => return format!("unknown state '{s}', archiving is the status: `breadcrumb archive <id>` (MCP update with status archived). States: {all}"),
+        _ => match crate::util::nearest(s, STATES) {
+            Some(n) => n,
+            None => return format!("unknown state '{s}', expected one of: {all}"),
+        },
+    };
+    format!("unknown state '{s}', did you mean {meant}? `breadcrumb move <id> {meant}` (MCP move with state {meant}). States: {all}")
+}
 
 pub fn seed_kinds() -> Vec<KindDef> {
     let enum_f = |name: &str, values: &[&str], default: &str, desc: &str| FieldDef {
@@ -334,7 +382,7 @@ pub fn key(n: &Note) -> String {
 pub fn check_state(s: &str) -> Result<String> {
     let s = s.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     let s = if s == "inprogress" || s == "wip" { "in-progress".to_string() } else { s };
-    if STATES.contains(&s.as_str()) { Ok(s) } else { bail!("unknown state '{s}', expected one of: {}", STATES.join(", ")) }
+    if STATES.contains(&s.as_str()) { Ok(s) } else { bail!("{}", unknown_state(&s)) }
 }
 
 fn actor(by: Option<&str>) -> String {
@@ -883,6 +931,8 @@ pub struct MoveReq {
     /// Who built the item, stamped as `built_by` on a move to review in place of the mover, empty leaves it unset.
     /// A green land read moves items for their builder.
     pub built_by: Option<String>,
+    /// A paragraph appended to the item with the move, stamped like `append`.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1362,7 +1412,8 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
     let release_note = req.release_note.as_deref().map(crate::util::one_line).filter(|s| !s.trim().is_empty());
     let waiting_for_user = if agent_check && req.verdict == Some(Verdict::Pass) { open_user_steps(&n) } else { vec![] };
     let to = if waiting_for_user.is_empty() { to } else { "review".to_string() };
-    let same = from == to && req.verdict.is_none() && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) && unchanged(RELEASE_NOTE_KEY, &release_note);
+    let note = req.note.as_deref().map(|t| crate::session::strip_own_stamp(&crate::util::normalize_newlines(t))).filter(|t| !t.trim().is_empty());
+    let same = from == to && note.is_none() && req.verdict.is_none() && unchanged("resolution", &resolution) && unchanged("shipped_in", &shipped_in) && unchanged(RELEASE_NOTE_KEY, &release_note);
     let ticked = match &req.check {
         Some(c) => apply_check(&mut n, c, keep_user)?,
         None => 0,
@@ -1414,6 +1465,9 @@ pub fn move_item(v: &Vault, id: &str, req: MoveReq) -> Result<MoveResult> {
             clear_claim(&mut n);
         }
         _ => {}
+    }
+    if let Some(t) = &note {
+        n.body = insert_before_history(&n.body, &format!("{}\n{t}", crate::session::append_head()));
     }
     if to == "review" && from != "review" {
         match req.built_by.clone().or_else(|| session_name(req.by.as_deref())).filter(|b| !b.trim().is_empty()) {

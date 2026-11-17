@@ -226,13 +226,17 @@ pub fn assign(v: &Vault, n: &mut Note, given: Option<&str>) -> Option<String> {
 }
 
 /// An explicit rename, the one thing that changes a slug. A clash is an error here since the note already has a name.
-pub fn rename(v: &Vault, n: &mut Note, given: &str) -> Result<()> {
-    let s = check_given(given, v)?;
+/// A name too long for the rule is cut as `assign` does, and the returned line says so.
+pub fn rename(v: &Vault, n: &mut Note, given: &str) -> Result<Option<String>> {
+    let (s, how) = match repair(given).filter(|(_, cut)| *cut && !well_formed(&given.trim().to_ascii_lowercase())) {
+        Some((s, _)) => (check_given(&s, v)?, Some("slug shortened to")),
+        None => (check_given(given, v)?, None),
+    };
     if v.load_notes().iter().any(|o| o.id != n.id && (o.slug().as_deref() == Some(s.as_str()) || o.id == s)) {
         bail!("slug '{s}' is already taken");
     }
-    n.set_field(SLUG_KEY, Value::String(s));
-    Ok(())
+    n.set_field(SLUG_KEY, Value::String(s.clone()));
+    Ok(how.map(|h| format!("{h} {s}")))
 }
 
 #[derive(Clone, Debug, Default)]

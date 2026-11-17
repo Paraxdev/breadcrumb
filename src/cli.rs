@@ -5,7 +5,7 @@ use crate::importer;
 use crate::note::Note;
 use crate::question;
 use crate::kind::{self, KindDef};
-use crate::ops::{self, AddReq, Filter, Scope, ScopeSel, SortKey, StatusFilter, UpdateReq};
+use crate::ops::{self, AddReq, Filter, Scope, ScopeSel, SortKey, UpdateReq};
 use crate::util::{path_str, read_body_arg};
 use crate::vault::{Vault, resolve_vault_path};
 use crate::workflow;
@@ -89,20 +89,38 @@ pub struct FilterArgs {
     /// Hide notes this session wrote last
     #[arg(long)]
     pub others: bool,
+    /// Only backlog items stored in this state, like queued or review,in-progress (repeatable)
+    #[arg(long = "state", value_name = "STATE")]
+    pub states: Vec<String>,
+    /// Only handoffs of this track
+    #[arg(long, value_name = "WORD")]
+    pub track: Option<String>,
 }
 
 impl FilterArgs {
     fn filter(&self) -> Result<Filter> {
+        let (status, mut states) = ops::status_or_state(&self.status)?;
+        if let Some(s) = states.first() {
+            eprintln!("note: --status is active, archived or all, {s} is a backlog state, read as --state {s}");
+        }
+        states.extend(ops::check_states(&self.states)?);
         Ok(Filter {
             kind: self.kind.clone(),
             tags: self.tags.clone(),
-            status: StatusFilter::parse(&self.status)?,
-            wheres: self.wheres.iter().cloned().chain(self.refs.iter().map(|r| format!("ref={r}"))).collect(),
+            status,
+            wheres: self
+                .wheres
+                .iter()
+                .cloned()
+                .chain(self.refs.iter().map(|r| format!("ref={r}")))
+                .chain(self.track.iter().map(|t| format!("{}={}", crate::lifecycle::TRACK_KEY, t.trim().to_lowercase())))
+                .collect(),
             pinned: self.pinned,
             limit: self.limit,
             sort: SortKey::parse(&self.sort)?,
             since: self.since.as_deref().map(ops::parse_since).transpose()?,
             others: self.others,
+            states,
         })
     }
 }
@@ -121,8 +139,10 @@ pub enum Cmd {
     #[command(subcommand)]
     Project(ProjectCmd),
     /// Add a note
+    #[command(alias = "new", alias = "create")]
     Add(AddArgs),
     /// Print a full note
+    #[command(alias = "show", alias = "view", alias = "cat")]
     Get {
         /// Note id or slug
         id: String,
@@ -139,14 +159,18 @@ pub enum Cmd {
         _p: IgnoredProject,
     },
     /// Change a note
+    #[command(alias = "edit")]
     Update(UpdateArgs),
     /// Append a paragraph to a note body ("-" reads stdin), the date and session line is added for you
     Append {
         /// Note id or slug
         id: String,
         /// The paragraph, "-" reads stdin
-        #[arg(allow_hyphen_values = true)]
-        text: String,
+        #[arg(allow_hyphen_values = true, required_unless_present = "body")]
+        text: Option<String>,
+        /// The paragraph, the same as the positional one
+        #[arg(long, alias = "text", hide = true, allow_hyphen_values = true, conflicts_with = "text")]
+        body: Option<String>,
         #[command(flatten)]
         _p: IgnoredProject,
     },
@@ -226,6 +250,7 @@ pub enum Cmd {
         _p: IgnoredProject,
     },
     /// Delete a note file (git history keeps it)
+    #[command(alias = "rm", alias = "remove")]
     Delete {
         /// Note id or slug
         id: String,
@@ -236,6 +261,7 @@ pub enum Cmd {
         _p: IgnoredProject,
     },
     /// List notes
+    #[command(alias = "ls")]
     List {
         #[command(flatten)]
         scope: ScopeArgs,
@@ -250,6 +276,7 @@ pub enum Cmd {
         filter: FilterArgs,
     },
     /// Ranked full-text search
+    #[command(alias = "find")]
     Search {
         /// Words to search for
         #[arg(required = true, num_args = 1..)]
@@ -334,6 +361,22 @@ pub enum Cmd {
         severity: Option<String>,
         #[command(flatten)]
         scope: ScopeArgs,
+    },
+    /// Pin notes, the same as `update <id> --pin`, `pins` lists them
+    Pin {
+        /// Note ids or slugs
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
+    },
+    /// Unpin notes, the same as `update <id> --unpin`
+    Unpin {
+        /// Note ids or slugs
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<String>,
+        #[command(flatten)]
+        _p: IgnoredProject,
     },
     /// Every pin with its age and why it is flagged, flagged first, with the commands to verify, unpin or archive it (changes nothing)
     Pins {
@@ -552,6 +595,7 @@ pub enum Cmd {
         _p: IgnoredProject,
     },
     /// Change the state of a backlog item
+    #[command(alias = "mv")]
     Move {
         /// Item ids or slugs, several move in one vault commit
         #[arg(required = true, num_args = 1.., value_name = "ID")]
@@ -582,6 +626,9 @@ pub enum Cmd {
         /// Add a ref like commit:abc123, run:wf_1, branch:fix/x, pr:12, a bare sha reads as commit:<sha>, -type:value removes (repeatable)
         #[arg(long = "ref", alias = "refs", value_name = "REF", allow_hyphen_values = true)]
         refs: Vec<String>,
+        /// A paragraph appended to the item with the move, stamped like `append`
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        note: Option<String>,
         #[command(flatten)]
         _p: IgnoredProject,
     },
@@ -1176,6 +1223,15 @@ pub struct AddArgs {
     /// Short name, two to four words with hyphens, generated from the title when left out, a name that breaks the rule is repaired
     #[arg(long)]
     pub slug: Option<String>,
+    /// The same as --field priority=P
+    #[arg(long, hide = true)]
+    pub priority: Option<String>,
+    /// The same as --field state=S
+    #[arg(long, hide = true)]
+    pub state: Option<String>,
+    /// Taken and ignored, add records no author
+    #[arg(long, hide = true)]
+    pub by: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1245,6 +1301,12 @@ pub struct UpdateArgs {
     /// Id or slug this note replaces (repeatable), a handoff also unpins it and the digest stops showing it
     #[arg(long, value_name = "ID")]
     pub supersedes: Vec<String>,
+    /// The same as --field priority=P
+    #[arg(long, hide = true)]
+    pub priority: Option<String>,
+    /// The same as --field state=S
+    #[arg(long, hide = true)]
+    pub state: Option<String>,
     #[command(flatten)]
     pub _p: IgnoredProject,
 }
@@ -1272,15 +1334,10 @@ pub fn main_entry() -> i32 {
     crate::upgrade::cleanup_old_exes();
     let cli = match Cli::try_parse() {
         Ok(c) => c,
-        Err(e) => {
-            if e.kind() == clap::error::ErrorKind::UnknownArgument
-                && let Some(m) = mistyped_flag()
-            {
-                eprintln!("error: {m}");
-                return 2;
-            }
-            e.exit()
-        }
+        Err(e) => match forgiven(&e) {
+            Ok(c) => c,
+            Err(code) => return code,
+        },
     };
     if let Cmd::Hook(h) = &cli.cmd {
         run_hook(cli.vault.as_deref(), h);
@@ -1430,7 +1487,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 kind: a.kind,
                 project,
                 tags: a.tags,
-                fields: ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires), a.said, a.said_on),
+                fields: ops::with_field(ops::with_field(ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&a.fields)?, crate::digest::SUMMARY_KEY, a.summary), crate::note::EXPIRES_KEY, a.expires), a.said, a.said_on), "priority", a.priority), "state", a.state),
                 pinned: a.pin,
                 body: read_body_arg(a.body, a.body_file)?,
                 source: a.source,
@@ -1451,6 +1508,9 @@ pub fn run(cli: Cli) -> Result<i32> {
                 ops::add_noted(&v, req)?
             };
             let mut created = if new_project { format!("\n(created new project {})", n.scope_label()) } else { String::new() };
+            if a.by.is_some() {
+                created.push_str("\n--by was ignored, add records no author, moves and claims do");
+            }
             if let Some(m) = slug_note {
                 created.push_str(&format!("\n{m}"));
             }
@@ -1527,14 +1587,14 @@ pub fn run(cli: Cli) -> Result<i32> {
             {
                 bail!("{src} was empty, the body stays as it is, --body \"\" empties it");
             }
-            let n = ops::update(
+            let (n, notes) = ops::update_noted(
                 &v,
                 &u.id,
                 UpdateReq {
                     title: u.title,
                     kind: u.kind,
                     tags: u.tags,
-                    fields: ops::with_field(ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires), u.said, u.said_on), backlog::RELEASE_NOTE_KEY, u.release_note),
+                    fields: ops::with_field(ops::with_said(ops::with_field(ops::with_field(ops::parse_field_args(&u.fields)?, crate::digest::SUMMARY_KEY, u.summary), crate::note::EXPIRES_KEY, u.expires), u.said, u.said_on), backlog::RELEASE_NOTE_KEY, u.release_note).into_iter().chain(ops::with_field(ops::with_field(vec![], "priority", u.priority), "state", u.state)).collect(),
                     unset: u.unset,
                     body,
                     replace: u.replace.first().cloned().zip(u.replace.get(1).cloned()),
@@ -1552,9 +1612,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             )?;
             let home = n.project.as_deref().unwrap_or("global");
             let ignored = u._p.ignored_project.filter(|p| !p.eq_ignore_ascii_case(home)).map(|p| format!("\n-p {p} was ignored, the note stays in {home}, no command moves a note to another project")).unwrap_or_default();
-            out.emit(format!("updated {}  {}{}{ignored}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
+            let notes: String = notes.iter().map(|m| format!("\n{m}")).collect();
+            out.emit(format!("updated {}  {}{notes}{}{ignored}", n.id, n.title, crate::lifecycle::superseded_text(&v, &u.supersedes)), n.to_json());
         }
-        Cmd::Append { id, text, .. } => {
+        Cmd::Append { id, text, body, .. } => {
+            let text = text.or(body).unwrap_or_default();
             not_a_flag(&text, &format!("append {id}"))?;
             let text = read_body_arg(Some(text), None)?.unwrap_or_default();
             let n = ops::append(&open()?, &id, &text)?;
@@ -1920,7 +1982,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             out.emit(format!("withdrew the question on {}", backlog::item_summary(&n)), n.to_json());
         }
         Cmd::Release { id, by, force, project } => release_cmd(&out, &open()?, &cwd, &id, by.as_deref(), force, project.as_deref())?,
-        Cmd::Move { ids, state, position, resolution, shipped_in, by, check, steps, release_note, refs, .. } => {
+        Cmd::Move { ids, state, position, resolution, shipped_in, by, check, steps, release_note, refs, note, .. } => {
             if let Some(pos) = backlog::queue_position(&state, position.as_deref())? {
                 let [id] = ids.as_slice() else {
                     bail!("position takes one id, it would put each of them in the same place");
@@ -1930,7 +1992,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             let check = check.as_deref().map(backlog::Check::parse).transpose()?;
-            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, by_user: !backlog::in_session(), ..Default::default() };
+            let req = MoveReq { state, resolution, shipped_in, by, check, refs, steps, release_note, note, by_user: !backlog::in_session(), ..Default::default() };
             let moved_json = |r: &backlog::MoveResult| json!({"from": r.from, "to": r.to, "changed": r.changed, "unmet_acceptance": r.unmet, "warnings": r.warnings, "replaced_steps": r.replaced, "waiting_for_user": waiting_json(r), "left_for_user": steps_json(&r.kept_for_user), "note": r.note.to_json()});
             if let [id] = ids.as_slice() {
                 let r = backlog::move_item(&open()?, id, req)?;
@@ -1960,6 +2022,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                 return Ok(1);
             }
         }
+        Cmd::Pin { ids, .. } => pin_cmd(&out, &open()?, &ids, true)?,
+        Cmd::Unpin { ids, .. } => pin_cmd(&out, &open()?, &ids, false)?,
         Cmd::Pins { scope } => {
             let v = open()?;
             let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
@@ -2167,9 +2231,46 @@ fn not_a_flag(text: &str, usage: &str) -> Result<()> {
     Ok(())
 }
 
+/// A command line clap refused, read the way an agent meant it (a note on stderr says how), or the error with the
+/// nearest valid line.
+fn forgiven(e: &clap::Error) -> std::result::Result<Cli, i32> {
+    use clap::CommandFactory;
+    use clap::error::ErrorKind;
+    use crate::forgive;
+    if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand) {
+        e.exit()
+    }
+    let root = Cli::command();
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    let rewritten = forgive::rewrite(&root, &args);
+    if let Some(r) = &rewritten
+        && let Ok(c) = Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r.iter().cloned()))
+    {
+        eprintln!("note: read as `{}`", forgive::line(r));
+        return Ok(c);
+    }
+    let retried = rewritten.and_then(|r| Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r.iter().cloned())).err().map(|e2| (r, e2)));
+    let hint = |bad: Option<forgive::Bad>, r: &[String]| bad.and_then(|b| forgive::suggest(&root, r, &b));
+    if e.kind() == ErrorKind::UnknownArgument
+        && let Some((m, flag)) = mistyped_flag()
+    {
+        eprintln!("error: {m}");
+        let s = retried.as_ref().and_then(|(r, _)| hint(Some(forgive::Bad::Flag(flag.clone())), r)).or_else(|| hint(Some(forgive::Bad::Flag(flag)), &args));
+        if let Some(s) = s {
+            eprintln!("did you mean: {s}");
+        }
+        return Err(2);
+    }
+    let _ = e.print();
+    if let Some(s) = retried.as_ref().and_then(|(r, e2)| hint(forgive::Bad::from_error(e2), r)).or_else(|| hint(forgive::Bad::from_error(e), &args)) {
+        eprintln!("did you mean: {s}");
+    }
+    Err(e.exit_code())
+}
+
 /// add and idea take a title with a leading hyphen, so clap reads a mistyped flag before it as the title and blames
 /// the next word. This names the flag instead.
-fn mistyped_flag() -> Option<String> {
+fn mistyped_flag() -> Option<(String, String)> {
     use clap::CommandFactory;
     let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     if args.iter().any(|a| a == "--") {
@@ -2194,7 +2295,7 @@ fn mistyped_flag() -> Option<String> {
             None => {
                 let flag = t.split('=').next().unwrap_or_default();
                 if flag != "--help" && flag.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()) && !r.contains(char::is_whitespace)) {
-                    return Some(format!("unknown flag {flag}, `breadcrumb {} --help` lists the flags, and text that starts with -- goes last, after a lone --", sub.get_name()));
+                    return Some((format!("unknown flag {flag}, `breadcrumb {} --help` lists the flags, and text that starts with -- goes last, after a lone --", sub.get_name()), t.clone()));
                 }
             }
         }
@@ -2203,7 +2304,7 @@ fn mistyped_flag() -> Option<String> {
 }
 
 /// None when `token` is no flag of `cmds`, else whether its value is the token after it.
-fn value_follows(cmds: &[&clap::Command], token: &str) -> Option<bool> {
+pub(crate) fn value_follows(cmds: &[&clap::Command], token: &str) -> Option<bool> {
     let (long, short, inline) = match token.strip_prefix("--") {
         Some(l) => (Some(l.split('=').next().unwrap_or_default()), None, l.contains('=')),
         None => {
@@ -2216,6 +2317,18 @@ fn value_follows(cmds: &[&clap::Command], token: &str) -> Option<bool> {
         None => a.get_short() == short,
     })?;
     Some(arg.get_action().takes_values() && !inline)
+}
+
+fn pin_cmd(out: &Out, v: &Vault, ids: &[String], pin: bool) -> Result<()> {
+    let mut text = String::new();
+    let mut data = vec![];
+    for id in ids {
+        let n = ops::update(v, id, UpdateReq { pinned: Some(pin), by_user: !backlog::in_session(), ..Default::default() })?;
+        text.push_str(&format!("{} {}  {}\n", if pin { "pinned" } else { "unpinned" }, n.id, n.title));
+        data.push(n.to_json());
+    }
+    out.emit(text, Json::Array(data));
+    Ok(())
 }
 
 fn track_project(v: &Vault, id: &str, project: Option<&str>, cwd: &Path) -> Result<Option<String>> {

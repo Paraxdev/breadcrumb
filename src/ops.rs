@@ -160,7 +160,9 @@ pub enum FieldInput {
     Value(Value),
 }
 
-fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, FieldInput)>) -> Result<()> {
+/// Sets the fields and returns what it read differently from what was given, like a priority word on the p scale.
+fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, FieldInput)>) -> Result<Vec<String>> {
+    let mut notes = vec![];
     let said = fields.iter().any(|(key, _)| key.trim() == crate::note::SAID_KEY);
     let said_on = fields.iter().any(|(key, _)| key.trim() == crate::note::SAID_ON_KEY);
     for (key, input) in fields {
@@ -217,7 +219,14 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
             bail!("'{key}' is set by merge, use the merge tool or `breadcrumb merge`");
         }
         if key == "status" {
-            bail!("'status' is the active or archived flag of a note, backlog progress is the field state, like state=queued");
+            let given = match &input {
+                FieldInput::Raw(s) => s.trim().to_string(),
+                FieldInput::Value(x) => yaml_scalar_string(x).unwrap_or_default(),
+            };
+            let state = crate::backlog::check_state(&given).unwrap_or_else(|_| "queued".into());
+            bail!(
+                "'status' is the active or archived flag of a note, set with --status (MCP status), backlog progress is the field state: --field state={state} (MCP fields {{\"state\": \"{state}\"}}), or `breadcrumb move <id> {state}` for an existing item"
+            );
         }
         if RESERVED_KEYS.contains(&key.as_str()) {
             bail!("'{key}' is note metadata, not a field, use the dedicated option (title, kind, tags, links, status, pin)");
@@ -227,6 +236,13 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
         }
         let val = match k.field(&key) {
             Some(fd) => {
+                let input = match crate::backlog::priority_word(fd, &input) {
+                    Some((word, p)) => {
+                        notes.push(format!("priority {word} taken as {p} ({})", crate::backlog::PRIORITY_WORDS));
+                        FieldInput::Raw(p.to_string())
+                    }
+                    None => input,
+                };
                 let mut val = match input {
                     FieldInput::Raw(s) => fd.parse_value(&s)?,
                     FieldInput::Value(x) => fd.coerce(x)?,
@@ -252,7 +268,7 @@ fn apply_fields(v: &Vault, note: &mut Note, k: &KindDef, fields: Vec<(String, Fi
     {
         bail!("said_on '{d}' must be a date like 2026-10-30");
     }
-    Ok(())
+    Ok(notes)
 }
 
 /// `slug` is accepted as a field too, since the MCP `fields` argument is where an agent may put it.
@@ -419,7 +435,8 @@ pub(crate) fn add_held(v: &Vault, req: AddReq) -> Result<(Note, Option<String>)>
     }
     let (fields, field_slug) = split_slug(req.fields);
     let slug_note = crate::slug::assign(v, &mut note, req.slug.or(field_slug).as_deref());
-    apply_fields(v, &mut note, &k, fields)?;
+    let field_notes = apply_fields(v, &mut note, &k, fields)?;
+    let slug_note = Some(slug_note.into_iter().chain(field_notes).collect::<Vec<_>>().join("\n")).filter(|s| !s.is_empty());
     if let Some(t) = req.track.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         if t.split_whitespace().count() > 1 {
             bail!("track '{t}' must be one word");
@@ -645,12 +662,24 @@ pub fn version(n: &Note) -> String {
 
 pub const CONFLICT: &str = "note changed since it was loaded";
 
-fn check_status(s: &str) -> Result<String> {
+/// A backlog state given as the status names the call that sets it on `id`.
+fn check_status(s: &str, id: &str) -> Result<String> {
     let s = s.trim().to_ascii_lowercase();
-    if s == "active" || s == "archived" { Ok(s) } else { bail!("status must be 'active' or 'archived', got '{s}'") }
+    if s == "active" || s == "archived" {
+        return Ok(s);
+    }
+    if let Ok(state) = crate::backlog::check_state(&s) {
+        bail!("status is active or archived, '{state}' is a backlog state, the field state: `breadcrumb move {id} {state}` (MCP move with state {state})");
+    }
+    bail!("status must be 'active' or 'archived', got '{s}'")
 }
 
 pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
+    update_noted(v, id, req).map(|r| r.0)
+}
+
+/// `update` and what it read differently from what was given, a shortened slug or a priority word.
+pub fn update_noted(v: &Vault, id: &str, req: UpdateReq) -> Result<(Note, Vec<String>)> {
     let _g = v.lock()?;
     let mut note = v.get(id)?;
     let before = note.clone();
@@ -700,11 +729,12 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
             }
         }
     }
+    let mut notes = vec![];
     let (fields, field_slug) = split_slug(req.fields);
     if let Some(s) = req.slug.or(field_slug) {
-        crate::slug::rename(v, &mut note, &s)?;
+        notes.extend(crate::slug::rename(v, &mut note, &s)?);
     }
-    apply_fields(v, &mut note, &k, fields)?;
+    notes.extend(apply_fields(v, &mut note, &k, fields)?);
     if req.set_paths.is_some() || !req.paths.is_empty() {
         let mut globs = match &req.set_paths {
             Some(xs) => crate::recall::normalize_globs(xs)?,
@@ -739,7 +769,7 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
         note.pinned = p;
     }
     if let Some(s) = &req.status {
-        note.status = check_status(s)?;
+        note.status = check_status(s, &note.id)?;
         note.clear_kept("status");
     }
     if let Some(links) = req.links {
@@ -807,7 +837,7 @@ pub fn update(v: &Vault, id: &str, req: UpdateReq) -> Result<Note> {
     }
     touched.push(v.write_note(&mut note)?);
     v.commit(&touched, &commit_msg("update", &note))?;
-    Ok(note)
+    Ok((note, notes))
 }
 
 pub fn append(v: &Vault, id: &str, text: &str) -> Result<Note> {
@@ -913,7 +943,7 @@ fn match_link_target(note: &Note, to: &str) -> Result<Option<String>> {
 }
 
 pub fn set_status(v: &Vault, id: &str, status: &str) -> Result<Note> {
-    let status = check_status(status)?;
+    let status = check_status(status, id)?;
     let _g = v.lock()?;
     let mut note = v.get(id)?;
     if note.status == status {
@@ -952,8 +982,19 @@ impl StatusFilter {
             "active" => StatusFilter::Active,
             "archived" => StatusFilter::Archived,
             "all" | "any" => StatusFilter::All,
-            other => bail!("status filter must be active, archived or all, got '{other}'"),
+            other => bail!("status filter must be active, archived or all, got '{other}', backlog items filter by --state (MCP list state)"),
         })
+    }
+}
+
+/// A status filter, or a backlog state given as one, which reads as the state filter of active notes.
+pub fn status_or_state(s: &str) -> Result<(StatusFilter, Vec<String>)> {
+    match StatusFilter::parse(s) {
+        Ok(f) => Ok((f, vec![])),
+        Err(e) => match crate::backlog::check_state(s) {
+            Ok(state) => Ok((StatusFilter::Active, vec![state])),
+            Err(_) => Err(e),
+        },
     }
 }
 
@@ -971,7 +1012,7 @@ impl SortKey {
             "updated" => SortKey::Updated,
             "created" => SortKey::Created,
             "title" => SortKey::Title,
-            other => bail!("sort must be updated, created or title, got '{other}'"),
+            other => bail!("sort must be updated, created or title, got '{other}'{}", crate::util::nearest(other, ["updated", "created", "title"]).map(|n| format!(", did you mean {n}?")).unwrap_or_default()),
         })
     }
 }
@@ -989,6 +1030,20 @@ pub struct Filter {
     pub since: Option<DateTime<Utc>>,
     /// Hide notes whose latest write was by this session.
     pub others: bool,
+    /// Only backlog items stored in one of these states, checked by `check_states`.
+    pub states: Vec<String>,
+}
+
+/// States for `Filter::states`, comma separated or repeated, each a stored backlog state.
+pub fn check_states(raw: &[String]) -> Result<Vec<String>> {
+    let mut out = vec![];
+    for w in raw.iter().flat_map(|r| r.split(',')).map(str::trim).filter(|w| !w.is_empty()) {
+        if w.eq_ignore_ascii_case(crate::backlog::BUILDING) || w.eq_ignore_ascii_case("waiting-on-user") {
+            bail!("{w} is a board column, not a stored state, `breadcrumb board --state {w}` shows it, its items are stored as queued");
+        }
+        out.push(crate::backlog::check_state(w)?);
+    }
+    Ok(out)
 }
 
 /// A date (from its start, UTC), an RFC3339 time, or `2h`, `3d`, `30m` ago.
@@ -1087,6 +1142,9 @@ pub fn filter_notes(notes: Vec<Note>, scope: &Scope, f: &Filter) -> Result<Vec<N
             continue;
         }
         if f.others && me.is_some() && crate::session::last_writer(&n) == me {
+            continue;
+        }
+        if !f.states.is_empty() && !(crate::backlog::is_item(&n) && f.states.contains(&crate::backlog::state(&n))) {
             continue;
         }
         let mut ok = true;
