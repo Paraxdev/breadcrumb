@@ -303,7 +303,7 @@ fn a_note_on_add_shows_in_the_list_and_digest_and_no_step_clears_it() {
     let e = setup();
     item(&e, "x", "queued");
     let out = ok(&e, "w", &["land", "-p", "fx", "add", S1, "--note", "settle probe first\nworktree D:/wt/a, branch lane/a"]);
-    assert!(out.contains("note: settle probe first worktree D:/wt/a, branch lane/a"), "{out}");
+    assert!(out.contains("note: settle probe first\n    worktree D:/wt/a, branch lane/a"), "the reply keeps the line break: {out}");
     assert!(ok(&e, "r", &["land", "-p", "fx"]).contains("note: \"settle probe first worktree"));
     assert!(digest(&e, "r").contains("note: \"settle probe first worktree"));
 
@@ -312,7 +312,7 @@ fn a_note_on_add_shows_in_the_list_and_digest_and_no_step_clears_it() {
     let out = ok(&e, "r", &["land", "-p", "fx", "verify", S1]);
     assert!(!out.contains("pending harness") && out.contains("note: settle probe first"), "verify clears the condition only: {out}");
     ok(&e, "w", &["land", "-p", "fx", "pushed", S1, "--run", "3"]);
-    assert_eq!(entries(&e)[0].memo.as_deref(), Some("settle probe first worktree D:/wt/a, branch lane/a"));
+    assert_eq!(entries(&e)[0].memo.as_deref(), Some("settle probe first\nworktree D:/wt/a, branch lane/a"));
     assert!(entries(&e)[0].note.is_none());
     ok(&e, "r", &["land", "-p", "fx", "read", S1, "green"]);
     assert!(ok(&e, "r", &["land", "-p", "fx", "list", "--all"]).contains("note: \"settle probe first"));
@@ -320,7 +320,7 @@ fn a_note_on_add_shows_in_the_list_and_digest_and_no_step_clears_it() {
     let long = "x".repeat(200);
     ok(&e, "w", &["land", "-p", "fx", "add", S2, "--note", &long]);
     assert!(digest(&e, "r").contains(&format!("note: \"{}...\"", "x".repeat(57))));
-    assert_eq!(entries(&e)[1].memo.as_ref().unwrap().chars().count(), 200, "the note is kept whole up to 2000 chars, the list and digest cut it");
+    assert_eq!(entries(&e)[1].memo.as_ref().unwrap().chars().count(), 200, "the note is kept whole, the list and digest cut it");
 
     let srv = breadcrumb::mcp::Server { vault_root: e.v.root.clone(), cwd: e.v.root.clone() };
     srv.call_tool("land", json!({"action": "add", "project": "fx", "sha": S3, "note": "from mcp"}).as_object().unwrap()).unwrap();
@@ -573,15 +573,22 @@ fn a_bad_parked_line_is_skipped_kept_and_named_by_doctor() {
 }
 
 #[test]
-fn an_approval_note_is_kept_to_120_characters() {
+fn add_and_approve_notes_are_kept_whole_and_lists_cut_them() {
     let e = setup();
     item(&e, "x", "queued");
-    let long = "word ".repeat(100);
+    let long = format!("{}\nsecond line\r\nthird line, the end", "word ".repeat(600));
     ok(&e, "w", &["land", "-p", "fx", "add", S1, "--note", &long]);
-    ok(&e, "r", &["land", "-p", "fx", "approve", S1, "--note", &long]);
+    ok(&e, "r", &["land", "-p", "fx", "approve", S1, "--note", &format!("approved\n{long}")]);
     let es = entries(&e);
-    assert!(es[0].note.as_ref().unwrap().chars().count() <= 120, "{:?}", es[0].note);
-    assert!(es[0].memo.as_ref().unwrap().chars().count() > 400, "the add note keeps more");
+    let memo = es[0].memo.as_deref().unwrap();
+    assert!(memo.chars().count() > 3000 && memo.ends_with("word\nsecond line\nthird line, the end"), "{memo:?}");
+    assert!(es[0].note.as_deref().unwrap().starts_with("approved\nword ") && es[0].note.as_deref().unwrap().ends_with("the end"), "{:?}", es[0].note);
+    let list = ok(&e, "r", &["land", "-p", "fx"]);
+    assert_eq!(list.lines().count(), 1, "the list keeps one line per entry: {list}");
+    assert!(list.contains("approved (approved word word") && !list.contains("the end"), "{list}");
+    let show = ok(&e, "r", &["land", "-p", "fx", "show", S1]);
+    assert!(show.contains("word\n    second line\n    third line, the end\n"), "show prints the note whole: {show}");
+    assert!(show.contains("  approval note: approved\n    word ") && show.contains("the end (by r)"), "{show}");
 }
 
 #[test]
@@ -680,4 +687,127 @@ fn the_next_line_names_a_renamed_session_by_its_current_name() {
     file("neocad-bd");
     let list = as_session(&["land", "-p", "fx"]);
     assert!(list.contains("read the run: neocad-bd aaaaaaaa (you)") && !list.contains("neocad-e4"), "{list}");
+}
+
+fn state_of(e: &Env, id: &str) -> String {
+    breadcrumb::backlog::state(&e.v.get(id).unwrap())
+}
+
+#[test]
+fn a_piece_entry_records_the_piece_and_leaves_the_item_where_it_is() {
+    let e = setup();
+    let a = item(&e, "Manual", "in-progress");
+    let out = ok(&e, "w", &["land", "-p", "fx", "add", S1, "--items", &a, "--piece", "10e manual pictures"]);
+    assert!(out.contains("lands the piece \"10e manual pictures\" of"), "{out}");
+    ok(&e, "w", &["land", "-p", "fx", "add", S2, "--items", &a]);
+    assert!(ok(&e, "r", &["land", "-p", "fx"]).contains("piece: \"10e manual pictures\""));
+    assert!(ok(&e, "r", &["land", "-p", "fx", "show", S1]).contains("  piece: 10e manual pictures"));
+    approved_only(&e, &[S1, S2]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S1, "--run", "7"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S1, "green"]);
+    assert!(out.contains("recorded the piece \"10e manual pictures\" on"), "{out}");
+    assert_eq!(state_of(&e, &a), "in-progress", "{out}");
+    let n = e.v.get(&a).unwrap();
+    assert!(n.refs().contains(&format!("commit:{S1}")), "{:?}", n.refs());
+    let pieces = breadcrumb::backlog::pieces(&n);
+    assert!(pieces.len() == 1 && pieces[0].starts_with("10e manual pictures (1111111 run 7, "), "{pieces:?}");
+    assert!(n.body.contains("piece \"10e manual pictures\" landed in 1111111 run 7, read green (by r)"), "{}", n.body);
+    assert!(ok(&e, "r", &["get", &a]).contains("10e manual pictures (1111111 run 7"));
+    ok(&e, "r", &["land", "-p", "fx", "read", S1, "green"]);
+    assert_eq!(breadcrumb::backlog::pieces(&e.v.get(&a).unwrap()).len(), 1, "a second read records the piece once");
+
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S2, "--run", "8"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S2, "green"]);
+    assert_eq!(state_of(&e, &a), "review", "the entry without a piece moves it: {out}");
+    let n = e.v.get(&a).unwrap();
+    assert!(n.refs().contains(&format!("commit:{S1}")) && n.refs().contains(&format!("commit:{S2}")), "{:?}", n.refs());
+    let review = ok(&e, "r", &["review", "--project", "fx"]);
+    assert!(review.contains("pieces landed: 10e manual pictures (1111111 run 7, "), "{review}");
+
+    let b = item(&e, "Other", "in-progress");
+    let srv = breadcrumb::mcp::Server { vault_root: e.v.root.clone(), cwd: e.v.root.clone() };
+    srv.call_tool("land", json!({"action": "add", "project": "fx", "sha": S3, "items": [b], "piece": "part one"}).as_object().unwrap()).unwrap();
+    assert_eq!(entries(&e)[2].piece.as_deref(), Some("part one"));
+    assert!(std::fs::read_to_string(queue_file(&e)).unwrap().contains("\"piece\":\"part one\""));
+}
+
+#[test]
+fn a_piece_read_last_moves_an_item_whose_whole_entry_is_green() {
+    let e = setup();
+    let a = item(&e, "Manual", "in-progress");
+    ok(&e, "w", &["land", "-p", "fx", "add", S1, "--items", &a, "--piece", "part one"]);
+    ok(&e, "w", &["land", "-p", "fx", "add", S2, "--items", &a]);
+    approved_only(&e, &[S1, S2]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S1, "--run", "1"]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S2, "--run", "2"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S2, "green"]);
+    assert!(out.contains("1111111 pushed still carries it"), "{out}");
+    assert_eq!(state_of(&e, &a), "in-progress");
+    let n = e.v.get(&a).unwrap();
+    assert!(n.body.contains("2222222 read green, it stays in-progress while 1111111 pushed still carries it"), "the item says why it waits: {}", n.body);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S1, "green"]);
+    assert!(out.contains("recorded the piece \"part one\""), "{out}");
+    assert_eq!(state_of(&e, &a), "review", "{out}");
+
+    let b = item(&e, "Pieces only", "in-progress");
+    ok(&e, "w", &["land", "-p", "fx", "add", S3, "--items", &b, "--piece", "a"]);
+    approved_only(&e, &[S3]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S3, "--run", "3"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S3, "green"]);
+    assert!(out.contains("stays in-progress, 3333333 lands a piece of it, the entry without --piece moves it to review"), "{out}");
+    assert_eq!(state_of(&e, &b), "in-progress");
+}
+
+#[test]
+fn order_errors_name_the_missing_step_its_holder_and_the_call() {
+    let e = setup();
+    item(&e, "x", "queued");
+    ok(&e, "w", &["land", "-p", "fx", "add", S1]);
+    let out = fails(&e, "w", &["land", "-p", "fx", "verify", S1]);
+    assert!(out.contains("needs an approved entry, the step due is approve (no session is named for it), `crumb land approve 1111111`"), "{out}");
+    assert!(out.contains("this session built it, so another session approves it"), "{out}");
+    let out = fails(&e, "w", &["land", "-p", "fx", "pushed", S1, "--run", "1"]);
+    assert!(out.contains("the step due is approve") && out.contains("`crumb land approve 1111111`"), "{out}");
+    assert!(fails(&e, "r", &["land", "-p", "fx", "read", S1, "green"]).contains("needs a pushed entry, the step due is approve"));
+
+    let out = ok(&e, "r", &["land", "-p", "fx", "verify", S1]);
+    assert!(out.contains("1111111 verified") && out.contains("approved it first"), "{out}");
+    let steps: Vec<(String, String)> = entries(&e)[0].steps.iter().map(|s| (s.state.clone(), s.by.clone())).collect();
+    assert_eq!(steps[1..], [("approved".to_string(), "r".to_string()), ("verified".to_string(), "r".to_string())]);
+
+    let out = fails(&e, "r", &["land", "-p", "fx", "read", S1, "green"]);
+    assert!(out.contains("1111111 is verified, read needs a pushed entry, the step due is push (w holds it), `crumb land pushed 1111111 --run <id>`"), "{out}");
+    assert!(fails(&e, "r", &["land", "-p", "fx", "approve", S1]).contains("the step due is push (w holds it)"));
+
+    ok(&e, "w", &["land", "-p", "fx", "add", S2, "--to", "x"]);
+    let out = fails(&e, "r", &["land", "-p", "fx", "verify", S2]);
+    assert!(out.contains("the step due is approve (x holds it)") && !out.contains("this session built it"), "{out}");
+}
+
+#[test]
+fn a_move_to_review_warns_of_an_unpushed_entry_and_a_reader_is_not_its_builder() {
+    let e = setup();
+    let a = item(&e, "Built here", "in-progress");
+    ok(&e, "w", &["land", "-p", "fx", "add", S1, "--items", &a]);
+    let out = ok(&e, "w", &["move", &a, "review", "--step", "try it"]);
+    assert!(out.contains(&format!("{a} has land entry 1111111 built not pushed yet, the green read of it moves it to review with its commit, `crumb land show 1111111`")), "{out}");
+    assert_eq!(state_of(&e, &a), "review", "a warning, never a refusal");
+
+    let b = item(&e, "Left in backlog", "backlog");
+    let c = item(&e, "Claimed by the reader", "in-progress");
+    ok(&e, "r", &["claim", &c]);
+    ok(&e, "w", &["land", "-p", "fx", "add", S2, "--items", &format!("{b},{c}")]);
+    approved_only(&e, &[S2]);
+    ok(&e, "w", &["land", "-p", "fx", "drop", S1]);
+    ok(&e, "w", &["land", "-p", "fx", "pushed", S2, "--run", "1"]);
+    let out = ok(&e, "r", &["land", "-p", "fx", "read", S2, "green"]);
+    assert_eq!(state_of(&e, &c), "review", "{out}");
+    assert_eq!(built_by(&e, &c).as_deref(), Some("w"), "the reader holds the claim, the session that added the entry built it");
+    assert_eq!(state_of(&e, &b), "backlog");
+    let out = ok(&e, "r", &["move", &b, "review", "--step", "try it"]);
+    assert!(!out.contains("not pushed yet"), "{out}");
+    assert_eq!(built_by(&e, &b).as_deref(), Some("w"), "the reader moved it by hand, the entry's author built it");
+    let d = item(&e, "Moved by someone else", "in-progress");
+    ok(&e, "z", &["move", &d, "review", "--step", "try it"]);
+    assert_eq!(built_by(&e, &d).as_deref(), Some("z"));
 }

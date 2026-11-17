@@ -27,7 +27,6 @@ const DIGEST_ROWS: usize = 3;
 const DIGEST_MAX_ROWS: usize = 5;
 /// Where `land list` cuts a note, `land show` prints it whole.
 const NOTE_MAX: usize = 120;
-const NOTE_KEEP: usize = 2000;
 const DIGEST_NOTE: usize = 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +68,9 @@ pub struct Entry {
     /// Reads of the run with an attempt, a note or failed gate jobs, and infra reds, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<ReadRec>,
+    /// The piece of its items this merge lands: a green read records it on them and leaves them where they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub piece: Option<String>,
     /// Keys a newer binary wrote stay as they are.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -316,7 +318,7 @@ fn named(who: &str) -> String {
 pub enum Op {
     List { all: bool },
     Show { sha: String },
-    Add { sha: String, items: Vec<String>, note: Option<String>, to: Option<String>, replaces: Option<String>, clear_approval: bool },
+    Add { sha: String, items: Vec<String>, note: Option<String>, to: Option<String>, replaces: Option<String>, clear_approval: bool, piece: Option<String> },
     Approve { sha: String, note: Option<String>, to: Option<String> },
     Verify { sha: String, to: Option<String> },
     Pushed { shas: Vec<String>, run: Option<String>, to: Option<String> },
@@ -364,13 +366,28 @@ fn peers(entries: &[Entry], e: &Entry) -> String {
 }
 
 fn memo_tail(e: &Entry, max: usize) -> String {
-    e.memo.as_ref().map(|m| format!(", note: \"{}\"", truncate_chars(m, max))).unwrap_or_default()
+    e.memo.as_ref().map(|m| format!(", note: \"{}\"", flat(m, max))).unwrap_or_default()
+}
+
+/// A note on one line cut to `max`, for lists, replies and the digest. Notes are stored whole.
+fn flat(s: &str, max: usize) -> String {
+    truncate_chars(&one_line(s), max)
+}
+
+/// A stored note as given, its lines after the first indented under the line it starts on.
+fn indented(s: &str, pad: &str) -> String {
+    s.replace('\n', &format!("\n{pad}"))
+}
+
+/// A note as given, line breaks kept and the ends trimmed.
+fn whole(n: String) -> Option<String> {
+    Some(crate::util::normalize_newlines(&n).trim().to_string()).filter(|n| !n.is_empty())
 }
 
 fn head(entries: &[Entry], e: &Entry) -> String {
     let mut s = format!("{} {}", e.short(), e.state);
     if let Some(n) = &e.note {
-        s.push_str(&format!(" ({})", truncate_chars(n, NOTE_MAX)));
+        s.push_str(&format!(" ({})", flat(n, NOTE_MAX)));
     }
     if let Some(t) = read_tag(e) {
         s.push_str(&format!(" ({t})"));
@@ -445,16 +462,19 @@ fn show_text(v: &Vault, entries: &[Entry], i: usize) -> String {
             }
         }
     }
+    if let Some(p) = &e.piece {
+        s.push_str(&format!("  piece: {p}, a green read records it on the items and leaves them where they are\n"));
+    }
     if let Some(m) = &e.memo {
-        s.push_str(&format!("  note: {m}\n"));
+        s.push_str(&format!("  note: {}\n", indented(m, "    ")));
     }
     if let Some(n) = &e.note {
-        s.push_str(&format!("  approval note: {n} (by {})\n", e.by("approved").map(named).unwrap_or_default()));
+        s.push_str(&format!("  approval note: {} (by {})\n", indented(n, "    "), e.by("approved").map(named).unwrap_or_default()));
     }
     if !e.earlier_notes.is_empty() {
         s.push_str("  earlier approval notes:\n");
         for o in &e.earlier_notes {
-            s.push_str(&format!("    {} {}: {}\n", when(&o.at), named(&o.by), o.note));
+            s.push_str(&format!("    {} {}: {}\n", when(&o.at), named(&o.by), indented(&o.note, "      ")));
         }
     }
     if let Some(r) = &e.replaces {
@@ -476,7 +496,7 @@ fn show_text(v: &Vault, entries: &[Entry], i: usize) -> String {
 }
 
 fn parked_line(p: &Parked, max: usize) -> String {
-    let note = p.note.as_ref().map(|n| format!(" ({})", truncate_chars(n, max))).unwrap_or_default();
+    let note = p.note.as_ref().filter(|_| max > 0).map(|n| format!(" ({})", flat(n, max))).unwrap_or_default();
     format!("{} approved by {} {} ago{note}", &p.sha[..p.sha.len().min(7)], named(&p.by), short_age(&p.at))
 }
 
@@ -488,8 +508,12 @@ fn due_text(e: &Entry) -> String {
     }
 }
 
+fn piece_tail(e: &Entry) -> String {
+    e.piece.as_ref().map(|p| format!(", piece: \"{}\"", flat(p, NOTE_MAX))).unwrap_or_default()
+}
+
 fn row(v: &Vault, entries: &[Entry], i: usize, e: &Entry) -> String {
-    format!("{}. {}, {}, items: {}{}", i + 1, head(entries, e), due_text(e), names(v, e), memo_tail(e, NOTE_MAX))
+    format!("{}. {}, {}, items: {}{}{}", i + 1, head(entries, e), due_text(e), names(v, e), piece_tail(e), memo_tail(e, NOTE_MAX))
 }
 
 fn list_text(v: &Vault, entries: &[Entry], parked: &[Parked], all: bool) -> String {
@@ -574,6 +598,9 @@ fn attach(e: &mut Entry, p: &Parked) -> String {
 fn carry(e: &mut Entry, mut old: Entry, clear: bool, to_given: bool) -> String {
     if e.items.is_empty() {
         e.items = old.items.clone();
+        if e.piece.is_none() {
+            e.piece = old.piece.clone();
+        }
     }
     if e.memo.is_none() {
         e.memo = old.memo.clone();
@@ -614,8 +641,39 @@ fn set_state(e: &mut Entry, state: &str, by: &str) {
     e.steps.push(Step { state: state.to_string(), at: t, by: by.to_string() });
 }
 
+/// The call that does the step due on `e`.
+fn due_call(e: &Entry) -> String {
+    let s = e.short();
+    match e.state.as_str() {
+        "built" => format!("`crumb land approve {s}` (MCP land action approve)"),
+        "approved" => format!("`crumb land verify {s}` or `crumb land pushed {s} --run <id>`"),
+        "verified" => format!("`crumb land pushed {s} --run <id>` (MCP land action pushed)"),
+        "pushed" if e.infra().is_some() => format!("a rerun of the failed jobs, then `crumb land check {s}`,"),
+        "pushed" => format!("`crumb land check {s}` or `crumb land read {s} green|red`"),
+        "red" => format!("`crumb land replace {s} <new sha>` once fixed, or `crumb land drop {s}`,"),
+        _ => String::new(),
+    }
+}
+
+/// The step due on `e`, who holds it and the call that does it.
+fn due_step(e: &Entry) -> String {
+    let Some(d) = e.due() else { return format!("it landed, read green by {}", e.by("green").map(named).unwrap_or_default()) };
+    let holder = match &e.next {
+        Some(w) => format!("{} holds it{}", named(w), if is_me(w) { ", you" } else { "" }),
+        None => "no session is named for it".to_string(),
+    };
+    format!("the step due is {d} ({holder}), {} does it", due_call(e))
+}
+
 fn step_error(e: &Entry, verb: &str, want: &str) -> anyhow::Error {
-    anyhow::anyhow!("{} is {}, {verb} needs {want}, `--force` does it anyway", e.short(), e.state)
+    anyhow::anyhow!("{} is {}, {verb} needs {want}, {}, `--force` does it anyway", e.short(), e.state, due_step(e))
+}
+
+/// Whether `by` may approve the built entry `e` on its way to verify: it did not build it, and the entry names no other
+/// session for the approval.
+fn approves_on_verify(e: &Entry, by: &str) -> bool {
+    let me = session_of(by);
+    e.by("built").map(session_of).as_deref() != Some(me.as_str()) && e.next.as_deref().is_none_or(|n| session_of(n) == me)
 }
 
 /// The queue runs in order, so an earlier entry that is not pushed yet holds this one back unless this call pushes it
@@ -635,7 +693,7 @@ fn push_check(entries: &[Entry], idx: &[usize], run_known: bool) -> Result<()> {
         }
         if let Some(b) = blocker(entries, i, idx) {
             let name = if b.state == "built" { "" } else { ", or name it in this call if the push carries it" };
-            bail!("{} is ahead in the queue and still {}, push in order{name}, or `--force`, or `crumb land move`/`drop`", b.short(), b.state);
+            bail!("{} is ahead in the queue and still {}, {}, push in order{name}, or `--force`, or `crumb land move`/`drop`", b.short(), b.state, due_step(b));
         }
     }
     Ok(())
@@ -719,7 +777,7 @@ fn current(v: &Vault, slug: &str) -> Result<(Vec<Entry>, Vec<Parked>, String)> {
 /// One entry after a step, with what is due next.
 fn state_out(v: &Vault, slug: &str, e: &Entry, extra: &str) -> Outcome {
     let all = read(v, slug).unwrap_or_default();
-    let memo = e.memo.as_ref().map(|m| format!("\n  note: {m}")).unwrap_or_default();
+    let memo = e.memo.as_ref().map(|m| format!("\n  note: {}", indented(m, "    "))).unwrap_or_default();
     Outcome { text: format!("{}\n  next: {}{memo}{extra}", head(&all, e), due_text(e)), data: json!({"entry": e}) }
 }
 
@@ -746,12 +804,14 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                 Err(err) => {
                     let q = sha.trim().to_ascii_lowercase();
                     let p = parked.iter().find(|p| same_sha(&p.sha, &q)).ok_or(err)?;
-                    Ok(Outcome { text: format!("{}, parked, it attaches when `crumb land add {}` queues it", parked_line(p, NOTE_KEEP), p.sha), data: json!({"parked": p}) })
+                    let note = p.note.as_ref().map(|n| format!("\n  approval note: {}", indented(n, "    "))).unwrap_or_default();
+                    Ok(Outcome { text: format!("{}, parked, it attaches when `crumb land add {}` queues it{note}", parked_line(p, 0), p.sha), data: json!({"parked": p}) })
                 }
             }
         }
-        Op::Add { sha, items, note, to, replaces, clear_approval } => {
-            let memo = note.map(|n| truncate_chars(&one_line(&n), NOTE_KEEP)).filter(|n| !n.is_empty());
+        Op::Add { sha, items, note, to, replaces, clear_approval, piece } => {
+            let memo = note.and_then(whole);
+            let piece = piece.map(|p| one_line(&p)).filter(|p| !p.is_empty());
             let sha = sha.trim().to_ascii_lowercase();
             if !is_commit_hex(&sha) {
                 bail!("{sha:?} is not a commit sha, give 7 to 40 hex characters");
@@ -761,7 +821,7 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
             for item in items.iter().flat_map(|s| s.split(',')).map(str::trim).filter(|s| !s.is_empty()) {
                 let n = backlog::get_item(v, item)?;
                 if !ids.contains(&n.id) {
-                    if !goes_to_review(&n) {
+                    if piece.is_none() && !goes_to_review(&n) {
                         let st = backlog::state(&n);
                         let claim = if st == "backlog" { format!(" and unclaimed, a green read leaves it there, `crumb claim {}` when its builder holds it", n.id) } else { ", a green read leaves it there".to_string() };
                         stays.push_str(&format!("\n  {} is {st}{claim}", n.handle()));
@@ -787,6 +847,7 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                     replaces: None,
                     earlier_notes: vec![],
                     reads: vec![],
+                    piece: piece.clone(),
                     extra: Map::new(),
                     live: None,
                 };
@@ -828,7 +889,11 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                 };
                 Ok((msg, (e, said, gone, entries.clone())))
             })?;
-            let hint = if e.items.is_empty() { "\n  no items given, none move to review when it is read green".to_string() } else { stays };
+            let hint = match &e.piece {
+                _ if e.items.is_empty() => "\n  no items given, none move to review when it is read green".to_string(),
+                Some(p) => format!("\n  lands the piece \"{p}\" of {}, a green read records it on them and leaves them where they are, the entry without --piece moves them to review", names(v, &e)),
+                None => stays,
+            };
             let (left, moved) = match &gone {
                 Some(old) => land_left(v, old, &all, req.by.clone()),
                 None => (String::new(), vec![]),
@@ -840,7 +905,7 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
             Ok(out)
         }
         Op::Approve { sha, note, to } => {
-            let note = note.map(|n| truncate_chars(&one_line(&n), NOTE_MAX)).filter(|n| !n.is_empty());
+            let note = note.and_then(whole);
             let q = sha.trim().to_ascii_lowercase();
             let (done, settled) = mutate(v, &slug, |entries, parked| {
                 let i = match find(entries, &sha) {
@@ -874,11 +939,11 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
                 match (&note, had) {
                     (Some(n), had) if had.as_ref() != Some(n) => {
                         if let Some(old) = e.retire_note() {
-                            said = format!("\n  the earlier note \"{}\" by {} stays with the entry, `crumb land show {}` lists it", truncate_chars(&old.note, NOTE_MAX), named(&old.by), e.short());
+                            said = format!("\n  the earlier note \"{}\" by {} stays with the entry, `crumb land show {}` lists it", flat(&old.note, NOTE_MAX), named(&old.by), e.short());
                         }
                         e.note = Some(n.clone());
                     }
-                    (None, Some(n)) => said = format!("\n  keeps the note \"{}\", a new `--note` replaces it and keeps this one", truncate_chars(&n, NOTE_MAX)),
+                    (None, Some(n)) => said = format!("\n  keeps the note \"{}\", a new `--note` replaces it and keeps this one", flat(&n, NOTE_MAX)),
                     _ => {}
                 }
                 set_state(e, "approved", &by);
@@ -898,15 +963,24 @@ pub fn run(v: &Vault, project: Option<&str>, req: Req) -> Result<Outcome> {
             let (e, settled) = mutate(v, &slug, |entries, _| {
                 let i = find(entries, &sha)?;
                 let e = &mut entries[i];
+                let both = !force && e.state == "built" && approves_on_verify(e, &by);
+                if both {
+                    set_state(e, "approved", &by);
+                }
                 if !force && e.state != "approved" {
-                    return Err(step_error(e, "verify", "an approved entry"));
+                    let mine = e.state == "built" && e.by("built").map(session_of) == Some(session_of(&by));
+                    let builder = if mine { ", this session built it, so another session approves it" } else { "" };
+                    let err = step_error(e, "verify", "an approved entry");
+                    return Err(anyhow::anyhow!("{err}{builder}"));
                 }
                 set_state(e, "verified", &by);
                 e.retire_note();
                 e.next = to.as_deref().map(holder).or_else(|| e.by("built").map(str::to_string));
-                Ok((format!("land verify {}", e.short()), e.clone()))
+                Ok((format!("land verify {}", e.short()), (e.clone(), both)))
             })?;
-            Ok(state_out(&e, &settled))
+            let (e, both) = e;
+            let said = if both { "\n  it was built, so this call approved it first, approved and verified by you" } else { "" };
+            Ok(state_out(&e, &format!("{said}{settled}")))
         }
         Op::Pushed { shas, run, to } => {
             let given = run.map(|r| one_line(&r).trim().to_string()).filter(|r| !r.is_empty());
@@ -1351,17 +1425,16 @@ fn session_of(by: &str) -> String {
 }
 
 /// Moves the items of a green entry to review through the code `crumb move` runs. An item another open or red entry
-/// carries waits for the last of them, with this commit added to its refs at once so the move has every piece even
-/// after older green entries left the file. `built_by` is the item's claim holder, else the session that added the
-/// entry, never the reader.
+/// carries waits for the last of them, with this commit added to its refs at once and a history line saying why, so the
+/// move has every piece even after older green entries left the file. An entry with a `piece` records it on its items
+/// and moves none, an item moves once no open entry carries it and a green entry without a piece does. `built_by` is
+/// the item's claim holder, else the session that added the entry, never the reader.
 fn land_items(v: &Vault, e: &Entry, all: &[Entry], by: Option<String>, done: &mut Vec<String>) -> (String, Vec<Value>) {
     let mut text = String::new();
     let mut reqs = vec![];
-    let mut waiting = vec![];
+    let mut marks: Vec<Mark> = vec![];
+    let run = e.run.as_ref().map(|r| format!(" run {r}")).unwrap_or_default();
     for id in &e.items {
-        if done.contains(id) {
-            continue;
-        }
         let n = match v.get(id) {
             Ok(n) => n,
             Err(_) => {
@@ -1369,25 +1442,51 @@ fn land_items(v: &Vault, e: &Entry, all: &[Entry], by: Option<String>, done: &mu
                 continue;
             }
         };
-        if !goes_to_review(&n) {
-            text.push_str(&format!("\n  left {} where it is, it is {} and only queued, in-progress, review or claimed backlog items go to review", n.handle(), backlog::state(&n)));
-            continue;
-        }
-        let open: Vec<String> = all.iter().filter(|x| x.sha != e.sha && x.items.contains(id) && (x.is_open() || x.state == "red")).map(|x| format!("{} {}", x.short(), x.state)).collect();
-        if !open.is_empty() {
-            let verb = if open.len() > 1 { "carry" } else { "carries" };
-            text.push_str(&format!("\n  left {} where it is, {} still {verb} it, the last of them read green moves it", n.handle(), open.join(", ")));
-            if !n.refs().contains(&format!("commit:{}", e.sha)) {
-                waiting.push(id.clone());
+        let tag = format!("({}", e.short());
+        let mut mark = match &e.piece {
+            Some(p) if !backlog::pieces(&n).iter().any(|r| r.contains(&tag)) => {
+                text.push_str(&format!("\n  recorded the piece \"{p}\" on {}", n.handle()));
+                Some(Mark {
+                    id: id.clone(),
+                    line: format!("piece \"{p}\" landed in {}{run}, read green", e.short()),
+                    piece: Some(format!("{p} ({}{run}, {})", e.short(), crate::util::fmt_date(&now()))),
+                })
             }
-            continue;
+            _ => None,
+        };
+        let st = backlog::state(&n);
+        let whole = all.iter().any(|x| x.state == "green" && x.piece.is_none() && x.items.contains(id));
+        let open: Vec<String> = all.iter().filter(|x| x.sha != e.sha && x.items.contains(id) && (x.is_open() || x.state == "red")).map(|x| format!("{} {}", x.short(), x.state)).collect();
+        if done.contains(id) {
+            // Another entry of this read moved it already.
+        } else if !goes_to_review(&n) {
+            if e.piece.is_none() {
+                text.push_str(&format!("\n  left {} where it is, it is {st} and only queued, in-progress, review or claimed backlog items go to review", n.handle()));
+            }
+        } else if !open.is_empty() {
+            let verb = if open.len() > 1 { "carry" } else { "carries" };
+            let last = if whole || e.piece.is_none() { "the last of them read green moves it" } else { "an entry without --piece moves it once they are read green" };
+            text.push_str(&format!("\n  left {} where it is, {} still {verb} it, {last}", n.handle(), open.join(", ")));
+            if mark.is_none() && !n.refs().contains(&format!("commit:{}", e.sha)) {
+                mark = Some(Mark { id: id.clone(), line: format!("{} read green, it stays {st} while {} still {verb} it", e.short(), open.join(", ")), piece: None });
+            }
+        } else if !whole {
+            text.push_str(&format!("\n  {} stays {st}, {} lands a piece of it, the entry without --piece moves it to review", n.handle(), e.short()));
+        } else {
+            done.push(id.clone());
+            reqs.push((id.clone(), review_move(&n, e, all, by.clone())));
         }
-        done.push(id.clone());
-        reqs.push((id.clone(), review_move(&n, e, all, by.clone())));
+        marks.extend(mark);
     }
-    add_ref(v, &waiting, e, by.clone(), &mut text);
+    mark_items(v, &marks, e, by.clone(), &mut text);
     let moved = apply_moves(v, &reqs, &mut text);
     (text, moved)
+}
+
+struct Mark {
+    id: String,
+    line: String,
+    piece: Option<String>,
 }
 
 /// The move to review that the green read of `last` makes, with every green carrier's commit as a ref.
@@ -1396,26 +1495,54 @@ fn review_move(n: &crate::note::Note, last: &Entry, all: &[Entry], by: Option<St
     for x in all.iter().filter(|x| x.sha != last.sha && x.state == "green" && x.items.contains(&n.id)) {
         refs.push(format!("commit:{}", x.sha));
     }
-    let built_by = backlog::assignee(n).or_else(|| last.by("built").map(session_of)).unwrap_or_default();
+    let reader = backlog::session_name(by.as_deref()).unwrap_or_default();
+    let built_by = builder(n, last, &reader).unwrap_or_default();
     MoveReq { state: "review".into(), refs, by, built_by: Some(built_by), ..Default::default() }
 }
 
-/// Adds `commit:<sha of e>` to the refs of items that wait for another carrier, in one vault commit.
-fn add_ref(v: &Vault, ids: &[String], e: &Entry, by: Option<String>, text: &mut String) {
-    if ids.is_empty() {
+fn same_session(a: &str, b: &str) -> bool {
+    session::same_holder(a, b) || session_of(a) == session_of(b)
+}
+
+/// Who built an item an entry lands: its claim holder, else the session that added the entry, passing over `reader`,
+/// the session that read the run, so it can still pass the review. None when neither is known.
+fn builder(n: &crate::note::Note, e: &Entry, reader: &str) -> Option<String> {
+    let cands: Vec<String> = backlog::assignee(n).into_iter().chain(e.by("built").map(session_of)).filter(|c| !c.is_empty()).collect();
+    let other = cands.iter().find(|c| reader.is_empty() || !same_session(c, reader));
+    other.or(cands.first()).cloned()
+}
+
+/// The builder to stamp when `mover` moves `n` to review by hand after reading the run of a land entry that carries
+/// it, so the reader is not recorded as its builder. None when `mover` read no such run, or nobody else built it.
+pub fn builder_for_reader(v: &Vault, n: &crate::note::Note, mover: &str) -> Option<String> {
+    let entries = read(v, n.project.as_deref()?).ok()?;
+    let read_it = |e: &&Entry| e.items.contains(&n.id) && e.steps.iter().any(|s| matches!(s.state.as_str(), "green" | "red" | "infra" | "rerun") && same_session(&s.by, mover));
+    let e = entries.iter().rev().find(read_it)?;
+    builder(n, e, mover).filter(|b| !same_session(b, mover))
+}
+
+/// Entries carrying `n` that are not pushed yet, as `<sha> <state>`, for the warning on a move to review by hand.
+pub fn unpushed(v: &Vault, n: &crate::note::Note) -> Vec<String> {
+    let Some(slug) = n.project.as_deref() else { return vec![] };
+    read(v, slug).unwrap_or_default().iter().filter(|e| e.items.contains(&n.id) && matches!(e.state.as_str(), "built" | "approved" | "verified")).map(|e| format!("{} {}", e.short(), e.state)).collect()
+}
+
+/// Records what a green read leaves on items it does not move, in one vault commit.
+fn mark_items(v: &Vault, marks: &[Mark], e: &Entry, by: Option<String>, text: &mut String) {
+    if marks.is_empty() {
         return;
     }
     let mut quiet = v.clone();
     quiet.config.auto_commit = false;
     let mut touched = vec![];
-    for id in ids {
-        match crate::ops::update(&quiet, id, crate::ops::UpdateReq { refs: vec![format!("commit:{}", e.sha)], by: by.clone(), ..Default::default() }) {
+    for m in marks {
+        match backlog::land_mark(&quiet, &m.id, &e.sha, &m.line, m.piece.as_deref(), by.as_deref()) {
             Ok(n) => touched.extend(n.path),
-            Err(err) => text.push_str(&format!("\n  adding commit:{} to {id} failed: {}", e.short(), one_line(&format!("{err:#}")))),
+            Err(err) => text.push_str(&format!("\n  recording {} on {} failed: {}", e.short(), m.id, one_line(&format!("{err:#}")))),
         }
     }
     if !touched.is_empty()
-        && let Err(err) = v.lock().and_then(|_g| v.commit(&touched, &format!("breadcrumb: land ref {} on {} waiting items", e.short(), touched.len())))
+        && let Err(err) = v.lock().and_then(|_g| v.commit(&touched, &format!("breadcrumb: land ref {} on {} items", e.short(), touched.len())))
     {
         text.push_str(&format!("\n  committing the refs failed: {}", one_line(&format!("{err:#}"))));
     }
@@ -1456,7 +1583,7 @@ fn land_left(v: &Vault, gone: &Entry, all: &[Entry], by: Option<String>) -> (Str
         if all.iter().any(|x| x.items.contains(id) && (x.is_open() || x.state == "red")) {
             continue;
         }
-        let Some(last) = all.iter().filter(|x| x.state == "green" && x.items.contains(id)).max_by_key(|x| x.at) else { continue };
+        let Some(last) = all.iter().filter(|x| x.state == "green" && x.piece.is_none() && x.items.contains(id)).max_by_key(|x| x.at) else { continue };
         let Ok(n) = v.get(id) else { continue };
         if !goes_to_review(&n) || backlog::state(&n) == "review" {
             continue;
@@ -1527,6 +1654,10 @@ pub enum LandCmd {
         /// With --replaces: start built, the old approval does not carry over
         #[arg(long, requires = "replaces")]
         clear_approval: bool,
+        /// It lands only this piece of its items, like "10e manual pictures": a green read records the piece on them and
+        /// leaves them where they are
+        #[arg(long)]
+        piece: Option<String>,
     },
     /// Queue <new> in the place of <old>, the same as `add <new> --replaces <old>`
     Replace {
@@ -1546,6 +1677,9 @@ pub enum LandCmd {
         /// Start built, the old approval does not carry over
         #[arg(long)]
         clear_approval: bool,
+        /// The piece of its items it lands, the old entry's when its items are kept
+        #[arg(long)]
+        piece: Option<String>,
     },
     /// The review approves it, --note names a condition like "pending the alone harness run". A sha not queued yet parks
     /// the approval until `add` queues it
@@ -1712,8 +1846,8 @@ pub enum LandCmd {
 impl LandArgs {
     pub fn into_req(self) -> Result<Req> {
         let op = match self.cmd.unwrap_or(LandCmd::List { all: false }) {
-            LandCmd::Add { sha, items, note, to, replaces, clear_approval } => Op::Add { sha, items, note, to, replaces, clear_approval },
-            LandCmd::Replace { old, new, items, note, to, clear_approval } => Op::Add { sha: new, items, note, to, replaces: Some(old), clear_approval },
+            LandCmd::Add { sha, items, note, to, replaces, clear_approval, piece } => Op::Add { sha, items, note, to, replaces, clear_approval, piece },
+            LandCmd::Replace { old, new, items, note, to, clear_approval, piece } => Op::Add { sha: new, items, note, to, replaces: Some(old), clear_approval, piece },
             LandCmd::Approve { sha, note, to } => Op::Approve { sha, note, to },
             LandCmd::Verify { sha, to } => Op::Verify { sha, to },
             LandCmd::Pushed { shas, run, to } => Op::Pushed { shas, run, to },
@@ -1764,8 +1898,8 @@ pub fn mcp(v: &Vault, project: Option<&str>, a: &Map<String, Value>, cwd: &Path)
     let op = match s("action").as_deref().unwrap_or("list") {
         "list" => Op::List { all: flag("all") },
         "show" => Op::Show { sha: need("sha")? },
-        "add" => Op::Add { sha: need("sha")?, items, note: s("note"), to, replaces: s("replaces"), clear_approval: flag("clear_approval") },
-        "replace" => Op::Add { sha: need("sha")?, items, note: s("note"), to, replaces: Some(need("replaces")?), clear_approval: flag("clear_approval") },
+        "add" => Op::Add { sha: need("sha")?, items, note: s("note"), to, replaces: s("replaces"), clear_approval: flag("clear_approval"), piece: s("piece") },
+        "replace" => Op::Add { sha: need("sha")?, items, note: s("note"), to, replaces: Some(need("replaces")?), clear_approval: flag("clear_approval"), piece: s("piece") },
         "approve" => Op::Approve { sha: need("sha")?, note: s("note"), to },
         "verify" => Op::Verify { sha: need("sha")?, to },
         "pushed" => Op::Pushed { shas: shas()?, run: s("run"), to },

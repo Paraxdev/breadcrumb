@@ -166,6 +166,8 @@ pub fn assignee(n: &Note) -> Option<String> {
 pub const CLAIMED_KEY: &str = "claimed";
 /// Who moved the item to review, the reviewer has to be someone else when agents review.
 pub const BUILT_BY_KEY: &str = "built_by";
+/// The pieces of an item that green land reads landed so far, one line each with its commit and run.
+pub const PIECES_KEY: &str = "pieces";
 pub const RELEASE_NOTE_KEY: &str = "release_note";
 /// `<machine> <assignee> <pid>`, a claim's session can only be judged dead on the machine it ran on. The assignee is in
 /// the value because an old binary claiming over it leaves this key behind, a value for another assignee means nothing.
@@ -1366,6 +1368,8 @@ pub struct ReviewItem {
     pub step_positions: Vec<usize>,
     /// Steps a pass ticked, and who.
     pub checked: Vec<CheckedStep>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pieces: Vec<String>,
 }
 
 /// Items waiting for the user's check, priority first, then oldest.
@@ -1388,8 +1392,35 @@ pub fn review_items(v: &Vault, scope: &Scope) -> Result<Vec<ReviewItem>> {
             steps: review_steps(n),
             step_positions: unmet_numbered(n).into_iter().map(|(i, _)| i).collect(),
             checked: checked_steps(n),
+            pieces: pieces(n),
         })
         .collect())
+}
+
+pub fn pieces(n: &Note) -> Vec<String> {
+    match n.field(PIECES_KEY) {
+        Some(Value::Sequence(rows)) => rows.iter().filter_map(yaml_scalar_string).collect(),
+        _ => vec![],
+    }
+}
+
+/// What a green land read records on an item it leaves where it is: the commit as a ref, a history line, and for an
+/// entry that lands a piece, that piece under `pieces`. Commits only when `v` auto commits.
+pub fn land_mark(v: &Vault, id: &str, commit: &str, line: &str, piece: Option<&str>, by: Option<&str>) -> Result<Note> {
+    let _g = v.lock()?;
+    let mut n = get_item(v, id)?;
+    crate::ops::edit_refs(&mut n, &[format!("commit:{commit}")])?;
+    if let Some(p) = piece {
+        let mut rows = match n.field(PIECES_KEY) {
+            Some(Value::Sequence(rows)) => rows.clone(),
+            _ => vec![],
+        };
+        rows.push(Value::String(p.to_string()));
+        n.set_field(PIECES_KEY, Value::Sequence(rows));
+    }
+    n.body = append_history(&n.body, &event_line(line, &crate::session::attribute(by)));
+    save_with(v, &mut n, "land", vec![])?;
+    Ok(n)
 }
 
 /// `agents` says whether agents review the items of a project (None for global ones).
@@ -1436,6 +1467,9 @@ pub fn review_text(items: &[ReviewItem], scope_label: &str, agents: impl Fn(Opti
         if !it.checked.is_empty() {
             let done: Vec<String> = it.checked.iter().map(|c| format!("{}. {} (by {})", c.position, c.step, c.by)).collect();
             let _ = writeln!(s, "  checked: {}", done.join("; "));
+        }
+        if !it.pieces.is_empty() {
+            let _ = writeln!(s, "  pieces landed: {}", it.pieces.join("; "));
         }
     }
     s
@@ -1620,8 +1654,10 @@ pub fn move_item(v: &Vault, id: &str, mut req: MoveReq) -> Result<MoveResult> {
     if let Some(t) = &note {
         n.body = insert_before_history(&n.body, &format!("{}\n{t}", crate::session::append_head()));
     }
+    let unpushed = if to == "review" && from != "review" { crate::land::unpushed(v, &n) } else { vec![] };
     if to == "review" && from != "review" {
-        match req.built_by.clone().or_else(|| session_name(req.by.as_deref())).filter(|b| !b.trim().is_empty()) {
+        let mover = || session_name(req.by.as_deref()).map(|me| crate::land::builder_for_reader(v, &n, &me).unwrap_or(me));
+        match req.built_by.clone().or_else(mover).filter(|b| !b.trim().is_empty()) {
             Some(b) => {
                 n.set_field(BUILT_BY_KEY, Value::String(b));
             }
@@ -1663,6 +1699,15 @@ pub fn move_item(v: &Vault, id: &str, mut req: MoveReq) -> Result<MoveResult> {
     let mut warnings = notes;
     if waiting_for_user.is_empty() {
         warnings.extend(move_warnings(&n, &from, &to, hint));
+    }
+    if !unpushed.is_empty() {
+        let (s, them) = if unpushed.len() > 1 { ("ies", "them") } else { ("y", "it") };
+        let first = unpushed[0].split(' ').next().unwrap_or_default();
+        warnings.push(format!(
+            "{} has land entr{s} {} not pushed yet, the green read of {them} moves it to review with its commit, `crumb land show {first}` shows what is due",
+            n.id,
+            unpushed.join(", ")
+        ));
     }
     Ok(MoveResult { note: n, from, to, unmet, changed: true, warnings, replaced, waiting_for_user, kept_for_user, touched })
 }
