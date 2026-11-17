@@ -115,18 +115,22 @@ impl Server {
             "tools/list" => rpc_result(id, json!({"tools": tool_defs()})),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-                if !tool_defs().iter().any(|t| t["name"] == name) {
-                    return Some(rpc_error(id, -32602, &format!("Unknown tool: {name}")));
+                let defs = tool_defs();
+                if !defs.iter().any(|t| t["name"] == name) {
+                    let near = crate::util::nearest(name, defs.iter().filter_map(|t| t["name"].as_str())).map(|n| format!(", did you mean {n}?")).unwrap_or_default();
+                    return Some(rpc_error(id, -32602, &format!("Unknown tool: {name}{near}")));
                 }
                 let args = match params.get("arguments") {
                     Some(Value::Object(m)) => m.clone(),
                     _ => Map::new(),
                 };
+                let (seen, _) = self.top_level_fields(name, &args);
                 let res = match self.call_tool(name, &args) {
-                    Ok(text) => text_result(text, false),
+                    Ok(text) => text_result(format!("{text}{}", ignored_note(name, &seen)), false),
                     Err(e) => {
                         eprintln!("breadcrumb mcp: tool {name} failed: {e:#}");
-                        text_result(format!("error: {e:#}"), true)
+                        let e = format!("{e:#}");
+                        text_result(format!("error: {e}{}", arg_help(name, &seen, &e)), true)
                     }
                 };
                 rpc_result(id, res)
@@ -215,6 +219,56 @@ impl Server {
     }
 
     pub fn call_tool(&self, name: &str, a: &Map<String, Value>) -> Result<String> {
+        let (a, notes) = self.top_level_fields(name, a);
+        let out = self.run_tool(name, &a)?;
+        Ok(notes.iter().fold(out, |o, m| format!("{o}\n{m}")))
+    }
+
+    /// Kind fields given beside `fields` on add or update, a top-level status naming a backlog state too, moved
+    /// into `fields`.
+    fn top_level_fields(&self, name: &str, a: &Map<String, Value>) -> (Map<String, Value>, Vec<String>) {
+        let mut a = a.clone();
+        let mut notes = vec![];
+        if !matches!(name, "add" | "update") {
+            return (a, notes);
+        }
+        let Ok(v) = self.vault() else { return (a, notes) };
+        let kind = s(&a, "kind").or_else(|| match name {
+            "update" => s(&a, "id").and_then(|id| v.get(&id).ok()).map(|n| n.kind),
+            _ => Some(crate::config::effective(&v, s(&a, "project").as_deref()).default_kind),
+        });
+        let Some(def) = kind.and_then(|k| v.load_kinds().into_iter().find(|d| d.name == k.trim())) else { return (a, notes) };
+        let has = |f: &str| def.fields.iter().any(|d| d.name == f);
+        let listed = schema_keys(name);
+        let mut moved = Map::new();
+        for k in a.keys().cloned().collect::<Vec<_>>() {
+            if listed.iter().any(|l| *l == k) {
+                continue;
+            }
+            let state_word = || a.get(&k).and_then(Value::as_str).is_some_and(|x| backlog::check_state(x).is_ok());
+            let to = if has(&k) {
+                k.clone()
+            } else if k == "status" && has("state") && state_word() {
+                "state".to_string()
+            } else {
+                continue;
+            };
+            if let Some(val) = a.remove(&k) {
+                notes.push(format!("note: {k} read as fields {{\"{to}\": {val}}}"));
+                moved.insert(to, val);
+            }
+        }
+        if !moved.is_empty()
+            && let Value::Object(f) = a.entry("fields").or_insert_with(|| json!({}))
+        {
+            for (k, val) in moved {
+                f.entry(k).or_insert(val);
+            }
+        }
+        (a, notes)
+    }
+
+    fn run_tool(&self, name: &str, a: &Map<String, Value>) -> Result<String> {
         let v = self.vault()?;
         match name {
             "context" => {
@@ -708,6 +762,136 @@ fn with(mut a: Value, b: Value) -> Value {
         x.extend(y);
     }
     a
+}
+
+/// Arguments tools take that tools/list leaves out to stay small, besides cwd, project and global, which every tool
+/// takes.
+const UNLISTED: &[(&str, &str)] = &[
+    ("add", "summary expires said said_on release_note source"),
+    ("update", "summary expires said said_on add_tags remove_tags by"),
+    ("list", "state track"),
+    ("search", "status where sort since others state track"),
+    ("move", "note after"),
+    ("context", "limit"),
+    ("next", "assignee"),
+    ("backlog", "kind assignee"),
+    ("land", "force by"),
+    ("sync", "fix apply"),
+];
+
+/// One call that works, per tool or per tool and action.
+const EXAMPLES: &[(&str, &str)] = &[
+    ("context", r#"{"project": "myproj"}"#),
+    ("search", r#"{"query": "login timeout"}"#),
+    ("list", r#"{"kind": "feature", "state": "queued"}"#),
+    ("get", r#"{"id": "abc12345"}"#),
+    ("add", r#"{"title": "Login times out after 30s", "kind": "bug", "fields": {"priority": "p1"}}"#),
+    ("update", r#"{"id": "abc12345", "fields": {"priority": "p1"}}"#),
+    ("append", r#"{"id": "abc12345", "text": "Tried a fresh profile, same timeout"}"#),
+    ("link", r#"{"from": "abc12345", "to": "def67890", "rel": "blocks"}"#),
+    ("merge", r#"{"id": "dup12345", "into": "keep6789"}"#),
+    ("delete", r#"{"id": "abc12345", "confirm": true}"#),
+    ("move", r#"{"id": "abc12345", "state": "review", "steps": ["open the login page, it loads"], "note": "built on fix/login"}"#),
+    ("next", r#"{"claim": true}"#),
+    ("claim", r#"{"id": "abc12345"}"#),
+    ("question", r#"{"action": "list"}"#),
+    ("question.ask", r#"{"action": "ask", "id": "abc12345", "text": "Which layout?", "options": ["A", "B"]}"#),
+    ("question.answer", r#"{"action": "answer", "id": "abc12345.1", "choices": [1]}"#),
+    ("question.ack", r#"{"action": "ack", "id": "abc12345.1"}"#),
+    ("question.withdraw", r#"{"action": "withdraw", "id": "abc12345.1"}"#),
+    ("backlog", r#"{"view": "board"}"#),
+    ("backlog.tree", r#"{"view": "tree", "id": "abc12345"}"#),
+    ("backlog.deps", r#"{"view": "deps", "id": "abc12345"}"#),
+    ("project", r#"{"action": "list"}"#),
+    ("project.link", r#"{"action": "link", "slug": "myproj", "path": "D:/dev/myproj"}"#),
+    ("project.config", r#"{"action": "config", "key": "digest_budget", "value": "6000"}"#),
+    ("kinds", r#"{"define": {"name": "runbook", "fields": ["owner:string"]}}"#),
+    ("workflow", r#"{"action": "list"}"#),
+    ("workflow.save", r#"{"action": "save", "paths": ["flows/check.js"]}"#),
+    ("map", r#"{"action": "brief", "targets": ["src/db"]}"#),
+    ("map.get", r#"{"action": "get", "area": "db"}"#),
+    ("map.put", r#"{"action": "put", "area": "db", "lines": ["src/db/pool.rs:12 Pool, owns the connections"]}"#),
+    ("land", r#"{"action": "list"}"#),
+    ("land.add", r#"{"action": "add", "sha": "abc1234", "items": ["abc12345"]}"#),
+    ("land.pushed", r#"{"action": "pushed", "sha": "abc1234", "run": "123456"}"#),
+    ("land.read", r#"{"action": "read", "sha": "abc1234", "result": "green"}"#),
+    ("land.green", r#"{"action": "green", "sha": "abc1234"}"#),
+    ("land.red", r#"{"action": "red", "sha": "abc1234"}"#),
+    ("sync", r#"{}"#),
+    ("doctor", r#"{"fix": true}"#),
+];
+
+fn schema_of(name: &str) -> Option<Value> {
+    tool_defs().into_iter().find(|t| t["name"] == name).map(|t| t["inputSchema"].clone())
+}
+
+fn schema_keys(name: &str) -> Vec<String> {
+    schema_of(name).and_then(|s| s["properties"].as_object().map(|p| p.keys().cloned().collect())).unwrap_or_default()
+}
+
+fn unlisted(name: &str) -> Vec<&'static str> {
+    let own = UNLISTED.iter().find(|(t, _)| *t == name).map_or("", |(_, k)| *k);
+    own.split_whitespace().chain(["cwd", "project", "global"]).collect()
+}
+
+/// Arguments the tool does not read, each with the nearest one it does.
+fn unknown_keys(name: &str, a: &Map<String, Value>) -> Vec<String> {
+    let listed = schema_keys(name);
+    let extra = unlisted(name);
+    a.keys()
+        .filter(|k| !listed.contains(k) && !extra.contains(&k.as_str()))
+        .map(|k| match crate::util::nearest(k, listed.iter().map(String::as_str).chain(extra.iter().copied())) {
+            Some(n) => format!("{k} is no argument of {name}, did you mean {n}?"),
+            None => format!("{k} is no argument of {name}"),
+        })
+        .collect()
+}
+
+fn ignored_note(name: &str, a: &Map<String, Value>) -> String {
+    unknown_keys(name, a).iter().map(|m| format!("\nnote: ignored, {m}")).collect()
+}
+
+/// For an error about the arguments: the nearest valid key or value, what the tool takes and a call that works.
+fn arg_help(name: &str, a: &Map<String, Value>, err: &str) -> String {
+    const ARG_ERRORS: &[&str] = &["missing required argument", "must be", "is required", "unknown land action", "needs ", "expects", "got '", "unknown state", "unknown kind"];
+    let Some(schema) = schema_of(name) else { return String::new() };
+    let unknown = unknown_keys(name, a);
+    if unknown.is_empty() && !ARG_ERRORS.iter().any(|p| err.contains(p)) {
+        return String::new();
+    }
+    let mut out: String = unknown.iter().map(|m| format!("\n{m}")).collect();
+    let props = schema["properties"].as_object().cloned().unwrap_or_default();
+    let required: Vec<&str> = schema["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let mut chosen = None;
+    for (k, p) in &props {
+        let (Some(e), Some(given)) = (p["enum"].as_array(), a.get(k).and_then(Value::as_str)) else { continue };
+        let options: Vec<&str> = e.iter().filter_map(Value::as_str).collect();
+        if options.contains(&given) {
+            chosen = chosen.or(Some(given.to_string()));
+        } else if let Some(n) = crate::util::nearest(given, options.iter().copied()) {
+            out.push_str(&format!("\n{k} {given}: did you mean {n}?"));
+            chosen = chosen.or(Some(n.to_string()));
+        }
+    }
+    let shown = |k: &String, p: &Value| {
+        let e: Vec<&str> = p["enum"].as_array().map(|e| e.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        match p["type"].as_str() {
+            _ if !e.is_empty() => format!("{k}={}", e.join("|")),
+            Some("array") => format!("{k}[]"),
+            Some("object") => format!("{k}{{}}"),
+            _ => k.clone(),
+        }
+    };
+    let req: Vec<String> = props.iter().filter(|(k, _)| required.contains(&k.as_str())).map(|(k, p)| shown(k, p)).collect();
+    let opt: Vec<String> = props.iter().filter(|(k, _)| !required.contains(&k.as_str())).map(|(k, p)| shown(k, p)).collect();
+    let also = UNLISTED.iter().find(|(t, _)| *t == name).map(|(_, k)| format!(", also {}", k.split_whitespace().collect::<Vec<_>>().join(", "))).unwrap_or_default();
+    let req = if req.is_empty() { String::new() } else { format!("{} (required), ", req.join(", ")) };
+    out.push_str(&format!("\n{name} takes {req}{}{also}", opt.join(", ")));
+    let key = chosen.map(|c| format!("{name}.{c}"));
+    if let Some((_, ex)) = EXAMPLES.iter().find(|(t, _)| Some(*t) == key.as_deref()).or_else(|| EXAMPLES.iter().find(|(t, _)| *t == name)) {
+        out.push_str(&format!("\nexample: {name} {ex}"));
+    }
+    out
 }
 
 fn tool(name: &str, description: &str, schema: Value) -> Value {
