@@ -376,7 +376,7 @@ impl Server {
                     Some("fail") => ("queued".to_string(), Some(backlog::Verdict::Fail(evidence.clone().unwrap_or_default()))),
                     Some(other) => bail!("verdict is pass or fail, got '{other}'"),
                 };
-                let req = MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note") };
+                let req = MoveReq { state, resolution: s(a, "resolution"), shipped_in: s(a, "shipped_in"), by: s(a, "by"), check, refs: strs(a, "refs"), steps: strs(a, "steps"), verdict, evidence, by_user: false, release_note: s(a, "release_note"), built_by: None };
                 let r = backlog::move_item(&v, &id, req)?;
                 if let Some(w) = backlog::user_wait_text(&r) {
                     return Ok(w.trim_end().to_string());
@@ -422,7 +422,7 @@ impl Server {
                 let n = backlog::claim(&v, &id, &by, b(a, "force"))?;
                 Ok(format!("{} for {by}\n{notice}", format::ack("claimed", &n)).trim_end().to_string())
             }
-            "land" => crate::land::mcp(&v, self.target_project(&v, a)?.as_deref(), a),
+            "land" => crate::land::mcp(&v, self.target_project(&v, a)?.as_deref(), a, &self.cwd_of(a)),
             "question" => self.question(&v, a),
             "backlog" => match s(a, "view").as_deref().unwrap_or("board") {
                 "board" => {
@@ -831,12 +831,16 @@ pub fn tool_defs() -> Vec<Value> {
             "repo": st(),
             "budget": int(),
         })), &[])),
-        tool("land", "Landing queue of merges to push in order, green or red is the CI read.", obj(with(json!({"project": st()}), json!({
-            "action": {"type": "string", "enum": ["list", "add", "approve", "verify", "pushed", "green", "red", "drop", "move"]},
+        tool("land", "Landing queue of merges pushed in order, CI read green or red.", obj(with(json!({"project": st()}), json!({
+            "action": {"type": "string", "enum": ["list", "show", "add", "replace", "approve", "verify", "pushed", "green", "red", "read", "drop", "move"]},
             "sha": {"type": "string", "description": "several: pushed, green, red"},
-            "items": {"type": "array", "items": st(), "description": "item ids"},
-            "note": {"type": "string", "description": "add, approve: note"},
-            "run": {"type": "string", "description": "pushed: CI run"},
+            "result": {"type": "string", "enum": ["green", "red"]},
+            "replaces": st(),
+            "clear_approval": bl(),
+            "all": bl(),
+            "items": arr(),
+            "note": st(),
+            "run": st(),
             "to": {"type": "string", "description": "session next"},
             "after": {"type": "string", "description": "move: sha, else first"},
         })), &[])),

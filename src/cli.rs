@@ -450,7 +450,7 @@ pub enum Cmd {
     },
     /// The leases that hold on this machine
     Leases,
-    /// The landing queue of merges two sessions push in order: add, approve, verify, pushed, read, list, drop, move
+    /// The landing queue of merges two sessions push in order: add, replace, approve, verify, pushed, read (green, red), list, show, drop, move
     Land(crate::land::LandArgs),
     /// Claim an item for this session, `next` in other sessions skips it until the claim is a day without activity.
     /// A handoff id or `track:<name>` takes over the work that handoff hands on instead
