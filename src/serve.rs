@@ -373,7 +373,7 @@ impl App {
             }
         }
         let by = str_of(&b, "by").unwrap_or_else(|| "web".to_string());
-        let (n, q) = question::answer(&v, qid, &choices, b.get("text").and_then(Value::as_str), &by)?;
+        let (n, q) = question::answer(&v, qid, &choices, b.get("text").and_then(Value::as_str), &by, b.get("replace").and_then(Value::as_bool).unwrap_or(false))?;
         Ok(Response::json(200, &json!({"qid": question::qid(&n, &q), "answer": q.answer_text(), "question": q})))
     }
 

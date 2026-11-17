@@ -297,13 +297,15 @@ fn chars(s: &str) -> usize {
 }
 
 /// `lines` (row or header, each with its newline) within `room` chars: the rows that fit in order, a header only above a
-/// row that stays, then `+N more, <hint>` for the rest. All of them when they fit.
-fn fit_rows(lines: &[(bool, String)], room: usize, hint: &str) -> String {
-    if lines.iter().map(|(_, l)| chars(l)).sum::<usize>() <= room {
-        return lines.iter().map(|(_, l)| l.as_str()).collect();
+/// row that stays, then `+N more, <hint>` for the rest and the `hidden` rows `lines` never had. All of them when they fit.
+fn fit_rows(lines: &[(bool, String)], room: usize, hidden: usize, hint: &str) -> String {
+    let more = |k: usize| if k == 0 { String::new() } else { format!("+{k} more, {hint}\n") };
+    let all: String = lines.iter().map(|(_, l)| l.as_str()).collect();
+    if chars(&all) + chars(&more(hidden)) <= room {
+        return all + &more(hidden);
     }
     let rows = lines.iter().filter(|(row, _)| *row).count();
-    let room = room.saturating_sub(chars(&format!("+{rows} more, {hint}\n")));
+    let room = room.saturating_sub(chars(&more(rows + hidden)));
     let (mut out, mut header, mut kept) = (String::new(), "", 0);
     for (row, l) in lines {
         if !row {
@@ -318,10 +320,7 @@ fn fit_rows(lines: &[(bool, String)], room: usize, hint: &str) -> String {
         header = "";
         kept += 1;
     }
-    if kept < rows {
-        let _ = writeln!(out, "+{} more, {hint}", rows - kept);
-    }
-    out
+    out + &more(rows - kept + hidden)
 }
 
 /// The digest from its blocks in their default order, the ones named by `order` in that order. A block with no name is
@@ -361,17 +360,15 @@ fn trim_to_budget(head: &str, mut blocks: Vec<(Option<&'static str>, String)>, o
             if chars(&text) <= room {
                 return text + &note;
             }
-            // The board block ends with the answers that arrived and a review line, those ask the agent to act too.
-            let act = |l: &str| l.starts_with("answer arrived on ") || l.starts_with("Review: ");
+            // The board block ends with the answers that arrived, how many more did, and a review line, those ask the
+            // agent to act too.
+            let act = |l: &str| l.starts_with("answer arrived on ") || l.starts_with("Review: ") || (l.starts_with('+') && l.trim_end().ends_with("see `breadcrumb questions`"));
             let mut lines: Vec<&str> = blocks[i].1.split_inclusive('\n').collect();
             let Some(last) = lines.iter().rposition(|l| !act(l)) else { break };
             lines.remove(last);
-            // A heading without rows goes too. The latest handoff opens with its title, not a heading.
-            if let [only] = lines.as_slice()
-                && name != "handoff"
-                && only.trim_end().ends_with(':')
-            {
-                lines.clear();
+            // A heading left without rows goes too. The latest handoff opens with its title, not a heading.
+            if name != "handoff" && last > 0 && lines[last - 1].trim_end().ends_with(':') && lines.get(last).is_none_or(|l| act(l)) {
+                lines.remove(last - 1);
             }
             blocks[i].1 = lines.concat();
         }
@@ -512,7 +509,8 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
     let todos_head = if todo_rows.is_empty() { "" } else { "Todos:\n" };
     let rows_size = |rows: &[(bool, String)]| rows.iter().map(|(_, l)| chars(l)).sum::<usize>();
     let need_t = if listed("todos") { rows_size(&todo_rows) } else { 0 };
-    let need_b = if listed("backlog") { rows_size(&board_rows) } else { 0 };
+    let hidden_b = crate::backlog::context_hidden(&items);
+    let need_b = if listed("backlog") { rows_size(&board_rows) + if hidden_b > 0 { chars(&format!("+{hidden_b} more, breadcrumb backlog\n")) } else { 0 } } else { 0 };
     // What a digest over budget gives up first: pin lines down to a third of the budget, then todo and board rows, then
     // the handoff text below HANDOFF_MIN, so the hook's cut at the budget never takes the lines that ask the agent to
     // act, which come after them.
@@ -536,8 +534,8 @@ pub fn context_with(v: &Vault, project: Option<&str>, opts: ContextOpts) -> Resu
         };
         (pins, t, b)
     };
-    let todos = format!("{todos_head}{}", fit_rows(&todo_rows, room_t, "breadcrumb list -k todo"));
-    let backlog = format!("{board_head}{}{backlog_tail}", fit_rows(&board_rows, room_b, "breadcrumb backlog"));
+    let todos = format!("{todos_head}{}", fit_rows(&todo_rows, room_t, 0, "breadcrumb list -k todo"));
+    let backlog = format!("{board_head}{}{backlog_tail}", fit_rows(&board_rows, room_b, hidden_b, "breadcrumb backlog"));
     let parts = [("workflows", &workflows), ("pins", &pins), ("handoffs", &others), ("prefs", &prefs_text), ("machine", &machine_text), ("landing", &landing), ("todos", &todos), ("backlog", &backlog), ("recent", &global_more)];
     let fixed = chars(&head) + chars(no_notes) + chars(&judge) + chars(&answered) + chars(&review) + parts.iter().filter(|(n, _)| listed(n)).map(|(_, s)| chars(s)).sum::<usize>();
     let mut left = budget.saturating_sub(fixed);

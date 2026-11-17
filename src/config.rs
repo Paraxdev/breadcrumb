@@ -280,8 +280,9 @@ pub fn overrides_line(v: &Vault, slug: &str, mcp: bool) -> Option<String> {
         Err(e) => return Some(format!("Project {slug} (detected here) overrides nothing, {e}\n")),
     };
     let base = table(&v.config).ok()?;
-    let set: Vec<String> = SETTINGS.iter().filter_map(|d| over.get(d.key).filter(|x| skip_reason(&base, d.key, x).is_none()).map(|x| format!("{} = {}", d.key, shown(Some(x))))).collect();
-    let ignored: Vec<String> = over.iter().filter_map(|(k, x)| skip_reason(&base, k, x).map(|why| format!("{k} = {} ({why})", shown(Some(x))))).collect();
+    let skip = |k: &str, x: &toml::Value| skip_reason(&base, k, x).or_else(|| (k == "default_kind" && x.as_str().is_some_and(|n| v.require_kind(n).is_err())).then(|| "it names no kind".to_string()));
+    let set: Vec<String> = SETTINGS.iter().filter_map(|d| over.get(d.key).filter(|x| skip(d.key, x).is_none()).map(|x| format!("{} = {}", d.key, shown(Some(x))))).collect();
+    let ignored: Vec<String> = over.iter().filter_map(|(k, x)| skip(k, x).map(|why| format!("{k} = {} ({why})", shown(Some(x))))).collect();
     if set.is_empty() && ignored.is_empty() {
         return None;
     }
@@ -393,11 +394,16 @@ fn checked(v: &Vault, key: &str, raw: &str) -> Result<(Config, Option<toml::Valu
     Ok((cfg, val))
 }
 
+/// Writes the version and the settings that differ from their default, so a later change of a default still
+/// reaches this vault.
 fn save_vault(v: &mut Vault, cfg: Config, msg: &str) -> Result<()> {
     let _g = v.lock()?;
+    let def = table(&Config::default())?;
+    let kept: toml::Table = table(&cfg)?.into_iter().filter(|(k, val)| k == "version" || def.get(k) != Some(val)).collect();
+    let p = v.root.join(CONFIG_FILE);
+    crate::util::atomic_write(&p, toml::to_string_pretty(&kept)?.as_bytes())?;
     v.config = cfg;
-    v.save_config()?;
-    v.commit(&[v.root.join(CONFIG_FILE)], msg)?;
+    v.commit(&[p], msg)?;
     Ok(())
 }
 
@@ -486,7 +492,7 @@ pub fn change_text(key: &str, project: Option<&str>, before: &str, after: &str) 
 
 /// The MCP `project` tool's action config: list, read one, or set one, for `slug` when given.
 pub fn mcp(v: &Vault, slug: Option<&str>, key: Option<&str>, value: Option<&str>, detected: Option<&str>) -> Result<String> {
-    let slug = slug.map(str::trim).filter(|s| !s.is_empty());
+    let slug = slug.map(str::trim).filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("global") && !s.eq_ignore_ascii_case("all"));
     match (key.map(str::trim).filter(|k| !k.is_empty()), value) {
         (None, _) => {
             let mut s = text(&settings(v, slug)?, slug, true);

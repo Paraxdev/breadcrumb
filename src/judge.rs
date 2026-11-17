@@ -90,6 +90,19 @@ pub fn current_kind(mut k: KindDef) -> KindDef {
     k
 }
 
+/// Verdict words a hand edit added to the judgment kind file, the load drops them since the verdict field is built in.
+pub fn dropped_verdicts_text(v: &Vault) -> Option<String> {
+    let p = v.kinds_dir().join(format!("{JUDGMENT}.toml"));
+    let k = std::fs::read_to_string(&p).ok().and_then(|s| KindDef::from_toml(&s).ok())?;
+    let extra: Vec<&str> = k.field("verdict")?.values.iter().map(String::as_str).filter(|x| !STORED.contains(x)).collect();
+    let words = match extra.as_slice() {
+        [] => return None,
+        [one] => format!("verdict {one} is"),
+        more => format!("verdicts {} are", more.join(", ")),
+    };
+    Some(format!("{words} not used, the verdict field of judgment is built in ({}), `breadcrumb judge` and the digest count by it", STORED.join(", ")))
+}
+
 /// Rewrites a judgment kind file that predates unrated. Call while holding the lock.
 pub fn upgrade_kind_file(v: &Vault) -> Result<Option<PathBuf>> {
     let p = v.kinds_dir().join(format!("{JUDGMENT}.toml"));
@@ -177,7 +190,8 @@ pub fn add(v: &Vault, mut req: AddReq) -> Result<Judged> {
         let project = home(v).or_else(|| req.project.clone());
         let text = req.body.as_deref().map(str::trim).filter(|b| !b.is_empty()).unwrap_or(&req.title).to_string();
         if let Some(note) = count_held(v, project.as_deref(), &about, &text)? {
-            return Ok(Judged { note, counted: true, slug_note: None });
+            let slug_note = req.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| format!("slug {s} not used, the judgment was counted on {}, no note was added", note.handle()));
+            return Ok(Judged { note, counted: true, slug_note });
         }
     }
     let (note, slug_note) = ops::add_held(v, req)?;

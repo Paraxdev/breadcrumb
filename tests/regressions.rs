@@ -329,7 +329,7 @@ fn mcp_duplicate_hint_needs_two_shared_title_words_and_lists_exact_titles_first(
     assert!(text(&out[3]).contains("possible duplicates"), "{}", text(&out[3]));
     let first_dup = text(&out[2]).split_whitespace().nth(2).unwrap().to_string();
     let last = text(&out[8]);
-    let hint = last.lines().nth(1).unwrap_or_default();
+    let hint = last.lines().find(|l| l.starts_with("possible duplicates")).unwrap_or_default();
     let first_hint = hint.split_once(": ").map(|x| x.1).unwrap_or_default();
     assert!(first_hint.starts_with(&format!("{first_dup} \"conc lexer pass\"")), "{last}");
     assert_eq!(hint.matches('"').count(), 4, "at most 2 similar notes: {last}");

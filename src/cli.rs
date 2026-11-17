@@ -527,15 +527,15 @@ pub enum Cmd {
         #[arg(long, short = 'p', value_name = "SLUG")]
         project: Option<String>,
     },
-    /// Ask the user a question about an item, an open question locks the item until it is answered. `questions` lists, `answer` and `unask` close
+    /// Ask the user a question about an item, an open question locks the item until it is answered (--soft leaves it open). Without an item id the question goes on a new idea. `questions` lists, `answer` and `unask` close
     #[command(visible_alias = "question")]
     Ask {
-        /// Item id
+        /// Item id, or the question itself when no item is given
         id: String,
         /// The question
         #[arg(allow_hyphen_values = true)]
-        text: String,
-        /// Answer option as `label: description`, two to four (repeatable)
+        text: Option<String>,
+        /// Answer option as `label: description`, two to six (repeatable)
         #[arg(long = "option", short = 'o')]
         options: Vec<String>,
         /// More than one option may be picked
@@ -544,11 +544,15 @@ pub enum Cmd {
         /// The user may answer in free text too
         #[arg(long)]
         free: bool,
+        /// Leave the item open for claims and `next` while the user answers
+        #[arg(long)]
+        soft: bool,
         /// Who did it, for the history (default: this session)
         #[arg(long)]
         by: Option<String>,
-        #[command(flatten)]
-        _p: IgnoredProject,
+        /// Project of the idea a question without an item goes on (default: detected from the current directory)
+        #[arg(long, short = 'p', value_name = "SLUG")]
+        project: Option<String>,
     },
     /// List the open questions (--answered adds answers no agent acknowledged yet)
     Questions {
@@ -567,6 +571,9 @@ pub enum Cmd {
         /// Answer in free text, when the question allows it
         #[arg(long)]
         text: Option<String>,
+        /// Correct an answer already given
+        #[arg(long)]
+        replace: bool,
         #[command(flatten)]
         scope: ScopeArgs,
         /// Who did it, for the history (default: this session)
@@ -1336,8 +1343,18 @@ impl Out {
 }
 
 pub fn main_entry() -> i32 {
+    use clap::CommandFactory;
     crate::upgrade::cleanup_old_exes();
-    let cli = match Cli::try_parse() {
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    let eager = crate::forgive::eager(&Cli::command(), &args);
+    if let Some(r) = &eager {
+        eprintln!("note: read as `{}`", crate::forgive::line(r));
+    }
+    let parsed = match eager {
+        Some(r) => Cli::try_parse_from(std::iter::once("breadcrumb".to_string()).chain(r)),
+        None => Cli::try_parse(),
+    };
+    let cli = match parsed {
         Ok(c) => c,
         Err(e) => match forgiven(&e) {
             Ok(c) => c,
@@ -1357,7 +1374,7 @@ pub fn main_entry() -> i32 {
             } else {
                 eprintln!("error: {e:#}");
             }
-            1
+            if e.downcast_ref::<UsageError>().is_some() { 2 } else { 1 }
         }
     }
 }
@@ -1505,7 +1522,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             let (n, slug_note) = if judgment {
                 let j = crate::judge::add(&v, req)?;
                 if j.counted {
-                    out.emit(j.text(), j.json());
+                    let mut text = j.text();
+                    if let Some(m) = &j.slug_note {
+                        text.push_str(&format!("\n{m}"));
+                    }
+                    out.emit(text, j.json());
                     return Ok(0);
                 }
                 (j.note, j.slug_note)
@@ -1937,10 +1958,17 @@ pub fn run(cli: Cli) -> Result<i32> {
                 out.emit(format!("claimed {}\n{notice}", backlog::item_summary(&n)), n.to_json());
             }
         }
-        Cmd::Ask { id, text, options, multi, free, by, .. } => {
-            let req = question::AskReq { id, text, options: question::parse_options(&options), multi, free, by };
-            let (n, q) = question::ask(&open()?, req)?;
-            out.emit(format!("asked {}, {} is waiting on the user until `breadcrumb answer {}`", question::qid(&n, &q), n.id, question::qid(&n, &q)), n.to_json());
+        Cmd::Ask { id, text, options, multi, free, soft, by, project } => {
+            let v = open()?;
+            let (id, text) = match text {
+                Some(t) => (Some(id), t),
+                None if v.get(&id).is_ok_and(|n| backlog::is_item(&n)) => bail!("{id} is an item, give the question after it: `breadcrumb ask {id} \"...\"`"),
+                None => (None, id),
+            };
+            let project = if id.is_none() { ops::target_project(&v, project.as_deref(), false, &cwd)? } else { None };
+            let req = question::AskReq { id, text, options: question::parse_options(&options), multi, free, soft, by, project };
+            let (n, q) = question::ask(&v, req)?;
+            out.emit(question::asked_line(&n, &q), n.to_json());
         }
         Cmd::Questions { scope, answered } => {
             let v = open()?;
@@ -1950,6 +1978,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             for (n, q) in &open_qs {
                 text.push_str(&question::render(n, q));
             }
+            let elsewhere = question::elsewhere_line(&v.load_notes(), &notes);
+            if text.is_empty() && !elsewhere.is_empty() {
+                text.push_str("no open questions here, ");
+            }
+            text.push_str(&elsewhere);
             let unseen: Vec<&Note> = notes.iter().filter(|n| question::answered_unseen(n)).collect();
             if answered {
                 for n in &unseen {
@@ -1962,13 +1995,13 @@ pub fn run(cli: Cli) -> Result<i32> {
             let data = json!({"open": open_qs.iter().map(|(n, q)| json!({"qid": question::qid(n, q), "item": n.id, "question": q})).collect::<Vec<_>>(), "unseen_answers": unseen.iter().map(|n| n.id.clone()).collect::<Vec<_>>()});
             out.emit(text, data);
         }
-        Cmd::Answer { qid, choices, text, scope, by } => {
+        Cmd::Answer { qid, choices, text, replace, scope, by } => {
             let v = open()?;
             let by = by.unwrap_or_else(|| backlog::DEFAULT_ACTOR.to_string());
             match qid {
                 Some(qid) => {
                     let picks = question::parse_choices(&choices)?;
-                    let (n, q) = question::answer(&v, &qid, &picks, text.as_deref(), &by)?;
+                    let (n, q) = question::answer(&v, &qid, &picks, text.as_deref(), &by, replace)?;
                     out.emit(format!("answered {}: {}", question::qid(&n, &q), q.answer_text()), n.to_json());
                 }
                 None => return answer_walk(&out, &v, &scope, &cwd, &by),
@@ -2135,7 +2168,15 @@ pub fn run(cli: Cli) -> Result<i32> {
                     let sc = ops::resolve_scope(&v, &scope.sel(), &cwd)?;
                     let items = backlog::review_items(&v, &sc)?;
                     let review_by = crate::config::effective(&v, sc.project()).review_by;
-                    out.emit(backlog::review_text(&items, &sc.label(), |p| crate::config::agent_review(&v, sc.project().or(p))), json!({"scope": sc.label(), "review_by": review_by, "items": items}));
+                    let rows: Vec<serde_json::Value> = items
+                        .iter()
+                        .map(|i| {
+                            let mut j = json!(i);
+                            j["review_by"] = json!(crate::config::effective(&v, sc.project().or(i.project.as_deref())).review_by);
+                            j
+                        })
+                        .collect();
+                    out.emit(backlog::review_text(&items, &sc.label(), |p| crate::config::agent_review(&v, sc.project().or(p))), json!({"scope": sc.label(), "review_by": review_by, "items": rows}));
                     return Ok(0);
                 }
                 Some(ReviewCmd::Pass { ids, by, evidence, steps, .. }) => {
@@ -2231,7 +2272,7 @@ fn emit_moves(out: &Out, results: &[(String, Result<backlog::MoveResult>)], js: 
     if failed == 0 {
         return 0;
     }
-    eprintln!("error: {failed} of {} moves failed, the others are done", results.len());
+    eprintln!("error: {}", backlog::batch_failed_text(failed, results.len()));
     1
 }
 
@@ -2248,10 +2289,22 @@ fn not_a_flag(text: &str, usage: &str) -> Result<()> {
     let flag = text.split([' ', '=', '\n']).next().unwrap_or_default();
     let looks = flag.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()));
     if looks && !std::env::args().any(|a| a == "--") {
-        bail!("unknown flag {flag}, text that starts with -- goes last, after a lone --: `breadcrumb {usage} -- \"{flag} ...\"`");
+        return Err(UsageError(format!("unknown flag {flag}, text that starts with -- goes last, after a lone --: `breadcrumb {usage} -- \"{flag} ...\"`")).into());
     }
     Ok(())
 }
+
+/// A refusal of the command line itself, which exits 2 as clap's own do.
+#[derive(Debug)]
+struct UsageError(String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
 
 /// A command line clap refused, read the way an agent meant it (a note on stderr says how), or the error with the
 /// nearest valid line.
@@ -2295,9 +2348,6 @@ fn forgiven(e: &clap::Error) -> std::result::Result<Cli, i32> {
 fn mistyped_flag() -> Option<(String, String)> {
     use clap::CommandFactory;
     let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
-    if args.iter().any(|a| a == "--") {
-        return None;
-    }
     let root = Cli::command();
     let mut at = 0;
     while args.get(at).is_some_and(|a| a.starts_with('-')) {
@@ -2309,6 +2359,9 @@ fn mistyped_flag() -> Option<(String, String)> {
     }
     let mut rest = args[at + 1..].iter();
     while let Some(t) = rest.next() {
+        if t == "--" {
+            return None;
+        }
         match value_follows(&[&root, sub], t) {
             Some(true) => {
                 rest.next();
@@ -2316,7 +2369,8 @@ fn mistyped_flag() -> Option<(String, String)> {
             Some(false) => {}
             None => {
                 let flag = t.split('=').next().unwrap_or_default();
-                if flag != "--help" && flag.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()) && !r.contains(char::is_whitespace)) {
+                let short = flag.len() == 2 && flag.starts_with('-') && flag.chars().nth(1).is_some_and(|c| c.is_ascii_alphabetic());
+                if flag != "--help" && (short || flag.strip_prefix("--").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()) && !r.contains(char::is_whitespace))) {
                     return Some((format!("unknown flag {flag}, `breadcrumb {} --help` lists the flags, and text that starts with -- goes last, after a lone --", sub.get_name()), t.clone()));
                 }
             }
@@ -2413,7 +2467,11 @@ fn project_cmd(out: &Out, v: &Vault, pc: ProjectCmd, cwd: &Path) -> Result<()> {
         }
         ProjectCmd::Add { slug, name, description, paths } => {
             let (p, created) = ops::project_add(v, &slug, name.as_deref(), description.as_deref(), &paths)?;
-            out.emit(format!("{} project {}", if created { "created" } else { "updated" }, p.slug), format::project_json(&p));
+            let mut text = format!("{} project {}", if created { "created" } else { "updated" }, p.slug);
+            for missing in paths.iter().filter(|x| !Path::new(x).is_dir()) {
+                text.push_str(&format!("\nnote: {missing} is no directory on this machine, kept for a checkout elsewhere, `breadcrumb project link {} --path <dir>` binds the right one", p.slug));
+            }
+            out.emit(text, format::project_json(&p));
         }
         ProjectCmd::Link { slug, description, path, r#move } => {
             let dir = path.unwrap_or_else(|| cwd.to_path_buf());
@@ -2487,9 +2545,10 @@ fn map_cmd(out: &Out, v: &Vault, mc: MapCmd, cwd: &Path) -> Result<()> {
 }
 
 /// Notes of the chosen scope, every project and global unless a scope flag says otherwise.
+/// The detected project with global notes, every project when none is detected or `-p all` is given.
 fn question_scope(v: &Vault, scope: &ScopeArgs, cwd: &Path) -> Result<Vec<Note>> {
     let mut sel = scope.sel();
-    sel.all = sel.all || (sel.project.is_none() && !sel.global);
+    sel.all = sel.all || (sel.project.is_none() && !sel.global && v.detect_project(cwd).is_none());
     let sc = ops::resolve_scope(v, &sel, cwd)?;
     ops::filter_notes(v.load_notes(), &sc, &ops::Filter::default())
 }
@@ -2530,7 +2589,7 @@ fn answer_walk(out: &Out, v: &Vault, scope: &ScopeArgs, cwd: &Path, by: &str) ->
                 Ok(p) => (p, None),
                 Err(_) => (vec![], Some(line)),
             };
-            match question::answer(v, &question::qid(n, q), &picks, text, by) {
+            match question::answer(v, &question::qid(n, q), &picks, text, by, false) {
                 Ok((_, a)) => {
                     println!("recorded: {}", a.answer_text());
                     done += 1;

@@ -21,7 +21,7 @@ fn opts(labels: &[&str]) -> Vec<Opt> {
 }
 
 fn ask(v: &Vault, id: &str, text: &str, multi: bool, free: bool) -> String {
-    let req = AskReq { id: id.into(), text: text.into(), options: opts(&["red", "blue", "green"]), multi, free, by: Some("agent-1".into()) };
+    let req = AskReq { id: Some(id.to_string()), text: text.into(), options: opts(&["red", "blue", "green"]), multi, free, by: Some("agent-1".into()), soft: false, project: None };
     let (n, q) = question::ask(v, req).unwrap();
     question::qid(&n, &q)
 }
@@ -64,13 +64,13 @@ fn answering_unlocks_the_item_and_next_returns_it_first() {
     v.write_note(&mut top).unwrap();
     let qid = ask(&v, &a, "Which colour?", false, true);
 
-    assert!(err(question::answer(&v, &qid, &[], None, "user")).contains("pick an option"));
-    assert!(err(question::answer(&v, &qid, &[1, 2], None, "user")).contains("single"));
-    assert!(err(question::answer(&v, &qid, &[4], None, "user")).contains("3 options"));
-    let (n, q) = question::answer(&v, &qid, &[2], Some("but darker"), "user").unwrap();
+    assert!(err(question::answer(&v, &qid, &[], None, "user", false)).contains("pick an option"));
+    assert!(err(question::answer(&v, &qid, &[1, 2], None, "user", false)).contains("single"));
+    assert!(err(question::answer(&v, &qid, &[4], None, "user", false)).contains("3 options"));
+    let (n, q) = question::answer(&v, &qid, &[2], Some("but darker"), "user", false).unwrap();
     assert_eq!(q.answer_text(), "blue, but darker");
     assert!(!question::locked(&n) && question::answered_unseen(&n));
-    assert!(err(question::answer(&v, &qid, &[1], None, "user")).contains("already answered"));
+    assert!(err(question::answer(&v, &qid, &[1], None, "user", false)).contains("already answered"));
 
     let (first, notice) = backlog::next_notice(&v, &app(), None, None, None).unwrap().unwrap();
     assert_eq!(first.id, a, "an answered item beats a p0 item");
@@ -92,7 +92,7 @@ fn a_built_item_gets_the_adjust_hint_and_an_explicit_ack_clears_the_flag() {
     let (_d, v) = common::vault();
     let a = common::add(&v, "Palette", "task", Some("app"), &[("state", "review")]).id;
     let qid = ask(&v, &a, "Keep red?", false, false);
-    question::answer(&v, &qid, &[1], None, "user").unwrap();
+    question::answer(&v, &qid, &[1], None, "user", false).unwrap();
 
     let (n, notice) = backlog::next_notice(&v, &app(), None, None, None).unwrap().unwrap();
     assert_eq!(n.id, a, "answers on built items come back too");
@@ -108,18 +108,19 @@ fn a_built_item_gets_the_adjust_hint_and_an_explicit_ack_clears_the_flag() {
 fn asks_are_validated_and_withdrawing_unlocks() {
     let (_d, v) = common::vault();
     let a = queued(&v, "Palette");
-    let bad = |options: Vec<Opt>, free| err(question::ask(&v, AskReq { id: a.clone(), text: "Q?".into(), options, multi: false, free, by: None }));
-    assert!(bad(opts(&["one"]), false).contains("2 to 4"));
-    assert!(bad(opts(&["a", "b", "c", "d", "e"]), false).contains("2 to 4"));
+    let bad = |options: Vec<Opt>, free| err(question::ask(&v, AskReq { id: Some(a.clone()), text: "Q?".into(), options, multi: false, free, by: None, soft: false, project: None }));
+    assert!(bad(opts(&["one"]), false).contains("2 to 6"));
+    assert!(bad(opts(&["a", "b", "c", "d", "e", "f", "g"]), false).contains("2 to 6"));
+    assert!(question::ask(&v, AskReq { id: Some(queued(&v, "Six")), text: "Q?".into(), options: opts(&["a", "b", "c", "d", "e", "f"]), multi: false, free: false, by: None, soft: false, project: None }).is_ok());
     assert!(bad(vec![], false).contains("options"));
-    let (_, q) = question::ask(&v, AskReq { id: a.clone(), text: "Why?".into(), options: vec![], multi: false, free: true, by: None }).unwrap();
+    let (_, q) = question::ask(&v, AskReq { id: Some(a.clone()), text: "Why?".into(), options: vec![], multi: false, free: true, by: None, soft: false, project: None }).unwrap();
     assert!(q.free && q.options.is_empty());
 
     let n = question::withdraw(&v, &format!("{a}.1"), "agent").unwrap();
     assert!(!question::locked(&n));
     assert!(err(question::withdraw(&v, &a, "agent")).contains("no open question"));
     let note = common::add(&v, "A plain note", "note", Some("app"), &[]);
-    assert!(err(question::ask(&v, AskReq { id: note.id, text: "Q?".into(), options: opts(&["a", "b"]), multi: false, free: false, by: None })).contains("not a backlog item"));
+    assert!(err(question::ask(&v, AskReq { id: Some(note.id), text: "Q?".into(), options: opts(&["a", "b"]), multi: false, free: false, by: None, soft: false, project: None })).contains("not a backlog item"));
 }
 
 #[test]
@@ -130,7 +131,7 @@ fn the_digest_part_stays_short_with_many_questions() {
         let id = queued(&v, &format!("Item number {i}"));
         let qid = ask(&v, &id, &format!("A rather long question number {i} that keeps going to test the cut of the digest line {}", "x".repeat(200)), false, false);
         if i % 2 == 0 {
-            question::answer(&v, &qid, &[1], None, "user").unwrap();
+            question::answer(&v, &qid, &[1], None, "user", false).unwrap();
         }
     }
     let ctx = ops::context(&v, Some("app"), 15).unwrap();
@@ -155,6 +156,72 @@ fn an_old_vault_without_question_fields_loads_unchanged() {
     let cols = backlog::board(&v, &app(), &BoardFilter::default()).unwrap();
     assert!(cols.iter().find(|c| c.state == backlog::WAITING).unwrap().items.is_empty());
     assert_eq!(question::notice(&n), "");
+}
+
+fn req(id: Option<&str>, text: &str, soft: bool, free: bool) -> AskReq {
+    AskReq { id: id.map(str::to_string), text: text.into(), options: opts(&["red", "blue", "green"]), multi: false, free, by: None, soft, project: Some("app".into()) }
+}
+
+#[test]
+fn a_soft_question_leaves_the_item_open_for_work() {
+    let (_d, v) = common::vault();
+    let a = queued(&v, "Pick the palette");
+    let (n, q) = question::ask(&v, req(Some(&a), "Which colour?", true, false)).unwrap();
+    assert!(!question::locked(&n) && q.open());
+    assert!(question::asked_line(&n, &q).contains("stays open for work"));
+    assert!(question::render(&n, &q).contains("[app]") && question::render(&n, &q).contains("(soft"));
+    assert_eq!(backlog::next(&v, &app(), None, None).unwrap().unwrap().id, a, "next still offers it");
+    backlog::claim(&v, &a, "agent-2", false).unwrap();
+    let cols = backlog::board(&v, &app(), &BoardFilter::default()).unwrap();
+    assert!(cols.iter().find(|c| c.state == backlog::WAITING).unwrap().items.is_empty());
+    question::answer(&v, &question::qid(&n, &q), &[1], None, "user", false).unwrap();
+    assert!(question::answered_unseen(&v.get(&a).unwrap()));
+}
+
+#[test]
+fn a_question_without_an_item_files_an_idea() {
+    let (_d, v) = common::vault();
+    let (n, q) = question::ask(&v, req(None, "Should the board group by project?", false, false)).unwrap();
+    assert_eq!(n.kind, "idea");
+    assert_eq!(n.project.as_deref(), Some("app"));
+    assert!(n.title.starts_with("Question: Should the board"), "{}", n.title);
+    assert_eq!(question::qid(&n, &q), format!("{}.1", n.id));
+    assert!(question::locked(&n));
+}
+
+#[test]
+fn answers_take_numbers_as_text_and_can_be_replaced() {
+    let (_d, v) = common::vault();
+    let a = queued(&v, "Palette");
+    let qid = ask(&v, &a, "Which colour?", false, false);
+    let (_, q) = question::answer(&v, &qid, &[], Some("2"), "user", false).unwrap();
+    assert_eq!(q.answer_text(), "blue");
+    let e = err(question::answer(&v, &qid, &[3], None, "user", false));
+    assert!(e.contains("already answered") && e.contains("--replace"), "{e}");
+    let (n, q) = question::answer(&v, &qid, &[3], None, "user", true).unwrap();
+    assert_eq!(q.answer_text(), "green");
+    assert!(n.body.contains("question 1 answer replaced"), "{}", n.body);
+    let b = queued(&v, "Shade");
+    let qid = ask(&v, &b, "Which shade?", false, false);
+    assert!(err(question::answer(&v, &qid, &[], Some("dark please"), "user", false)).contains("takes no free text"));
+    let qid = ask(&v, &b, "Which tone?", false, true);
+    let (_, q) = question::answer(&v, &qid, &[], Some("7 parts"), "user", false).unwrap();
+    assert_eq!(q.answer_text(), "7 parts");
+}
+
+#[test]
+fn ack_takes_a_question_id_and_the_list_points_elsewhere() {
+    let (_d, v) = common::vault();
+    let a = queued(&v, "Palette");
+    let qid = ask(&v, &a, "Which colour?", false, false);
+    question::answer(&v, &qid, &[1], None, "user", false).unwrap();
+    assert!(question::ack(&v, &qid, "agent").unwrap().is_some());
+    let other = common::add(&v, "Elsewhere", "task", Some("web"), &[("state", "queued")]).id;
+    ask(&v, &other, "Which font?", false, false);
+    let all = v.load_notes();
+    let app_notes: Vec<_> = all.iter().filter(|n| n.project.as_deref() == Some("app")).cloned().collect();
+    assert_eq!(question::elsewhere_line(&all, &app_notes), "1 more open question in other projects, `breadcrumb questions -p all` lists them\n");
+    assert_eq!(question::elsewhere_line(&all, &all), "");
 }
 
 fn call(srv: &Server, args: Value) -> String {

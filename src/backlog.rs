@@ -335,7 +335,7 @@ pub fn claim(v: &Vault, id: &str, by: &str, force: bool) -> Result<Note> {
     if is_closed(&state(&n)) {
         bail!("{} is {}, claims are for open items", n.id, state(&n));
     }
-    if let Some(q) = crate::question::open_questions(&n).first() {
+    if let Some(q) = crate::question::open_questions(&n).iter().find(|q| !q.soft) {
         bail!("{} is waiting on the user, question {}: {}. Work on something else, the user answers with `breadcrumb answer {}`", n.id, crate::question::qid(&n, q), q.text, crate::question::qid(&n, q));
     }
     if held_by_other(&n, Some(&by)).is_some() && !force {
@@ -368,7 +368,7 @@ pub fn release(v: &Vault, id: &str, by: &str, force: bool) -> Result<Option<Note
     let mut n = get_item(v, id)?;
     let Some(holder) = assignee(&n) else { return Ok(None) };
     if held_by_other(&n, Some(&by)).is_some() && !force {
-        bail!("{} is claimed by {}, not {by}, pass force to release it anyway", n.id, holder_name(&n).unwrap_or_default());
+        bail!("{} is claimed by {}, not {}, pass force to release it anyway", n.id, holder_name(&n).unwrap_or_default(), crate::session::holder(&by));
     }
     let what = if is_holder(&n, &by) { "released".to_string() } else { format!("released the claim of {holder}") };
     clear_claim(&mut n);
@@ -1068,12 +1068,16 @@ pub fn check_as(v: &Vault, id: &str, which: &Check, by_user: bool) -> Result<Che
 
 /// One line naming the `user:` steps a session's check left open, empty when it left none.
 pub fn kept_for_user_text(id: &str, kept: &[(usize, String)]) -> String {
+    kept_text("left open for the user", id, kept)
+}
+
+fn kept_text(lead: &str, id: &str, kept: &[(usize, String)]) -> String {
     if kept.is_empty() {
         return String::new();
     }
     let steps: Vec<String> = kept.iter().map(|(i, c)| format!("{i}. {c}")).collect();
     let at: Vec<String> = kept.iter().map(|(i, _)| i.to_string()).collect();
-    format!("left open for the user: {}, only the user ticks these, with a pass on the Review page of `breadcrumb serve` or `breadcrumb check {id} {}` in a terminal of their own\n", steps.join("; "), at.join(","))
+    format!("{lead}: {}, only the user ticks these, with a pass on the Review page of `breadcrumb serve` or `breadcrumb check {id} {}` in a terminal of their own\n", steps.join("; "), at.join(","))
 }
 
 /// What an item in review waits for when agents review it, so a session cannot close it without a verdict.
@@ -1116,7 +1120,8 @@ pub fn user_steps_hold(v: &Vault, before: &Note, after: &Note, by_user: bool) ->
     };
     let had = steps(before, true);
     if let Some(t) = steps(after, true).into_iter().find(|t| !had.contains(t)) {
-        return Some(format!("step '{t}' of {} is the user's, only the user ticks it (review_by = agent), on the Review page of `breadcrumb serve` or with `breadcrumb check` in a terminal of their own", after.id));
+        let how = if is_item(after) { "on the Review page of `breadcrumb serve` or with `breadcrumb check`".to_string() } else { format!("with `breadcrumb update {}`", after.id) };
+        return Some(format!("step '{t}' of {} is the user's, only the user ticks it (review_by = agent), {how} in a terminal of their own", after.id));
     }
     if !is_item(before) || state(before) != "review" {
         return None;
@@ -1768,9 +1773,19 @@ pub fn move_text(r: &MoveResult) -> String {
     if r.replaced > 0 {
         let _ = writeln!(s, "replaced {} open step{} with the ones given, ticked ones stay", r.replaced, if r.replaced == 1 { "" } else { "s" });
     }
-    s.push_str(&kept_for_user_text(&r.note.id, &r.kept_for_user));
+    let rereview = r.from == "review" && r.to == "review";
+    s.push_str(&kept_text(if rereview { "kept the user's open steps, a session cannot drop them" } else { "left open for the user" }, &r.note.id, &r.kept_for_user));
     if !r.unmet.is_empty() {
-        let _ = writeln!(s, "warning: {} acceptance criteria not marked met ([x]), {}:", r.unmet.len(), check_hint(&r.note.id));
+        let open = unmet_numbered(&r.note);
+        let mine: Vec<String> = open.iter().filter(|(_, c)| !is_user_step(c)).map(|(i, _)| i.to_string()).collect();
+        let hint = if mine.is_empty() {
+            "only the user ticks these user: steps".to_string()
+        } else if mine.len() == open.len() {
+            check_hint(&r.note.id)
+        } else {
+            format!("tick yours with `breadcrumb check {} {}` or move check, the user: steps only the user ticks", r.note.id, mine.join(","))
+        };
+        let _ = writeln!(s, "warning: {} acceptance criteria not marked met ([x]), {hint}:", r.unmet.len());
         for (i, c) in unmet_numbered(&r.note) {
             let _ = writeln!(s, "  {i}. {c}");
         }
@@ -1794,6 +1809,10 @@ pub fn user_wait_text(r: &MoveResult) -> Option<String> {
         steps.join("; "),
         r.note.id
     ))
+}
+
+pub fn batch_failed_text(failed: usize, total: usize) -> String {
+    if failed == total { format!("all {total} moves failed") } else { format!("{failed} of {total} moves failed, the others are done") }
 }
 
 pub fn check_hint(id: &str) -> String {
@@ -1968,6 +1987,17 @@ pub fn in_digest(n: &Note) -> bool {
 }
 
 /// Compact backlog lines for the context digest, empty when the scope has no items.
+const CONTEXT_QUEUED: usize = 5;
+
+fn listed_queued(n: &Note) -> bool {
+    state(n) == "queued" && !crate::question::locked(n) && being_built(n).is_none()
+}
+
+/// The queued items `context_section` leaves out.
+pub fn context_hidden(scope_notes: &[Note]) -> usize {
+    scope_notes.iter().filter(|n| is_item(n) && listed_queued(n)).count().saturating_sub(CONTEXT_QUEUED)
+}
+
 pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
     let items: Vec<&Note> = scope_notes.iter().filter(|n| is_item(n)).collect();
     if items.is_empty() {
@@ -1997,11 +2027,11 @@ pub fn context_section(scope_notes: &[Note], all: &[Note]) -> String {
             let _ = writeln!(s, "{}", BoardItem::from_note(n, &idx).short());
         }
     }
-    let mut queued: Vec<&Note> = items.iter().copied().filter(|n| state(n) == "queued" && !crate::question::locked(n) && being_built(n).is_none()).collect();
+    let mut queued: Vec<&Note> = items.iter().copied().filter(|n| listed_queued(n)).collect();
     sort_items(&mut queued);
     if !queued.is_empty() {
         s.push_str("Queued (next takes the first unblocked):\n");
-        for n in queued.iter().take(5) {
+        for n in queued.iter().take(CONTEXT_QUEUED) {
             let _ = writeln!(s, "{}", BoardItem::from_note(n, &idx).short());
         }
     }

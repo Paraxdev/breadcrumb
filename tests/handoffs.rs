@@ -287,3 +287,14 @@ fn get_shows_a_long_handoffs_newest_updates_and_full_prints_the_whole_body() {
     }
     assert!(crumb(&v, A, &["get", &brief]).contains("Update 1."), "a short handoff prints whole");
 }
+
+#[test]
+fn a_link_leaves_a_stale_handoff_stale() {
+    let (_d, v) = common::vault();
+    let (old, _) = handoff(&v, A, "Engine state", &[]);
+    age(&v, &old, 30);
+    let was = v.get(&old).unwrap().updated;
+    let other = common::add(&v, "Engine notes", "note", Some("app"), &[]).id;
+    breadcrumb::ops::link(&v, &old, &other, None, false).unwrap();
+    assert_eq!(v.get(&old).unwrap().updated, was);
+}

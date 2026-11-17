@@ -152,8 +152,8 @@ impl Server {
 
     fn scope(&self, v: &Vault, a: &Map<String, Value>) -> Result<ops::Scope> {
         let p = s(a, "project");
-        let is = |x: &str| p.as_deref() == Some(x);
-        let sel = ScopeSel { project: p.clone().filter(|p| p != "global" && p != "all"), global: b(a, "global") || is("global"), all: b(a, "all") || is("all") };
+        let is = |x: &str| p.as_deref().is_some_and(|p| p.trim().eq_ignore_ascii_case(x));
+        let sel = ScopeSel { project: p.clone().filter(|_| !is("global") && !is("all")), global: b(a, "global") || is("global"), all: b(a, "all") || is("all") };
         ops::resolve_scope(v, &sel, &self.cwd_of(a))
     }
 
@@ -171,9 +171,11 @@ impl Server {
                         .collect(),
                     _ => vec![],
                 };
-                let req = question::AskReq { id: req_s(a, "id")?, text: req_s(a, "text")?, options, multi: b(a, "multi"), free: b(a, "free"), by };
+                let id = s(a, "id");
+                let project = if id.is_none() { self.target_project(v, a)? } else { None };
+                let req = question::AskReq { id, text: req_s(a, "text")?, options, multi: b(a, "multi"), free: b(a, "free"), soft: b(a, "soft"), by, project };
                 let (n, q) = question::ask(v, req)?;
-                Ok(format!("asked {}, {} is locked until the user answers, pick other work", question::qid(&n, &q), n.id))
+                Ok(question::asked_line(&n, &q))
             }
             "answer" => {
                 let tokens: Vec<String> = match a.get("choices") {
@@ -181,7 +183,8 @@ impl Server {
                     Some(x) => vec![s_of(x)],
                     None => vec![],
                 };
-                let (n, q) = question::answer(v, &req_s(a, "id")?, &question::parse_choices(&tokens)?, s(a, "answer").as_deref(), by.as_deref().unwrap_or("user"))?;
+                let text = s(a, "answer").or_else(|| s(a, "text"));
+                let (n, q) = question::answer(v, &req_s(a, "id")?, &question::parse_choices(&tokens)?, text.as_deref(), by.as_deref().unwrap_or("user"), b(a, "replace"))?;
                 Ok(format!("answered {}: {}", question::qid(&n, &q), q.answer_text()))
             }
             "ack" => Ok(match question::ack(v, &req_s(a, "id")?, by.as_deref().unwrap_or("agent"))? {
@@ -190,13 +193,19 @@ impl Server {
             }),
             "withdraw" => Ok(format::ack("withdrew the question on", &question::withdraw(v, &req_s(a, "id")?, by.as_deref().unwrap_or("agent"))?)),
             "list" => {
-                let has_scope = s(a, "project").is_some() || b(a, "global");
-                let notes = if has_scope { ops::filter_notes(v.load_notes(), &self.scope(v, a)?, &Filter::default())? } else { v.load_notes() };
+                let has_scope = s(a, "project").is_some() || b(a, "global") || v.detect_project(&self.cwd_of(a)).is_some();
+                let all = v.load_notes();
+                let notes = if has_scope { ops::filter_notes(all.clone(), &self.scope(v, a)?, &Filter::default())? } else { all.clone() };
                 let mut text: String = question::open_in(&notes).iter().map(|(n, q)| question::render(n, q)).collect();
                 for n in notes.iter().filter(|n| question::answered_unseen(n)) {
                     text.push_str(&question::notice(n));
                 }
-                Ok(if text.is_empty() { "no open questions".to_string() } else { text })
+                let elsewhere = question::elsewhere_line(&all, &notes);
+                Ok(match (text.is_empty(), elsewhere.is_empty()) {
+                    (true, true) => "no open questions".to_string(),
+                    (true, false) => format!("no open questions here, {}", elsewhere.trim_end()),
+                    _ => text + &elsewhere,
+                })
             }
             other => bail!("action must be ask, list, answer, ack or withdraw, got '{other}'"),
         }
@@ -204,13 +213,13 @@ impl Server {
 
     fn target_project(&self, v: &Vault, a: &Map<String, Value>) -> Result<Option<String>> {
         let p = s(a, "project");
-        let global = b(a, "global") || p.as_deref() == Some("global");
-        ops::target_project(v, p.as_deref().filter(|p| *p != "global"), global, &self.cwd_of(a))
+        let global = b(a, "global") || p.as_deref().is_some_and(|p| p.trim().eq_ignore_ascii_case("global"));
+        ops::target_project(v, p.as_deref().filter(|_| !global), global, &self.cwd_of(a))
     }
 
     /// Project the rows are relative to: an explicit slug, else the one detected from cwd.
     fn current(&self, v: &Vault, a: &Map<String, Value>) -> Option<String> {
-        match s(a, "project").as_deref() {
+        match s(a, "project").map(|p| if matches!(p.trim().to_ascii_lowercase().as_str(), "all" | "global") { p.trim().to_ascii_lowercase() } else { p }).as_deref() {
             Some("global") => None,
             Some("all") | None if b(a, "global") => None,
             Some("all") | None => v.detect_project(&self.cwd_of(a)),
@@ -224,20 +233,37 @@ impl Server {
         Ok(notes.iter().fold(out, |o, m| format!("{o}\n{m}")))
     }
 
-    /// Kind fields given beside `fields` on add or update, a top-level status naming a backlog state too, moved
-    /// into `fields`.
+    /// Kind fields given beside `fields` on add or update moved into it, keys meant as another renamed, and a key
+    /// only other kinds have dropped with a note saying so.
     fn top_level_fields(&self, name: &str, a: &Map<String, Value>) -> (Map<String, Value>, Vec<String>) {
         let mut a = a.clone();
         let mut notes = vec![];
-        if !matches!(name, "add" | "update") {
-            return (a, notes);
+        let kind = if matches!(name, "add" | "update") { self.kind_fields(name, &mut a, &mut notes) } else { None };
+        key_aliases(name, &mut a, &mut notes);
+        if let Some(kind) = kind
+            && let Ok(v) = self.vault()
+        {
+            let kinds = v.load_kinds();
+            let (listed, extra) = (schema_keys(name), unlisted(name));
+            for k in a.keys().filter(|k| !listed.contains(k) && !extra.contains(&k.as_str())).cloned().collect::<Vec<_>>() {
+                let with: Vec<&str> = kinds.iter().filter(|d| d.fields.iter().any(|f| f.name == k)).map(|d| d.name.as_str()).collect();
+                if !with.is_empty() {
+                    a.remove(&k);
+                    notes.push(format!("note: {k} not stored, a {kind} has no {k} field, kinds with it: {}", with.join(", ")));
+                }
+            }
         }
-        let Ok(v) = self.vault() else { return (a, notes) };
-        let kind = s(&a, "kind").or_else(|| match name {
-            "update" => s(&a, "id").and_then(|id| v.get(&id).ok()).map(|n| n.kind),
-            _ => Some(crate::config::effective(&v, s(&a, "project").as_deref()).default_kind),
+        (a, notes)
+    }
+
+    /// Kind fields given beside `fields`, moved into it, and the kind they were checked against.
+    fn kind_fields(&self, name: &str, a: &mut Map<String, Value>, notes: &mut Vec<String>) -> Option<String> {
+        let v = self.vault().ok()?;
+        let kind = s(a, "kind").or_else(|| match name {
+            "update" => s(a, "id").and_then(|id| v.get(&id).ok()).map(|n| n.kind),
+            _ => Some(crate::config::effective(&v, s(a, "project").as_deref()).default_kind),
         });
-        let Some(def) = kind.and_then(|k| v.load_kinds().into_iter().find(|d| d.name == k.trim())) else { return (a, notes) };
+        let def = kind.and_then(|k| v.load_kinds().into_iter().find(|d| d.name == k.trim()))?;
         let has = |f: &str| def.fields.iter().any(|d| d.name == f);
         let listed = schema_keys(name);
         let mut moved = Map::new();
@@ -265,7 +291,7 @@ impl Server {
                 f.entry(k).or_insert(val);
             }
         }
-        (a, notes)
+        Some(def.name)
     }
 
     fn run_tool(&self, name: &str, a: &Map<String, Value>) -> Result<String> {
@@ -662,7 +688,7 @@ fn move_many(v: &Vault, a: &Map<String, Value>) -> Result<String> {
         })
         .collect();
     if failed > 0 {
-        out.push(format!("{failed} of {} moves failed, the others are done", results.len()));
+        out.push(backlog::batch_failed_text(failed, results.len()));
     }
     Ok(out.join("\n"))
 }
@@ -875,6 +901,55 @@ fn unlisted(name: &str) -> Vec<&'static str> {
     own.split_whitespace().chain(["cwd", "project", "global"]).collect()
 }
 
+/// Keys agents reach for and the key they meant, per tool or for any tool ("*"), used only when the tool takes the
+/// meant key and not the given one.
+const KEY_ALIASES: &[(&str, &str, &str)] = &[
+    ("map", "id", "area"),
+    ("map", "name", "area"),
+    ("map", "target", "targets"),
+    ("map", "line", "lines"),
+    ("question", "qid", "id"),
+    ("question", "question", "text"),
+    ("question", "choice", "choices"),
+    ("land", "commit", "sha"),
+    ("*", "item", "id"),
+    ("*", "item_id", "id"),
+    ("*", "note_id", "id"),
+    ("*", "type", "kind"),
+    ("*", "status", "state"),
+    ("add", "text", "body"),
+    ("add", "content", "body"),
+    ("add", "description", "body"),
+    ("update", "text", "body"),
+    ("update", "content", "body"),
+    ("update", "description", "body"),
+    ("append", "body", "text"),
+    ("append", "content", "text"),
+    ("append", "message", "text"),
+    ("search", "text", "query"),
+    ("search", "q", "query"),
+    ("*", "reason", "resolution"),
+    ("*", "labels", "tags"),
+    ("*", "tag", "tags"),
+];
+
+/// Renames keys the tool does not take to the key they were meant as, with a note.
+fn key_aliases(name: &str, a: &mut Map<String, Value>, notes: &mut Vec<String>) {
+    let listed = schema_keys(name);
+    let extra = unlisted(name);
+    let takes = |k: &str| listed.iter().any(|l| l == k) || extra.contains(&k);
+    for k in a.keys().filter(|k| !takes(k)).cloned().collect::<Vec<_>>() {
+        let Some((_, _, to)) = KEY_ALIASES.iter().find(|(t, from, to)| (*t == name || *t == "*") && *from == k && takes(to)) else { continue };
+        if a.contains_key(*to) {
+            continue;
+        }
+        if let Some(val) = a.remove(&k) {
+            notes.push(format!("note: {k} read as {to}"));
+            a.insert(to.to_string(), val);
+        }
+    }
+}
+
 /// Arguments the tool does not read, each with the nearest one it does.
 fn unknown_keys(name: &str, a: &Map<String, Value>) -> Vec<String> {
     let listed = schema_keys(name);
@@ -1018,15 +1093,18 @@ pub fn tool_defs() -> Vec<Value> {
         })), &["id", "state"])),
         tool("next", "Top free queued item, claim starts it.", obj(with(json!({"project": st()}), json!({"claim": bl(), "by": by()})), &[])),
         tool("claim", "Claim an item, a handoff or track:name, release frees it.", obj(with(id(), json!({"by": by(), "release": bl(), "force": {"type": "boolean", "description": "even if another holds it"}})), &["id"])),
-        tool("question", "Ask the user about an item (locks it), or act on an answer.", obj(json!({
+        tool("question", "Ask the user about an item (locks it unless soft), or act on an answer.", obj(json!({
             "action": {"type": "string", "enum": ["ask", "list", "answer", "ack", "withdraw"]},
-            "id": {"type": "string", "description": "item id, abc123.1 to answer"},
+            "id": {"type": "string", "description": "item id, abc123.1 to answer, none on ask files a new idea"},
             "text": st(),
             "options": {"type": "array", "items": {"type": ["string", "object"]}},
             "multi": bl(),
             "free": bl(),
+            "soft": bl(),
             "choices": {"type": "array", "items": {"type": ["integer", "string"]}},
             "answer": st(),
+            "replace": bl(),
+            "project": st(),
             "by": by(),
         }), &[])),
         tool("backlog", "Board, review list, or tree or deps of one item.", obj(with(json!({"project": st()}), json!({

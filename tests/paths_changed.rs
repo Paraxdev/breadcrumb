@@ -280,3 +280,17 @@ fn brief_marks_the_notes_it_shows() {
     let none = breadcrumb::map::brief(&e.v, "app", &["src/view/overlay.ts".into()], None, breadcrumb::map::BRIEF_BUDGET).unwrap();
     assert!(!none.contains("since verified"), "{none}");
 }
+
+#[test]
+fn a_note_created_after_its_verified_day_counts_from_created_and_says_so() {
+    away_from_midnight();
+    let e = setup();
+    commit(&e.work, "src/a.rs", "base", days_ago(20));
+    let mut n = note(&e.v, Some("app"), "Parser keeps state", &["src/*.rs"], 4);
+    n.set_field("verified", serde_yaml::Value::String(date(10)));
+    e.v.write_note(&mut n).unwrap();
+    commit(&e.work, "src/a.rs", "before it was written", days_ago(6));
+    let after = commit(&e.work, "src/a.rs", "after it was written", days_ago(2));
+    let line = format!("paths changed: 1 commit since created {}, newest {after} \"after it was written\"\n", breadcrumb::util::fmt_date(&days_ago(4)));
+    assert!(get(&e, &n.id).ends_with(&line), "{}", get(&e, &n.id));
+}

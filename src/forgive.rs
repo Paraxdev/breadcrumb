@@ -265,11 +265,22 @@ fn action_flag(root: &Command, args: &[String]) -> Option<Vec<String>> {
     Some(out)
 }
 
-fn mcp_pair(root: &Command, args: &[String]) -> Option<Vec<String>> {
+/// `question <action>`, read before clap sees it, since `question` is also an alias of `ask` and would take the
+/// action word as an item id.
+pub fn eager(root: &Command, args: &[String]) -> Option<Vec<String>> {
+    args.get(first_word(root, args))?.eq_ignore_ascii_case("question").then(|| mcp_pair(root, args)).flatten()
+}
+
+fn first_word(root: &Command, args: &[String]) -> usize {
     let mut at = 0;
     while args.get(at).is_some_and(|a| a.starts_with('-')) {
         at += if crate::cli::value_follows(&[root], &args[at]) == Some(true) { 2 } else { 1 };
     }
+    at
+}
+
+fn mcp_pair(root: &Command, args: &[String]) -> Option<Vec<String>> {
+    let at = first_word(root, args);
     let tool = args.get(at)?.to_ascii_lowercase();
     let action = args.get(at + 1)?.to_ascii_lowercase();
     let (_, _, cli) = MCP_PAIRS.iter().find(|(t, a, _)| *t == tool && *a == action)?;

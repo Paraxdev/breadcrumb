@@ -287,8 +287,8 @@ fn a_digest_over_budget_cuts_todo_and_board_rows_first_and_keeps_the_lines_that_
     }
     let asked = common::add(&v, "Pick the palette", "task", Some("app"), &[("state", "queued")]);
     let options = ["red", "blue"].iter().map(|l| Opt { label: l.to_string(), desc: String::new() }).collect();
-    let (n, q) = question::ask(&v, AskReq { id: asked.id.clone(), text: "Which colour?".into(), options, multi: false, free: false, by: None }).unwrap();
-    question::answer(&v, &question::qid(&n, &q), &[2], None, "user").unwrap();
+    let (n, q) = question::ask(&v, AskReq { id: Some(asked.id.clone()), text: "Which colour?".into(), options, multi: false, free: false, by: None, soft: false, project: None }).unwrap();
+    question::answer(&v, &question::qid(&n, &q), &[2], None, "user", false).unwrap();
     let built = common::add(&v, "Thing to check", "feature", Some("app"), &[]);
     breadcrumb::backlog::move_item(&v, &built.id, breadcrumb::backlog::MoveReq { state: "review".into(), steps: vec!["Run it".into()], by: Some("builder".into()), ..Default::default() }).unwrap();
     let body = "Where it stands. ".repeat(150);
@@ -360,9 +360,9 @@ fn the_cut_to_fit_never_takes_an_answer_that_arrived_or_leaves_a_heading_alone()
         let t = common::add(&v, &format!("Task {i} with a question"), "task", Some("app"), &[("state", "queued")]);
         let options = ["this way", "that way"].iter().map(|l| Opt { label: l.to_string(), desc: String::new() }).collect();
         let text = format!("Question {i}: which of the two ways should this be built, given what the last session found out about it?");
-        let (n, q) = question::ask(&v, AskReq { id: t.id.clone(), text, options, multi: false, free: false, by: None }).unwrap();
+        let (n, q) = question::ask(&v, AskReq { id: Some(t.id.clone()), text, options, multi: false, free: false, by: None, soft: false, project: None }).unwrap();
         if i < 3 {
-            question::answer(&v, &question::qid(&n, &q), &[2], None, "user").unwrap();
+            question::answer(&v, &question::qid(&n, &q), &[2], None, "user", false).unwrap();
         }
     }
     let built = common::add(&v, "Thing to check", "feature", Some("app"), &[]);
@@ -376,7 +376,8 @@ fn the_cut_to_fit_never_takes_an_answer_that_arrived_or_leaves_a_heading_alone()
         assert!(d.contains("Review: 1 waiting for an agent check"), "{budget}: {d}");
         for (i, l) in d.lines().enumerate() {
             let next = d.lines().nth(i + 1).unwrap_or_default();
-            assert!(!["Other live handoffs:", "Todos:", "Pinned (get an id for its body):"].contains(&l) || !(next.is_empty() || next.starts_with("Backlog:") || next.starts_with("Latest handoff") || next.starts_with("[cut to fit")), "{budget}, a heading without rows: {d}");
+            let headings = ["Other live handoffs:", "Todos:", "Pinned (get an id for its body):", "In progress:", "Being built (stored as queued):", "Queued (next takes the first unblocked):"];
+            assert!(!headings.contains(&l) || !(next.is_empty() || next.starts_with("Backlog:") || next.starts_with("Latest handoff") || next.starts_with("[cut to fit") || next.starts_with("answer arrived on")), "{budget}, a heading without rows: {d}");
         }
     }
     let alone = (880..=1000).step_by(10).any(|budget| {
@@ -407,4 +408,17 @@ fn pins_give_up_lines_before_the_board_and_the_handoff_text_when_the_digest_is_f
     assert!(handoff >= 800, "{handoff} chars of handoff\n{d}");
     assert!(d.matches(" decision Decision ").count() <= 20, "pins keep a third of the budget: {d}");
     assert!(d.lines().filter(|l| l.contains(" Feature ")).count() >= 20, "{d}");
+}
+
+#[test]
+fn the_board_more_line_counts_the_queued_items_the_board_never_lists() {
+    let (_d, v) = common::vault();
+    for i in 0..9 {
+        common::add(&v, &format!("Queued task {i}"), "task", Some("app"), &[("state", "queued")]);
+    }
+    let d = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(20000), ..Default::default() }).unwrap();
+    assert!(d.contains("+4 more, breadcrumb backlog"), "{d}");
+    let tight = digest::context_with(&v, Some("app"), ContextOpts { budget: Some(500), ..Default::default() }).unwrap();
+    let shown = tight.lines().filter(|l| l.contains(" Queued task ")).count();
+    assert!(tight.contains(&format!("+{} more, breadcrumb backlog", 9 - shown)), "{tight}");
 }

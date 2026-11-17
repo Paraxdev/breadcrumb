@@ -198,4 +198,9 @@ fn doctor_reports_a_gitignore_that_lets_the_local_directory_through() {
     }
     std::fs::write(v.root.join(".gitignore"), ".local/\n!.local/\n").unwrap();
     assert_eq!(found(&v).len(), 1, "a later negation lets it through again");
+    std::fs::write(v.root.join(".gitignore"), "*.lock\n").unwrap();
+    std::fs::create_dir_all(v.root.join(".git/info")).unwrap();
+    std::fs::write(v.root.join(".git/info/exclude"), ".local/\n").unwrap();
+    let ps = found(&v);
+    assert!(ps.len() == 1 && ps[0].starts_with("warning: `.local/` is ignored only by .git/info/exclude, which another clone"), "{ps:?}");
 }

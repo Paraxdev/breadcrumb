@@ -34,13 +34,16 @@ fn commits(k: usize) -> String {
     if k == 1 { "1 commit".into() } else { format!("{k} commits") }
 }
 
-/// Commits after this time count: `verified_at`, else the start (UTC) of the `verified` day, which is all notes from
+/// Commits from this time on count: `verified_at`, else the start (UTC) of the `verified` day, which is all notes from
 /// older binaries have, so commits from earlier that day count rather than hiding ones made after a verify later that
-/// day, though never before the note was created. A note without `verified` counts from `updated`.
+/// day, though never before the note was created. A note created on a later day counts from `created` and says so, a
+/// note without `verified` counts from `updated`.
 pub fn since(n: &Note) -> (DateTime<Utc>, String) {
-    match n.verified() {
-        Some(day) => (n.verified_at().unwrap_or(day.max(n.created)), format!("verified {}", fmt_date(&day))),
-        None => (n.updated, format!("updated {}", fmt_date(&n.updated))),
+    match (n.verified(), n.verified_at()) {
+        (Some(day), Some(at)) => (at, format!("verified {}", fmt_date(&day))),
+        (Some(day), None) if n.created.date_naive() > day.date_naive() => (n.created, format!("created {}", fmt_date(&n.created))),
+        (Some(day), None) => (day.max(n.created), format!("verified {}", fmt_date(&day))),
+        (None, _) => (n.updated, format!("updated {}", fmt_date(&n.updated))),
     }
 }
 
@@ -80,7 +83,7 @@ pub fn check(dir: &Path, n: &Note, limit: Duration) -> Option<Drift> {
         return None;
     }
     let (after, label) = since(n);
-    let found: Vec<(i64, String, String)> = crate::git::commit_subjects(dir, after, &specs, limit)?.into_iter().filter(|c| c.0 > after.timestamp()).collect();
+    let found: Vec<(i64, String, String)> = crate::git::commit_subjects(dir, after, &specs, limit)?.into_iter().filter(|c| c.0 >= after.timestamp()).collect();
     let (_, sha, subject) = found.first()?.clone();
     Some(Drift { count: found.len(), sha, subject, since: label })
 }
