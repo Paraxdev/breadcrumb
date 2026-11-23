@@ -554,7 +554,32 @@ impl Server {
                     let value = a.get("value").filter(|x| !x.is_null()).map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string()));
                     crate::config::mcp(&v, s(a, "slug").as_deref(), s(a, "key").as_deref(), value.as_deref(), v.detect_project(&self.cwd_of(a)).as_deref())
                 }
-                other => bail!("action must be list, link, config or usage, got '{other}'"),
+                "share" => {
+                    let cwd = self.cwd_of(a);
+                    let repo = s(a, "path").map(PathBuf::from);
+                    let dry = b(a, "dry_run");
+                    match s(a, "mode").as_deref().unwrap_or("status") {
+                        "status" => {
+                            let (x, y) = crate::share::sync_at(&v, repo.as_deref(), &cwd, true)?;
+                            Ok(crate::share::status_text(&x, &y))
+                        }
+                        "sync" => {
+                            let (x, y) = crate::share::sync_at(&v, repo.as_deref(), &cwd, dry)?;
+                            Ok(crate::share::status_text(&x, &y))
+                        }
+                        "pull" => Ok(crate::share::pull_at(&v, repo.as_deref(), &cwd, dry)?.text()),
+                        "push" => {
+                            let opts = crate::share::PushOpts { ids: strs(a, "ids"), dry_run: dry, prune: b(a, "prune") };
+                            Ok(crate::share::push_at(&v, repo.as_deref(), &cwd, &opts)?.text())
+                        }
+                        "init" => {
+                            let r = crate::share::init(&v, s(a, "slug").as_deref(), repo.as_deref(), s(a, "auto").as_deref().unwrap_or("sync"), &cwd)?;
+                            Ok(format!("{} {}/.breadcrumb for project {}\n{}", if r.created { "created" } else { "pushed into" }, r.repo, r.manifest.slug, r.push.text()))
+                        }
+                        other => bail!("mode must be status, sync, pull, push or init, got '{other}'"),
+                    }
+                }
+                other => bail!("action must be list, link, config, usage or share, got '{other}'"),
             },
             "kinds" => match a.get("define") {
                 Some(Value::Object(d)) => {
@@ -871,7 +896,7 @@ const UNLISTED: &[(&str, &str)] = &[
     ("backlog", "kind assignee"),
     ("land", "force by"),
     ("sync", "fix apply"),
-    ("project", "days"),
+    ("project", "days mode dry_run prune ids auto"),
 ];
 
 /// One call that works, per tool or per tool and action.
@@ -901,6 +926,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("project.link", r#"{"action": "link", "slug": "myproj", "path": "D:/dev/myproj"}"#),
     ("project.config", r#"{"action": "config", "key": "digest_budget", "value": "6000"}"#),
     ("project.usage", r#"{"action": "usage", "days": 7}"#),
+    ("project.share", r#"{"action": "share", "mode": "status|sync|pull|push|init", "path": "D:/dev/myproj"}"#),
     ("kinds", r#"{"define": {"name": "runbook", "fields": ["owner:string"]}}"#),
     ("workflow", r#"{"action": "list"}"#),
     ("workflow.save", r#"{"action": "save", "paths": ["flows/check.js"]}"#),
@@ -1170,8 +1196,8 @@ pub fn tool_defs() -> Vec<Value> {
             "id": st(),
             "include_closed": bl(),
         })), &[])),
-        tool("project", "List or link projects, or config: settings, slug for one project.", obj(json!({
-            "action": {"type": "string", "enum": ["list", "link", "config", "usage"]},
+        tool("project", "Projects: list, link, config (slug for one), share .breadcrumb.", obj(json!({
+            "action": {"type": "string", "enum": ["list", "link", "config", "usage", "share"]},
             "slug": st(),
             "path": st(),
             "description": st(),

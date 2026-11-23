@@ -57,11 +57,15 @@ fn output(event: &str, text: &str) -> Result<String> {
 
 /// The SessionStart hook JSON printed to stdout. Records the digest's note ids in the session state.
 pub fn session_start(root: &Path, input: &HookInput, fallback_cwd: &Path) -> Result<String> {
-    let v = Vault::open(root)?;
     let cwd = input.cwd.as_deref().unwrap_or(fallback_cwd);
+    let shared = crate::share::auto_pull(root, cwd);
+    let v = Vault::open(root)?;
     let project = v.detect_project_fast(cwd);
     let recent = crate::digest::recent_rows(&v, project.as_deref(), RECENT);
-    let body = crate::ops::context_with(&v, project.as_deref(), crate::ops::ContextOpts { recent, cwd: Some(cwd.to_path_buf()), ..Default::default() })?;
+    let mut body = crate::ops::context_with(&v, project.as_deref(), crate::ops::ContextOpts { recent, cwd: Some(cwd.to_path_buf()), ..Default::default() })?;
+    if let Some(line) = shared {
+        body.insert_str(body.find('\n').map_or(0, |i| i + 1), &line);
+    }
     let budget = crate::digest::budget_of(&crate::config::effective(&v, project.as_deref()));
     let text = cap(body.trim_end(), budget);
     crate::usage::digest_built(text.chars().count(), budget, text.chars().count() < body.trim_end().chars().count());

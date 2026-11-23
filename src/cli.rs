@@ -802,11 +802,80 @@ pub enum Cmd {
     /// Register breadcrumb hooks in Claude Code settings
     #[command(subcommand)]
     Hooks(HooksCmd),
-    /// Rebuild and reinstall breadcrumb with cargo, safe while other breadcrumb processes run
+    /// Share the project's notes with everyone on its repo through a committed .breadcrumb folder
+    #[command(subcommand)]
+    Share(ShareCmd),
+    /// Update breadcrumb: pull and rebuild the source checkout, or fetch the latest release, safe while other breadcrumb processes run
+    ///
+    /// With a source checkout (the one this binary was built from, or --from) it runs git pull --ff-only there and
+    /// reinstalls with cargo. Without one it downloads the latest GitHub release, and falls back to cargo install --git.
     Upgrade {
         /// breadcrumb source directory (default: the one this binary was built from)
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["release", "git"])]
         from: Option<PathBuf>,
+        /// Install the latest GitHub release binaries, even when a source checkout exists
+        #[arg(long, conflicts_with = "git")]
+        release: bool,
+        /// Build the latest main from GitHub with cargo install --git
+        #[arg(long)]
+        git: bool,
+        /// Rebuild the checkout as it is, without git pull
+        #[arg(long)]
+        no_pull: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ShareCmd {
+    /// Create .breadcrumb in the repo root for the project (or keep the one there) and push its shared notes
+    Init {
+        /// Project slug (default: detected from the current directory)
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Repo root (default: the git checkout of the current directory)
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// sync: pull at session start and push at session end, pull: only pull, off: by hand
+        #[arg(long, default_value = "sync", value_parser = ["sync", "pull", "off"])]
+        auto: String,
+    },
+    /// Write the vault's shared notes of the project into .breadcrumb, a newer repo copy is kept
+    Push {
+        /// Only these notes, any kind
+        ids: Vec<String>,
+        /// Repo root (default: the git checkout of the current directory)
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Show what would change, write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove repo copies of notes that are no longer shared (share: false, or a kind left out)
+        #[arg(long)]
+        prune: bool,
+    },
+    /// Load .breadcrumb notes into the vault, binding the repo to its project on first use
+    Pull {
+        /// Repo root (default: the git checkout of the current directory)
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Show what would change, write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Pull, then push
+    Sync {
+        /// Repo root (default: the git checkout of the current directory)
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Show what would change, write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// What pull and push would change
+    Status {
+        /// Repo root (default: the git checkout of the current directory)
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
     },
 }
 
@@ -1484,6 +1553,8 @@ fn run_hook(vault: Option<&Path>, h: &HookCmd) {
             }
         }
         HookCmd::SessionEnd { no_import } => {
+            let cwd = input().cwd.unwrap_or_else(cwd);
+            let _ = crate::share::auto_push(&root, &cwd);
             if let Ok(v) = Vault::open(&root)
                 && (crate::hooks::needs_sync(&v) || (!no_import && crate::hooks::needs_import(&v.root)) || !crate::lifecycle::sweep_plan(&v).is_empty())
             {
@@ -2324,11 +2395,51 @@ pub fn run(cli: Cli) -> Result<i32> {
             };
             out.emit(format!("{head}{}", hooks_text(&r)), serde_json::to_value(&r)?);
         }
-        Cmd::Upgrade { from } => {
-            let r = crate::upgrade::upgrade(from.as_deref())?;
+        Cmd::Share(sc) => {
+            let v = open()?;
+            let push_line = "commit the .breadcrumb changes with your change, collaborators get them on pull";
+            match sc {
+                ShareCmd::Init { project, repo, auto } => {
+                    let r = crate::share::init(&v, project.as_deref(), repo.as_deref(), &auto, &cwd)?;
+                    let head = if r.created { format!("created {}/.breadcrumb for project {} (auto = {})", r.repo, r.manifest.slug, r.manifest.auto) } else { format!("{}/.breadcrumb already exists, pushed into it", r.repo) };
+                    out.emit(format!("{head}\n{}{push_line}", r.push.text()), serde_json::to_value(&r)?);
+                }
+                ShareCmd::Push { ids, repo, dry_run, prune } => {
+                    let r = crate::share::push_at(&v, repo.as_deref(), &cwd, &crate::share::PushOpts { ids, dry_run, prune })?;
+                    let tail = if r.changed() > 0 && !dry_run { push_line } else { "" };
+                    out.emit(format!("{}{tail}", r.text()), serde_json::to_value(&r)?);
+                }
+                ShareCmd::Pull { repo, dry_run } => {
+                    let r = crate::share::pull_at(&v, repo.as_deref(), &cwd, dry_run)?;
+                    out.emit(r.text(), serde_json::to_value(&r)?);
+                }
+                ShareCmd::Sync { repo, dry_run } => {
+                    let (a, b) = crate::share::sync_at(&v, repo.as_deref(), &cwd, dry_run)?;
+                    out.emit(crate::share::status_text(&a, &b), json!({"pull": a, "push": b}));
+                }
+                ShareCmd::Status { repo } => {
+                    let (a, b) = crate::share::sync_at(&v, repo.as_deref(), &cwd, true)?;
+                    out.emit(crate::share::status_text(&a, &b), json!({"pull": a, "push": b}));
+                }
+            }
+        }
+        Cmd::Upgrade { from, release, git, no_pull } => {
+            let how = if release {
+                crate::upgrade::How::Release
+            } else if git {
+                crate::upgrade::How::Git
+            } else {
+                crate::upgrade::How::Auto { from, pull: !no_pull }
+            };
+            let r = crate::upgrade::run(how)?;
             out.emit(
-                format!("installed breadcrumb from {} to {}
-running MCP and serve processes keep the old version until their client restarts them", r.source, r.exe),
+                format!(
+                    "{}installed breadcrumb {} from {} to {}\nrunning MCP and serve processes keep the old version until their client restarts them",
+                    r.steps.iter().map(|s| format!("{s}\n")).collect::<String>(),
+                    r.version,
+                    r.source,
+                    r.exe
+                ),
                 serde_json::to_value(&r)?,
             );
         }

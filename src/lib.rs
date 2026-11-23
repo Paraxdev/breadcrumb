@@ -33,6 +33,7 @@ pub mod recall;
 pub mod search;
 pub mod serve;
 pub mod session;
+pub mod share;
 pub mod ship;
 pub mod slug;
 pub mod stats;
